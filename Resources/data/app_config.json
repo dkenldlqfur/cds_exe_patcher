@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "update": {
+    "repository": "dkenldlqfur/cds_exe_patcher",
+    "asset_name": "CDS_EXE_Patcher_v{version}.zip",
+    "executable_name": "CDS_EXE_Patcher.exe"
+  }
+}
