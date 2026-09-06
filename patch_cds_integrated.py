@@ -158,6 +158,12 @@ def validate_pirate_variety_settings(settings: PirateVarietySettings) -> None:
 # without rewriting the surrounding code.
 LONG_REST_MAX_VA = 0x460783
 EXPLORATION_PREPARATION_VAS = (0x468759, 0x468785, 0x4770F1, 0x477325)
+# The city-gate confirmation is a literal string, rather than a formatted
+# message.  Keep its displayed number in sync with the four timing operands.
+EXPLORATION_PREPARATION_MESSAGE_VA = 0x551B78
+EXPLORATION_PREPARATION_MESSAGE_SIZE = 0x38
+EXPLORATION_PREPARATION_MESSAGE_PREFIX = "탐험을 떠납니까? 준비하는데 "
+EXPLORATION_PREPARATION_MESSAGE_SUFFIX = "일 걸립니다. 좋습니까?"
 SUCCESSION_MIN_AGE_VA = 0x461AF6
 # The latitude coordinate grows southward: values below 10,000 are north and
 # values at/above 10,000 are south.  The first conditional operand therefore
@@ -1223,6 +1229,41 @@ def _read_gameplay_options_from_data(data: bytes) -> tuple[int, int, int, int, i
         pe.close()
 
 
+def _exploration_preparation_message(days: int) -> bytes:
+    return (
+        f"{EXPLORATION_PREPARATION_MESSAGE_PREFIX}{days}"
+        f"{EXPLORATION_PREPARATION_MESSAGE_SUFFIX}"
+    ).encode("cp949")
+
+
+def _read_exploration_preparation_message_days(data: bytes, pe: pefile.PE) -> int:
+    """Read the number embedded in the city-gate exploration confirmation."""
+    message_offset = pe.get_offset_from_rva(
+        EXPLORATION_PREPARATION_MESSAGE_VA - pe.OPTIONAL_HEADER.ImageBase
+    )
+    message_block = data[message_offset:message_offset + EXPLORATION_PREPARATION_MESSAGE_SIZE]
+    terminator = message_block.find(b"\0")
+    if terminator < 0:
+        raise ValueError("성문 탐험 안내 문구의 끝을 찾지 못했습니다.")
+    try:
+        message = message_block[:terminator].decode("cp949")
+    except UnicodeDecodeError as error:
+        raise ValueError("성문 탐험 안내 문구를 읽지 못했습니다.") from error
+
+    if not (
+        message.startswith(EXPLORATION_PREPARATION_MESSAGE_PREFIX)
+        and message.endswith(EXPLORATION_PREPARATION_MESSAGE_SUFFIX)
+    ):
+        raise ValueError("성문 탐험 안내 문구를 검증하지 못했습니다.")
+    number_text = message[
+        len(EXPLORATION_PREPARATION_MESSAGE_PREFIX):
+        -len(EXPLORATION_PREPARATION_MESSAGE_SUFFIX)
+    ]
+    if not number_text.isdecimal() or not 1 <= int(number_text) <= 127:
+        raise ValueError("성문 탐험 안내 문구의 기간을 검증하지 못했습니다.")
+    return int(number_text)
+
+
 def apply_gameplay_options(
     data: bytearray,
     long_rest_max: int,
@@ -1249,17 +1290,25 @@ def apply_gameplay_options(
         cold_north_limit,
         cold_south_limit,
     )
-    if current == target:
-        return False
-
     pe = pefile.PE(data=bytes(data), fast_load=True)
     try:
+        displayed_days = _read_exploration_preparation_message_days(bytes(data), pe)
+        if current == target and displayed_days == exploration_preparation_days:
+            return False
+
         def offset(va: int) -> int:
             return pe.get_offset_from_rva(va - pe.OPTIONAL_HEADER.ImageBase)
 
         data[offset(LONG_REST_MAX_VA)] = long_rest_max
         for va in EXPLORATION_PREPARATION_VAS:
             data[offset(va)] = exploration_preparation_days
+        message_offset = offset(EXPLORATION_PREPARATION_MESSAGE_VA)
+        message = _exploration_preparation_message(exploration_preparation_days)
+        if len(message) + 1 > EXPLORATION_PREPARATION_MESSAGE_SIZE:
+            raise ValueError("성문 탐험 안내 문구 공간이 부족합니다.")
+        data[message_offset:message_offset + EXPLORATION_PREPARATION_MESSAGE_SIZE] = (
+            message + b"\0" * (EXPLORATION_PREPARATION_MESSAGE_SIZE - len(message))
+        )
         data[offset(SUCCESSION_MIN_AGE_VA)] = succession_min_age
         struct.pack_into("<I", data, offset(COLD_NORTH_LIMIT_VA), cold_north_limit)
         struct.pack_into("<I", data, offset(COLD_SOUTH_LIMIT_VA), cold_south_limit)
@@ -1280,7 +1329,7 @@ def read_settings(
     target: Path,
 ) -> tuple[
     str, tuple[tuple[int, int], ...], int, int, int, int, int, int, int,
-    int, int, int, int, bool, PirateVarietySettings, bool, Decimal, bool,
+    int, int, int, int, int, int, bool, PirateVarietySettings, bool, Decimal, bool,
 ]:
     """Read the settings currently encoded in a selected executable."""
     target = target.resolve(strict=True)

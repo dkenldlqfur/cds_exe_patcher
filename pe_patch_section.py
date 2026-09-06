@@ -23,6 +23,10 @@ MISTRANSLATION_SLOT_OFFSET = 0x400
 MISTRANSLATION_SLOT_SIZE = 0x100
 ECLIPSE_SLOT_OFFSET = 0x500
 ECLIPSE_SLOT_SIZE = 0x100
+# Kaaba Temple spans EXE, DSTILL.CDS and DISEV.CDS.  Its EXE slot keeps the
+# exact pre-injection discovery record and DISEV part needed for safe reversal.
+KAABA_SLOT_OFFSET = 0x600
+KAABA_SLOT_SIZE = 0xA00
 
 
 @dataclass(frozen=True)

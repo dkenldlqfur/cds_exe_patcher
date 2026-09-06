@@ -9,6 +9,15 @@ from tkinter import filedialog, messagebox, ttk
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from app_update import load_update_config
+from kaaba_patch import KaabaPatchError, apply as apply_kaaba_patch, is_enabled as is_kaaba_enabled
+from kaaba_save_patch import KaabaSavePatchError, promote_game_savedata
+from slave_patch import (
+    SlavePatchError,
+    apply_dialogue as apply_slave_dialogue,
+    apply_library_hint as apply_slave_library_hint,
+    is_dialogue_enabled as is_slave_dialogue_enabled,
+    is_library_enabled as is_slave_library_enabled,
+)
 
 from patch_cds_integrated import (
     COLD_LIMIT_DISABLED_VALUE,
@@ -60,6 +69,28 @@ MISTRANSLATION_DETAILS = """by kseokjung, 오쌍, ladyous
 산속 도시 방향 북동쪽 → 북서쪽
 """
 
+KAABA_DETAILS = """카바신전 발견물
+
+- 발견물 ID 672와 카바신전 설명을 활성화합니다.
+- DSTILL.CDS에 카바신전 내장 정지 이미지 1개를 추가합니다.
+- DISEV.CDS의 이벤트 파트 63을 카바신전 발견 이벤트·대사로 교체합니다.
+- SAVEDATA.CDS에서 카바신전이 미등록(00)인 경우, 발견·보고 날짜에 맞춰 미발견·발견·보고 완료 상태로 보정합니다.
+
+체크 해제 시 EXE, DSTILL.CDS, DISEV.CDS는 주입 전 상태로 복원합니다.
+이미 진행에 영향을 줄 수 있는 SAVEDATA.CDS의 상태는 해제해도 유지합니다.
+"""
+
+SLAVE_DETAILS = """노예 발견물
+
+- EXE의 도서관 힌트 조건 두 곳을 수정해 노예 힌트를 열람할 수 있게 합니다.
+- SAVEDATA.CDS의 도서관 힌트 상태를 함께 설정합니다.
+- SAVEDATA.CDS의 노예 발견물 상태가 미등록(00)이면 발견·보고 날짜에 맞춰 미발견·발견·보고 완료 상태로 보정합니다.
+- DISEV.CDS의 이벤트 파트 229에 노예 발견 대사·분기를 추가합니다.
+
+체크 해제 시 위 EXE·SAVEDATA.CDS·DISEV.CDS 변경을 패치 전 값으로 복원합니다.
+이미 발견 또는 보고 상태가 된 노예 발견물은 변경하지 않습니다.
+"""
+
 
 class CDSExecutablePatcher(tk.Tk):
     def __init__(self) -> None:
@@ -104,6 +135,9 @@ class CDSExecutablePatcher(tk.Tk):
         self.cold_south_unlocked = tk.BooleanVar(value=False)
         self.eclipse_enabled = tk.BooleanVar(value=False)
         self.eclipse_latitude = tk.StringVar(value="0")
+        self.kaaba_enabled = tk.BooleanVar(value=False)
+        self.slave_enabled = tk.BooleanVar(value=False)
+        self._slave_was_enabled = False
         self._build()
 
     def _build(self) -> None:
@@ -160,9 +194,9 @@ class CDSExecutablePatcher(tk.Tk):
         gameplay_box = ttk.LabelFrame(left_column, text="게임 진행 설정", padding=10)
         gameplay_box.grid(row=0, column=0, sticky="ew")
         gameplay_rows = (
-            ("장기 휴양 최대 기간", self.long_rest_max, "개월 (1~127, 원본 12)"),
-            ("탐험 준비 기간", self.exploration_days, "일 (1~127, 원본 10)"),
-            ("세대교체 가능 나이", self.succession_age, "세 (1~127, 원본 18)"),
+            ("장기 휴양 최대 기간", self.long_rest_max, "개월 (1~127)"),
+            ("탐험 준비 기간", self.exploration_days, "일 (1~127, 원본 10일)"),
+            ("세대교체 가능 나이", self.succession_age, "세 (1~127)"),
         )
         for row, (label, variable, suffix) in enumerate(gameplay_rows):
             ttk.Label(gameplay_box, text=f"{label}:").grid(row=row, column=0, pady=2, sticky="w")
@@ -176,7 +210,7 @@ class CDSExecutablePatcher(tk.Tk):
         ttk.Entry(activity_age_frame, textvariable=self.npc_activity_max_age, width=6).grid(row=0, column=2)
         ttk.Label(activity_age_frame, text="세 (0~127, 원본 18~60)").grid(row=0, column=3, padx=(5, 0))
 
-        encounter_box = ttk.LabelFrame(right_column, text="전투 인카운트", padding=10)
+        encounter_box = ttk.LabelFrame(right_column, text="인카운트", padding=10)
         encounter_box.grid(row=1, column=0, pady=(10, 0), sticky="ew")
         ttk.Label(encounter_box, text="서부 해역 (해적·추격대): 1 /").grid(row=0, column=0, sticky="w")
         ttk.Entry(encounter_box, textvariable=self.western_encounter_denominator, width=7).grid(row=0, column=1, padx=(4, 0), sticky="w")
@@ -316,12 +350,39 @@ class CDSExecutablePatcher(tk.Tk):
         ).grid(row=0, column=0, sticky="w")
         ttk.Button(
             translation_box,
-            text="수정 내역…",
+            text="내용…",
             command=self.show_mistranslation_details,
         ).grid(row=0, column=1, padx=(10, 0), sticky="e")
+
+        discovery_box = ttk.LabelFrame(left_column, text="발견물", padding=10)
+        discovery_box.grid(row=5, column=0, pady=(10, 0), sticky="ew")
+
+        ttk.Checkbutton(
+            discovery_box,
+            text="카바신전 발견물·내장 이미지 주입",
+            variable=self.kaaba_enabled,
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Button(
+            discovery_box,
+            text="내용…",
+            command=lambda: self.show_patch_details("카바신전", KAABA_DETAILS),
+        ).grid(row=0, column=1, padx=(10, 0), sticky="e")
+        ttk.Checkbutton(
+            discovery_box,
+            text="노예 도서관 힌트·발견 대사 추가",
+            variable=self.slave_enabled,
+        ).grid(row=1, column=0, pady=(6, 0), sticky="w")
+        ttk.Button(
+            discovery_box,
+            text="내용…",
+            command=lambda: self.show_patch_details("노예 발견물", SLAVE_DETAILS),
+        ).grid(row=1, column=1, padx=(10, 0), pady=(6, 0), sticky="e")
     def show_mistranslation_details(self) -> None:
+        self.show_patch_details("오역 수정 내역", MISTRANSLATION_DETAILS, "#1A73E8")
+
+    def show_patch_details(self, title: str, details: str, first_line_color: str | None = None) -> None:
         window = tk.Toplevel(self)
-        window.title("오역 수정 내역")
+        window.title(title)
         window.geometry("620x520")
         window.minsize(500, 380)
         window.transient(self)
@@ -333,9 +394,10 @@ class CDSExecutablePatcher(tk.Tk):
         text.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        text.insert("1.0", MISTRANSLATION_DETAILS)
-        text.tag_add("credit", "1.0", "1.end")
-        text.tag_configure("credit", foreground="#1A73E8")
+        text.insert("1.0", details)
+        if first_line_color:
+            text.tag_add("first_line", "1.0", "1.end")
+            text.tag_configure("first_line", foreground=first_line_color)
         text.configure(state=tk.DISABLED)
         ttk.Button(window, text="닫기", command=window.destroy).pack(pady=(0, 10))
         window.grab_set()
@@ -460,6 +522,27 @@ class CDSExecutablePatcher(tk.Tk):
             self.eclipse_enabled.set(eclipse_enabled)
             self.eclipse_latitude.set(f"{eclipse_latitude:.3f}" if eclipse_enabled else "0")
             self.mistranslation_fixes_enabled.set(mistranslation_fixes_enabled)
+            discovery_errors: list[str] = []
+            try:
+                self.kaaba_enabled.set(is_kaaba_enabled(target))
+            except KaabaPatchError as exc:
+                self.kaaba_enabled.set(False)
+                discovery_errors.append(str(exc))
+            try:
+                slave_enabled = (
+                    is_slave_library_enabled(target) or is_slave_dialogue_enabled(target)
+                )
+                self.slave_enabled.set(slave_enabled)
+                self._slave_was_enabled = slave_enabled
+            except SlavePatchError as exc:
+                self.slave_enabled.set(False)
+                self._slave_was_enabled = False
+                discovery_errors.append(str(exc))
+            if discovery_errors:
+                messagebox.showwarning(
+                    "발견물 패치 상태 확인 필요",
+                    "일반 EXE 설정은 읽었습니다.\n\n" + "\n\n".join(discovery_errors),
+                )
             if pirate_variety_enabled:
                 self.pirate_fame_middle.set(str(pirate_settings.fame_middle))
                 self.pirate_fame_high.set(str(pirate_settings.fame_high))
@@ -551,8 +634,10 @@ class CDSExecutablePatcher(tk.Tk):
                 )
             else:
                 pirate_settings = PirateVarietySettings()
+            target = Path(self.path.get())
+            backed_up_paths: set[Path] = set()
             backup = apply_all(
-                Path(self.path.get()), self.coordinate.get(), True, presets,
+                target, self.coordinate.get(), True, presets,
                 int(self.departure.get()), int(self.arrival_wait.get()),
                 int(self.long_rest_max.get()), int(self.exploration_days.get()),
                 int(self.succession_age.get()), cold_north_limit,
@@ -566,18 +651,37 @@ class CDSExecutablePatcher(tk.Tk):
                 self.eclipse_latitude.get(),
                 self.mistranslation_fixes_enabled.get(),
             )
+            if backup is not None:
+                backed_up_paths.add(target.resolve())
+            kaaba_backups = apply_kaaba_patch(target, self.kaaba_enabled.get(), backed_up_paths)
+            kaaba_save_backup = (
+                promote_game_savedata(target, backed_up_paths) if self.kaaba_enabled.get() else None
+            )
+            slave_library_backups: tuple[Path, ...] = ()
+            slave_dialogue_backups: tuple[Path, ...] = ()
+            if self.slave_enabled.get() or self._slave_was_enabled:
+                slave_library_backups = apply_slave_library_hint(
+                    target, self.slave_enabled.get(), backed_up_paths
+                )
+                slave_dialogue_backups = apply_slave_dialogue(
+                    target, self.slave_enabled.get(), backed_up_paths
+                )
             self.cold_north_latitude.set(f"{cold_limit_to_latitude(cold_north_limit):.3f}")
             self.cold_south_latitude.set(f"{cold_limit_to_latitude(cold_south_limit):.3f}")
-        except ValueError as exc:
+        except (ValueError, KaabaPatchError, KaabaSavePatchError, SlavePatchError) as exc:
             messagebox.showerror("입력 또는 패치 오류", str(exc))
             return
         except Exception as exc:
             messagebox.showerror("패치 실패", str(exc))
             return
-        if backup is None:
+        if (backup is None and not kaaba_backups and kaaba_save_backup is None
+                and not slave_library_backups and not slave_dialogue_backups):
             messagebox.showinfo("완료", "선택한 설정이 이미 적용되어 있습니다.")
         else:
-            messagebox.showinfo("완료", f"선택한 설정을 적용했습니다.\n\n원본 백업:\n{backup}")
+            backups = [backup, *kaaba_backups, kaaba_save_backup, *slave_library_backups, *slave_dialogue_backups]
+            backup_text = "\n".join(str(path) for path in backups if path is not None)
+            messagebox.showinfo("완료", f"선택한 설정을 적용했습니다.\n\n원본 백업:\n{backup_text}")
+        self._slave_was_enabled = self.slave_enabled.get()
 
 
 if __name__ == "__main__":
