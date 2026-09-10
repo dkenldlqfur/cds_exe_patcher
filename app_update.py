@@ -2,7 +2,7 @@
 
 The feature is deliberately dormant while ``update.repository`` in
 ``Resources/data/app_config.json`` is blank.  Once a GitHub repository is
-chosen, the GUI can use :class:`GitHubReleaseUpdater` to check, download and
+chosen, the GUI uses :class:`GitHubReleaseUpdater` to check, download and
 replace its packaged executable using the same flow as DISEV Editor.
 """
 
@@ -80,7 +80,7 @@ class UpdateError(RuntimeError):
 
 
 class GitHubReleaseUpdater:
-    """Network and file operations used by the future GUI update controls.
+    """Network and file operations used by the GUI update controls.
 
     The class has no Tk dependency; the GUI must run its network methods in a
     worker thread, obtain user consent, then call :meth:`launch_replacer`.

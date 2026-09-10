@@ -21,10 +21,13 @@ from patch_coordinate_decimal import (
     patch as patch_coordinate,
 )
 from pe_patch_section import (
+    BARMAID_NAME_SLOT_OFFSET,
+    BARMAID_NAME_SLOT_STRIDE,
     ECLIPSE_SLOT_OFFSET,
     ECLIPSE_SLOT_SIZE,
     MISTRANSLATION_SLOT_OFFSET,
     MISTRANSLATION_SLOT_SIZE,
+    PATCH_SECTION_EXPANDED_SIZE,
     PIRATE_SLOT_OFFSET,
     PIRATE_SLOT_SIZE,
     clear_slot,
@@ -50,6 +53,7 @@ NPC_WAIT_VA = 0x43282D
 NPC_ROLL_VA = 0x43284A
 NPC_ORIGINAL_WAIT = bytes.fromhex("e8 ee fa ff ff 85 c0")
 NPC_COMPARE_PREFIX = bytes.fromhex("83 be 10 01 00 00")
+MAX_NPC_ARRIVAL_WAIT_DAYS = 127
 NPC_ACTIVITY_MIN_AGE_VA = 0x4322C8
 NPC_ACTIVITY_MAX_AGE_VA = 0x4322D1
 
@@ -114,6 +118,80 @@ class PirateVarietySettings:
     pursuit_high_threshold: int = PIRATE_PURSUIT_HIGH_THRESHOLD
 
 
+@dataclass(frozen=True)
+class BarmaidRecord:
+    """A single immutable entry from the executable's barmaid master table."""
+
+    identifier: int
+    name: str
+    face_code: int
+    appearance_year: int
+    city_id: int
+    personality_id: int
+    language_flags: int
+
+
+@dataclass(frozen=True)
+class BarmaidChildAptitudes:
+    """The six child-stat modifiers assigned to one female face code."""
+
+    face_code: int
+    modifiers: tuple[int, int, int, int, int, int]
+
+
+@dataclass(frozen=True)
+class BarmaidEdit:
+    """The user-editable fields for one barmaid master entry."""
+
+    identifier: int
+    name: str
+    face_code: int
+    appearance_year: int
+    city_id: int
+    personality_id: int
+    language_flags: int
+    child_aptitude_modifiers: tuple[int, int, int, int, int, int]
+
+
+@dataclass(frozen=True)
+class SponsorRecord:
+    """One immutable static sponsor record embedded in the executable."""
+
+    identifier: int
+    name: str
+    face_code: int
+    gender: int
+    nation_id: int
+    job_id: int
+    appearance_year: int
+    power: int
+    city_id: int
+    building_id: int
+    wealth_factor: int
+    appraisal: int
+    preference_flags: int
+    language_flags: int
+
+
+@dataclass(frozen=True)
+class SponsorEdit:
+    """The supported editable fields of one static sponsor record."""
+
+    identifier: int
+    face_code: int
+    gender: int
+    nation_id: int
+    job_id: int
+    appearance_year: int
+    power: int
+    city_id: int
+    building_id: int
+    wealth_factor: int
+    appraisal: int
+    preference_flags: int
+    language_flags: int
+
+
 DEFAULT_PIRATE_VARIETY_SETTINGS = PirateVarietySettings()
 
 
@@ -165,6 +243,108 @@ EXPLORATION_PREPARATION_MESSAGE_SIZE = 0x38
 EXPLORATION_PREPARATION_MESSAGE_PREFIX = "탐험을 떠납니까? 준비하는데 "
 EXPLORATION_PREPARATION_MESSAGE_SUFFIX = "일 걸립니다. 좋습니까?"
 SUCCESSION_MIN_AGE_VA = 0x461AF6
+# Money limits are duplicated in the global money clamp, bank deposit/
+# withdrawal paths, and their numeric entry controls.  Every operand below
+# must move together or the bank UI and the actual stored amount disagree.
+CASH_LIMIT_OPERANDS = (
+    (0x4059B5, b"\x3D"),       # global held-cash clamp comparison
+    (0x4059D0, b"\xB8"),       # global held-cash clamp result
+    (0x460B61, b"\x81\xFE"),   # bank withdrawal: current cash comparison
+    (0x460B6A, b"\xB8"),       # bank withdrawal: remaining cash capacity
+    (0x47CBC8, b"\x68"),       # held-cash numeric entry maximum
+    (0x48252A, b"\x3D"),       # held-cash digit entry comparison
+    (0x482541, b"\xC7\x81\xA8\x00\x00\x00"),  # digit entry clamp result
+)
+DEPOSIT_LIMIT_OPERANDS = (
+    (0x460ACB, b"\x81\xFF"),  # bank deposit: current deposit comparison
+    (0x460AD4, b"\xB8"),       # bank deposit: remaining deposit capacity
+    (0x47CC08, b"\x68"),       # deposit numeric entry maximum
+)
+MONEY_LIMIT_MIN = 1
+MONEY_LIMIT_MAX = 99_999_999
+# Fame and infamy are independent player-record accumulators.  Their original
+# limits are 100,000 and 10,000 respectively, enforced by these clamp calls.
+FAME_LIMIT_OPERANDS = (
+    (0x474188, b"\x68"),  # fame accumulator maximum
+)
+INFAMY_LIMIT_OPERANDS = (
+    (0x4741C8, b"\x68"),  # infamy accumulator maximum
+)
+FAME_INFAMY_LIMIT_MIN = 1
+FAME_LIMIT_MAX = 99_999_999
+INFAMY_LIMIT_MAX = 99_999_999
+
+# The original executable keeps all 127 tavern-maid master records in a
+# contiguous 40-byte table.  Only the personality and language mask are
+# exposed by the patcher; all relationship, city, birthday and portrait data
+# stays untouched.
+BARMAID_TABLE_VA = 0x517AF8
+BARMAID_RECORD_COUNT = 127
+BARMAID_RECORD_SIZE = 0x28
+BARMAID_NAME_POINTER_OFFSET = 0x00
+BARMAID_NAME_MAX_BYTES = 12
+# +0x04 selects the female portrait and, through the table below, the six
+# child-aptitude modifiers.  +0x14 is a different "fortune spouse" comparison
+# code and must not be changed by the face-code control.
+BARMAID_FACE_CODE_OFFSET = 0x04
+BARMAID_APPEARANCE_YEAR_OFFSET = 0x08
+# The game represents the year relative to 1495: stored value = 1495 - year.
+# Years before the 1480 game start are indistinguishable to the player, so the
+# editor deliberately keeps its selectable range within the playable period.
+BARMAID_APPEARANCE_YEAR_REFERENCE = 1495
+BARMAID_APPEARANCE_YEAR_MIN = 1480
+BARMAID_APPEARANCE_YEAR_MAX = 1600
+BARMAID_PERSONALITY_OFFSET = 0x18
+BARMAID_LANGUAGE_FLAGS_OFFSET = 0x20
+BARMAID_CITY_ID_OFFSET = 0x24
+BARMAID_CITY_ID_MAX = 225
+BARMAID_PERSONALITY_COUNT = 8
+BARMAID_LANGUAGE_MASK = (1 << 14) - 1
+BARMAID_FACE_CODE_MAX = 143
+BARMAID_CHILD_APTITUDE_TABLE_VA = 0x51B0A0
+BARMAID_CHILD_APTITUDE_RECORD_SIZE = 0x20
+BARMAID_CHILD_APTITUDE_MODIFIER_COUNT = 6
+# The original data only uses -5..+5, but the game consumes these as signed
+# 32-bit modifiers and clamps the final child attribute to 1..100.  Permit a
+# practical editor range wide enough to force either end of that final range.
+BARMAID_CHILD_APTITUDE_MIN = -255
+BARMAID_CHILD_APTITUDE_MAX = 255
+# Static sponsor table.  The name string belongs to the game's shared string
+# pool; it is intentionally display-only here, while the numeric settings
+# below are fixed-width fields in each 0x3C-byte record.
+SPONSOR_TABLE_VA = 0x5228BC
+SPONSOR_RECORD_COUNT = 81
+SPONSOR_RECORD_SIZE = 0x3C
+SPONSOR_FACE_CODE_OFFSET = 0x00
+SPONSOR_GENDER_OFFSET = 0x04
+SPONSOR_NATION_ID_OFFSET = 0x08
+SPONSOR_JOB_ID_OFFSET = 0x0C
+SPONSOR_APPEARANCE_YEAR_OFFSET = 0x10
+SPONSOR_POWER_OFFSET = 0x1C
+SPONSOR_CITY_ID_OFFSET = 0x20
+SPONSOR_BUILDING_ID_OFFSET = 0x24
+SPONSOR_WEALTH_FACTOR_OFFSET = 0x28
+SPONSOR_APPRAISAL_OFFSET = 0x2C
+SPONSOR_FLAGS_OFFSET = 0x34
+SPONSOR_NAME_POINTER_OFFSET = 0x38
+SPONSOR_FACE_CODE_MAX = 412
+SPONSOR_APPEARANCE_YEAR_REFERENCE = 1480
+SPONSOR_APPEARANCE_YEAR_MIN = 1480
+SPONSOR_APPEARANCE_YEAR_MAX = 1600
+SPONSOR_NATION_ID_MAX = 18
+SPONSOR_JOB_ID_MIN = 14
+SPONSOR_JOB_ID_MAX = 21
+SPONSOR_CITY_ID_MAX = 225
+SPONSOR_BUILDING_ID_MAX = 15
+SPONSOR_COEFFICIENT_MIN = 0
+SPONSOR_COEFFICIENT_MAX = 99
+SPONSOR_PREFERENCE_MASK = 0xFF
+SPONSOR_LANGUAGE_MASK = (1 << 14) - 1
+SPONSOR_EDITABLE_FLAGS_MASK = SPONSOR_PREFERENCE_MASK | (SPONSOR_LANGUAGE_MASK << 16)
+# The final static sponsor record intentionally has a null name pointer in the
+# original Korean EXE.  Its table position is stable, so retain the known
+# in-game name solely as a display fallback.
+SPONSOR_NAME_FALLBACKS = {80: "지그문트 1세"}
 # The latitude coordinate grows southward: values below 10,000 are north and
 # values at/above 10,000 are south.  The first conditional operand therefore
 # belongs to the southern branch, and the second to the northern branch.
@@ -544,8 +724,8 @@ def apply_npc_travel(data: bytearray, departure_denominator: int, arrival_wait_d
     """Set ordinary-NPC departure odds and the arrival-eligibility wait."""
     if not 1 <= departure_denominator <= 127:
         raise ValueError("일반 NPC 출발 확률의 분모는 1~127 사이여야 합니다.")
-    if not 0 <= arrival_wait_days <= 60:
-        raise ValueError("일반 NPC 도착 대기는 0~60일 사이여야 합니다.")
+    if not 0 <= arrival_wait_days <= MAX_NPC_ARRIVAL_WAIT_DAYS:
+        raise ValueError(f"일반 NPC 도착 대기는 0~{MAX_NPC_ARRIVAL_WAIT_DAYS}일 사이여야 합니다.")
     pe = pefile.PE(data=bytes(data), fast_load=True)
     try:
         if pe.FILE_HEADER.Machine != 0x14C or pe.OPTIONAL_HEADER.ImageBase != 0x400000:
@@ -554,7 +734,8 @@ def apply_npc_travel(data: bytearray, departure_denominator: int, arrival_wait_d
         roll_offset = pe.get_offset_from_rva(NPC_ROLL_VA - pe.OPTIONAL_HEADER.ImageBase)
         current_wait = bytes(data[wait_offset:wait_offset + 7])
         if current_wait != NPC_ORIGINAL_WAIT and not (
-            current_wait[:6] == NPC_COMPARE_PREFIX and -60 <= struct.unpack("b", current_wait[6:7])[0] <= 0
+            current_wait[:6] == NPC_COMPARE_PREFIX
+            and -60 <= struct.unpack("b", current_wait[6:7])[0] <= MAX_NPC_ARRIVAL_WAIT_DAYS - 60
         ):
             raise ValueError(f"NPC 이동 루틴 0x{NPC_WAIT_VA:X}을(를) 검증하지 못했습니다.")
         current_roll = bytes(data[roll_offset:roll_offset + 2])
@@ -1189,8 +1370,45 @@ def apply_pirate_variety(
         pe.close()
 
 
-def _read_gameplay_options_from_data(data: bytes) -> tuple[int, int, int, int, int]:
-    """Read and validate the five editable gameplay operands."""
+def _read_limit_operands(
+    data: bytes,
+    pe: pefile.PE,
+    operands: tuple[tuple[int, bytes], ...],
+    label: str,
+) -> tuple[int, ...]:
+    """Read the matching immediate operands used by one money-limit setting."""
+    values: list[int] = []
+    for value_va, instruction_prefix in operands:
+        value_offset = pe.get_offset_from_rva(value_va - pe.OPTIONAL_HEADER.ImageBase)
+        prefix_offset = value_offset - len(instruction_prefix)
+        if data[prefix_offset:value_offset] != instruction_prefix:
+            raise ValueError(f"{label} 위치 0x{value_va:X}을(를) 검증하지 못했습니다.")
+        value = struct.unpack_from("<I", data, value_offset)[0]
+        # The game compares signed 32-bit values.  Older community patches may
+        # use a larger value, so accept them while reading and allow this tool
+        # to bring the setting back into its supported 99,999,999 range.
+        if not 1 <= value <= 0x7FFF_FFFF:
+            raise ValueError(f"{label} 값 0x{value_va:X}을(를) 읽지 못했습니다.")
+        values.append(value)
+    return tuple(values)
+
+
+def _write_limit_operands(
+    data: bytearray,
+    pe: pefile.PE,
+    operands: tuple[tuple[int, bytes], ...],
+    label: str,
+    value: int,
+) -> None:
+    """Verify and update every code path that uses one money limit."""
+    _read_limit_operands(bytes(data), pe, operands, label)
+    for value_va, _ in operands:
+        value_offset = pe.get_offset_from_rva(value_va - pe.OPTIONAL_HEADER.ImageBase)
+        struct.pack_into("<I", data, value_offset, value)
+
+
+def _read_gameplay_options_from_data(data: bytes) -> tuple[int, int, int, int, int, int, int, int, int]:
+    """Read and validate the editable gameplay operands."""
     pe = pefile.PE(data=data, fast_load=True)
     try:
         if pe.FILE_HEADER.Machine != 0x14C or pe.OPTIONAL_HEADER.ImageBase != 0x400000:
@@ -1224,7 +1442,21 @@ def _read_gameplay_options_from_data(data: bytes) -> tuple[int, int, int, int, i
             raise ValueError("극지방 추위 판정 위치를 검증하지 못했습니다.")
         cold_north_limit = struct.unpack_from("<I", data, north_offset)[0]
         cold_south_limit = struct.unpack_from("<I", data, south_offset)[0]
-        return long_rest_max, preparation_values[0], succession_age, cold_north_limit, cold_south_limit
+        cash_limit = _read_limit_operands(data, pe, CASH_LIMIT_OPERANDS, "소지금 상한")[0]
+        deposit_limit = _read_limit_operands(data, pe, DEPOSIT_LIMIT_OPERANDS, "저금 상한")[0]
+        fame_limit = _read_limit_operands(data, pe, FAME_LIMIT_OPERANDS, "명성 상한")[0]
+        infamy_limit = _read_limit_operands(data, pe, INFAMY_LIMIT_OPERANDS, "악명 상한")[0]
+        return (
+            long_rest_max,
+            preparation_values[0],
+            succession_age,
+            cold_north_limit,
+            cold_south_limit,
+            cash_limit,
+            deposit_limit,
+            fame_limit,
+            infamy_limit,
+        )
     finally:
         pe.close()
 
@@ -1271,8 +1503,12 @@ def apply_gameplay_options(
     succession_min_age: int,
     cold_north_limit: int,
     cold_south_limit: int,
+    cash_limit: int,
+    deposit_limit: int,
+    fame_limit: int,
+    infamy_limit: int,
 ) -> bool:
-    """Set rest, exploration, succession and polar-cold parameters."""
+    """Set rest, exploration, money and polar-cold parameters."""
     if not 1 <= long_rest_max <= 127:
         raise ValueError("장기 휴양 최대 기간은 1~127개월 사이여야 합니다.")
     if not 1 <= exploration_preparation_days <= 127:
@@ -1281,6 +1517,14 @@ def apply_gameplay_options(
         raise ValueError("세대교체 가능 나이는 1~127세 사이여야 합니다.")
     if not 0 <= cold_north_limit <= 20000 or not 0 <= cold_south_limit <= 20000:
         raise ValueError("극지방 추위 판정 좌표는 0~20,000 사이여야 합니다.")
+    if not MONEY_LIMIT_MIN <= cash_limit <= MONEY_LIMIT_MAX:
+        raise ValueError("소지금 상한은 1~99,999,999 두캇 사이여야 합니다.")
+    if not MONEY_LIMIT_MIN <= deposit_limit <= MONEY_LIMIT_MAX:
+        raise ValueError("저금 상한은 1~99,999,999 두캇 사이여야 합니다.")
+    if not FAME_INFAMY_LIMIT_MIN <= fame_limit <= FAME_LIMIT_MAX:
+        raise ValueError("명성 상한은 1~99,999,999 사이여야 합니다.")
+    if not FAME_INFAMY_LIMIT_MIN <= infamy_limit <= INFAMY_LIMIT_MAX:
+        raise ValueError("악명 상한은 1~99,999,999 사이여야 합니다.")
 
     current = _read_gameplay_options_from_data(bytes(data))
     target = (
@@ -1289,11 +1533,26 @@ def apply_gameplay_options(
         succession_min_age,
         cold_north_limit,
         cold_south_limit,
+        cash_limit,
+        deposit_limit,
+        fame_limit,
+        infamy_limit,
     )
     pe = pefile.PE(data=bytes(data), fast_load=True)
     try:
         displayed_days = _read_exploration_preparation_message_days(bytes(data), pe)
-        if current == target and displayed_days == exploration_preparation_days:
+        cash_values = _read_limit_operands(bytes(data), pe, CASH_LIMIT_OPERANDS, "소지금 상한")
+        deposit_values = _read_limit_operands(bytes(data), pe, DEPOSIT_LIMIT_OPERANDS, "저금 상한")
+        fame_values = _read_limit_operands(bytes(data), pe, FAME_LIMIT_OPERANDS, "명성 상한")
+        infamy_values = _read_limit_operands(bytes(data), pe, INFAMY_LIMIT_OPERANDS, "악명 상한")
+        if (
+            current == target
+            and displayed_days == exploration_preparation_days
+            and all(value == cash_limit for value in cash_values)
+            and all(value == deposit_limit for value in deposit_values)
+            and all(value == fame_limit for value in fame_values)
+            and all(value == infamy_limit for value in infamy_values)
+        ):
             return False
 
         def offset(va: int) -> int:
@@ -1312,6 +1571,352 @@ def apply_gameplay_options(
         data[offset(SUCCESSION_MIN_AGE_VA)] = succession_min_age
         struct.pack_into("<I", data, offset(COLD_NORTH_LIMIT_VA), cold_north_limit)
         struct.pack_into("<I", data, offset(COLD_SOUTH_LIMIT_VA), cold_south_limit)
+        _write_limit_operands(data, pe, CASH_LIMIT_OPERANDS, "소지금 상한", cash_limit)
+        _write_limit_operands(data, pe, DEPOSIT_LIMIT_OPERANDS, "저금 상한", deposit_limit)
+        _write_limit_operands(data, pe, FAME_LIMIT_OPERANDS, "명성 상한", fame_limit)
+        _write_limit_operands(data, pe, INFAMY_LIMIT_OPERANDS, "악명 상한", infamy_limit)
+        return True
+    finally:
+        pe.close()
+
+
+def _read_barmaid_records_from_data(data: bytes) -> tuple[BarmaidRecord, ...]:
+    """Read and validate the immutable barmaid table embedded in the EXE."""
+    pe = pefile.PE(data=data, fast_load=True)
+    try:
+        if pe.FILE_HEADER.Machine != 0x14C or pe.OPTIONAL_HEADER.ImageBase != 0x400000:
+            raise ValueError("지원하는 32비트 CDS III 실행 파일이 아닙니다.")
+        table_offset = pe.get_offset_from_rva(BARMAID_TABLE_VA - pe.OPTIONAL_HEADER.ImageBase)
+        table_size = BARMAID_RECORD_COUNT * BARMAID_RECORD_SIZE
+        if table_offset < 0 or table_offset + table_size > len(data):
+            raise ValueError("여급 마스터 테이블의 범위를 검증하지 못했습니다.")
+
+        records: list[BarmaidRecord] = []
+        for identifier in range(BARMAID_RECORD_COUNT):
+            record_offset = table_offset + identifier * BARMAID_RECORD_SIZE
+            name_va = struct.unpack_from("<I", data, record_offset + BARMAID_NAME_POINTER_OFFSET)[0]
+            try:
+                name_offset = pe.get_offset_from_rva(name_va - pe.OPTIONAL_HEADER.ImageBase)
+            except pefile.PEFormatError as error:
+                raise ValueError(f"여급 {identifier}번 이름 주소를 검증하지 못했습니다.") from error
+            if not 0 <= name_offset < len(data):
+                raise ValueError(f"여급 {identifier}번 이름 주소를 검증하지 못했습니다.")
+            name_end = data.find(b"\0", name_offset, min(name_offset + 64, len(data)))
+            if name_end < 0:
+                raise ValueError(f"여급 {identifier}번 이름의 끝을 찾지 못했습니다.")
+            try:
+                name = data[name_offset:name_end].decode("cp949")
+            except UnicodeDecodeError as error:
+                raise ValueError(f"여급 {identifier}번 이름을 읽지 못했습니다.") from error
+            face_code = struct.unpack_from("<I", data, record_offset + BARMAID_FACE_CODE_OFFSET)[0]
+            # The game cannot distinguish an earlier date from its 1480 start,
+            # so preserve such original offsets while presenting them as 1480.
+            appearance_year = max(
+                BARMAID_APPEARANCE_YEAR_MIN,
+                BARMAID_APPEARANCE_YEAR_REFERENCE
+                - struct.unpack_from("<i", data, record_offset + BARMAID_APPEARANCE_YEAR_OFFSET)[0],
+            )
+            city_id = struct.unpack_from("<I", data, record_offset + BARMAID_CITY_ID_OFFSET)[0]
+            personality_id = struct.unpack_from("<I", data, record_offset + BARMAID_PERSONALITY_OFFSET)[0]
+            language_flags = struct.unpack_from("<I", data, record_offset + BARMAID_LANGUAGE_FLAGS_OFFSET)[0]
+            if not name or not 0 <= face_code <= BARMAID_FACE_CODE_MAX:
+                raise ValueError(f"여급 {identifier}번 레코드의 얼굴 코드 값을 검증하지 못했습니다.")
+            if not BARMAID_APPEARANCE_YEAR_MIN <= appearance_year <= BARMAID_APPEARANCE_YEAR_MAX:
+                raise ValueError(f"여급 {identifier}번 레코드의 출현 연도 값을 검증하지 못했습니다.")
+            if not 0 <= city_id <= BARMAID_CITY_ID_MAX:
+                raise ValueError(f"여급 {identifier}번 레코드의 출현 도시 값을 검증하지 못했습니다.")
+            if not 0 <= personality_id < BARMAID_PERSONALITY_COUNT:
+                raise ValueError(f"여급 {identifier}번 레코드의 성격 값을 검증하지 못했습니다.")
+            if language_flags & ~BARMAID_LANGUAGE_MASK:
+                raise ValueError(f"여급 {identifier}번 레코드의 언어 값을 검증하지 못했습니다.")
+            records.append(
+                BarmaidRecord(identifier, name, face_code, appearance_year, city_id, personality_id, language_flags)
+            )
+        return tuple(records)
+    finally:
+        pe.close()
+
+
+def read_barmaid_records(target: Path) -> tuple[BarmaidRecord, ...]:
+    """Read the selectable barmaid entries from a supported executable."""
+    target = target.resolve(strict=True)
+    return _read_barmaid_records_from_data(target.read_bytes())
+
+
+def _read_barmaid_child_aptitudes_from_data(data: bytes) -> tuple[BarmaidChildAptitudes, ...]:
+    """Read the face-code-indexed child aptitude table from the EXE."""
+    pe = pefile.PE(data=data, fast_load=True)
+    try:
+        if pe.FILE_HEADER.Machine != 0x14C or pe.OPTIONAL_HEADER.ImageBase != 0x400000:
+            raise ValueError("지원하는 32비트 CDS III 실행 파일이 아닙니다.")
+        table_offset = pe.get_offset_from_rva(
+            BARMAID_CHILD_APTITUDE_TABLE_VA - pe.OPTIONAL_HEADER.ImageBase
+        )
+        table_size = (BARMAID_FACE_CODE_MAX + 1) * BARMAID_CHILD_APTITUDE_RECORD_SIZE
+        if table_offset < 0 or table_offset + table_size > len(data):
+            raise ValueError("여급 자녀 능력치 보정 테이블의 범위를 검증하지 못했습니다.")
+        records: list[BarmaidChildAptitudes] = []
+        for face_code in range(BARMAID_FACE_CODE_MAX + 1):
+            record_offset = table_offset + face_code * BARMAID_CHILD_APTITUDE_RECORD_SIZE
+            modifiers = struct.unpack_from("<6i", data, record_offset)
+            if any(not BARMAID_CHILD_APTITUDE_MIN <= value <= BARMAID_CHILD_APTITUDE_MAX for value in modifiers):
+                raise ValueError(f"얼굴 코드 {face_code}의 자녀 능력치 보정값을 검증하지 못했습니다.")
+            records.append(BarmaidChildAptitudes(face_code, modifiers))
+        return tuple(records)
+    finally:
+        pe.close()
+
+
+def read_barmaid_child_aptitudes(target: Path) -> tuple[BarmaidChildAptitudes, ...]:
+    """Read all female-face child aptitude modifiers from a supported EXE."""
+    target = target.resolve(strict=True)
+    return _read_barmaid_child_aptitudes_from_data(target.read_bytes())
+
+
+def apply_barmaid_edit(data: bytearray, edit: BarmaidEdit | None) -> bool:
+    """Write one selected barmaid's static master settings."""
+    if edit is None:
+        return False
+    if not 0 <= edit.identifier < BARMAID_RECORD_COUNT:
+        raise ValueError("수정할 여급 번호가 올바르지 않습니다.")
+    name = edit.name.strip()
+    if not name:
+        raise ValueError("여급 이름을 입력해 주세요.")
+    try:
+        name_bytes = name.encode("cp949")
+    except UnicodeEncodeError as error:
+        raise ValueError("여급 이름은 CP949에서 사용할 수 있는 문자만 입력할 수 있습니다.") from error
+    if len(name_bytes) > BARMAID_NAME_MAX_BYTES:
+        raise ValueError("여급 이름은 한글 기준 최대 6자(12바이트)까지 입력할 수 있습니다.")
+    if not 0 <= edit.face_code <= BARMAID_FACE_CODE_MAX:
+        raise ValueError("여급 얼굴 코드는 0~143 사이여야 합니다.")
+    if not BARMAID_APPEARANCE_YEAR_MIN <= edit.appearance_year <= BARMAID_APPEARANCE_YEAR_MAX:
+        raise ValueError("여급 출현 연도는 1480~1600 사이여야 합니다.")
+    if not 0 <= edit.city_id <= BARMAID_CITY_ID_MAX:
+        raise ValueError("여급 출현 도시 ID는 0~225 사이여야 합니다.")
+    if not 0 <= edit.personality_id < BARMAID_PERSONALITY_COUNT:
+        raise ValueError("여급 성격이 올바르지 않습니다.")
+    if not 0 <= edit.language_flags <= BARMAID_LANGUAGE_MASK:
+        raise ValueError("여급 전수 언어 값이 올바르지 않습니다.")
+    if len(edit.child_aptitude_modifiers) != BARMAID_CHILD_APTITUDE_MODIFIER_COUNT:
+        raise ValueError("자녀 능력치 보정값은 6개여야 합니다.")
+    if any(
+        not BARMAID_CHILD_APTITUDE_MIN <= value <= BARMAID_CHILD_APTITUDE_MAX
+        for value in edit.child_aptitude_modifiers
+    ):
+        raise ValueError("자녀 능력치 보정값은 각각 -255~+255 사이여야 합니다.")
+
+    records = _read_barmaid_records_from_data(bytes(data))
+    _read_barmaid_child_aptitudes_from_data(bytes(data))
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        table_offset = pe.get_offset_from_rva(BARMAID_TABLE_VA - pe.OPTIONAL_HEADER.ImageBase)
+        record_offset = table_offset + edit.identifier * BARMAID_RECORD_SIZE
+        current_name = records[edit.identifier].name
+        current_face_code = struct.unpack_from("<I", data, record_offset + BARMAID_FACE_CODE_OFFSET)[0]
+        current_appearance_year_offset = struct.unpack_from(
+            "<i", data, record_offset + BARMAID_APPEARANCE_YEAR_OFFSET
+        )[0]
+        current_appearance_year = max(
+            BARMAID_APPEARANCE_YEAR_MIN,
+            BARMAID_APPEARANCE_YEAR_REFERENCE - current_appearance_year_offset,
+        )
+        current_city_id = struct.unpack_from("<I", data, record_offset + BARMAID_CITY_ID_OFFSET)[0]
+        current_personality = struct.unpack_from("<I", data, record_offset + BARMAID_PERSONALITY_OFFSET)[0]
+        current_languages = struct.unpack_from("<I", data, record_offset + BARMAID_LANGUAGE_FLAGS_OFFSET)[0]
+        aptitude_table_offset = pe.get_offset_from_rva(
+            BARMAID_CHILD_APTITUDE_TABLE_VA - pe.OPTIONAL_HEADER.ImageBase
+        )
+        aptitude_offset = aptitude_table_offset + edit.face_code * BARMAID_CHILD_APTITUDE_RECORD_SIZE
+        current_aptitudes = struct.unpack_from("<6i", data, aptitude_offset)
+        if (
+            current_name == name
+            and current_face_code == edit.face_code
+            and current_appearance_year == edit.appearance_year
+            and current_city_id == edit.city_id
+            and current_personality == edit.personality_id
+            and current_languages == edit.language_flags
+            and current_aptitudes == edit.child_aptitude_modifiers
+        ):
+            return False
+        if current_name != name:
+            section, _created = ensure_patch_section(data, PATCH_SECTION_EXPANDED_SIZE)
+            slot_offset, slot_va = section.slot(
+                BARMAID_NAME_SLOT_OFFSET + edit.identifier * BARMAID_NAME_SLOT_STRIDE,
+                BARMAID_NAME_SLOT_STRIDE,
+            )
+            name_payload = name_bytes + b"\0"
+            if len(name_payload) > BARMAID_NAME_SLOT_STRIDE:
+                raise ValueError("여급 이름 저장 공간이 부족합니다.")
+            data[slot_offset:slot_offset + BARMAID_NAME_SLOT_STRIDE] = b"\0" * BARMAID_NAME_SLOT_STRIDE
+            data[slot_offset:slot_offset + len(name_payload)] = name_payload
+            struct.pack_into("<I", data, record_offset + BARMAID_NAME_POINTER_OFFSET, slot_va)
+        struct.pack_into("<I", data, record_offset + BARMAID_FACE_CODE_OFFSET, edit.face_code)
+        if current_appearance_year != edit.appearance_year:
+            struct.pack_into(
+                "<i", data, record_offset + BARMAID_APPEARANCE_YEAR_OFFSET,
+                BARMAID_APPEARANCE_YEAR_REFERENCE - edit.appearance_year,
+            )
+        struct.pack_into("<I", data, record_offset + BARMAID_CITY_ID_OFFSET, edit.city_id)
+        struct.pack_into("<I", data, record_offset + BARMAID_PERSONALITY_OFFSET, edit.personality_id)
+        struct.pack_into("<I", data, record_offset + BARMAID_LANGUAGE_FLAGS_OFFSET, edit.language_flags)
+        struct.pack_into("<6i", data, aptitude_offset, *edit.child_aptitude_modifiers)
+        return True
+    finally:
+        pe.close()
+
+
+def _read_sponsor_records_from_data(data: bytes) -> tuple[SponsorRecord, ...]:
+    """Read and validate the fixed-width static sponsor master table."""
+    pe = pefile.PE(data=data, fast_load=True)
+    try:
+        if pe.FILE_HEADER.Machine != 0x14C or pe.OPTIONAL_HEADER.ImageBase != 0x400000:
+            raise ValueError("지원하는 32비트 CDS III 실행 파일이 아닙니다.")
+        table_offset = pe.get_offset_from_rva(SPONSOR_TABLE_VA - pe.OPTIONAL_HEADER.ImageBase)
+        table_size = SPONSOR_RECORD_COUNT * SPONSOR_RECORD_SIZE
+        if table_offset < 0 or table_offset + table_size > len(data):
+            raise ValueError("후원자 마스터 테이블의 범위를 검증하지 못했습니다.")
+        records: list[SponsorRecord] = []
+        for identifier in range(SPONSOR_RECORD_COUNT):
+            record_offset = table_offset + identifier * SPONSOR_RECORD_SIZE
+            name_va = struct.unpack_from("<I", data, record_offset + SPONSOR_NAME_POINTER_OFFSET)[0]
+            if name_va == 0:
+                name = SPONSOR_NAME_FALLBACKS.get(identifier, "")
+            else:
+                try:
+                    name_offset = pe.get_offset_from_rva(name_va - pe.OPTIONAL_HEADER.ImageBase)
+                except pefile.PEFormatError as error:
+                    raise ValueError(f"후원자 {identifier}번 이름 주소를 검증하지 못했습니다.") from error
+                if not 0 <= name_offset < len(data):
+                    raise ValueError(f"후원자 {identifier}번 이름 주소를 검증하지 못했습니다.")
+                name_end = data.find(b"\0", name_offset, min(name_offset + 64, len(data)))
+                if name_end < 0:
+                    raise ValueError(f"후원자 {identifier}번 이름의 끝을 찾지 못했습니다.")
+                try:
+                    name = data[name_offset:name_end].decode("cp949")
+                except UnicodeDecodeError as error:
+                    raise ValueError(f"후원자 {identifier}번 이름을 읽지 못했습니다.") from error
+            face_code = struct.unpack_from("<I", data, record_offset + SPONSOR_FACE_CODE_OFFSET)[0]
+            gender = struct.unpack_from("<I", data, record_offset + SPONSOR_GENDER_OFFSET)[0]
+            nation_id = struct.unpack_from("<i", data, record_offset + SPONSOR_NATION_ID_OFFSET)[0]
+            job_id = struct.unpack_from("<i", data, record_offset + SPONSOR_JOB_ID_OFFSET)[0]
+            appearance_year = SPONSOR_APPEARANCE_YEAR_REFERENCE + struct.unpack_from(
+                "<i", data, record_offset + SPONSOR_APPEARANCE_YEAR_OFFSET
+            )[0]
+            power = struct.unpack_from("<I", data, record_offset + SPONSOR_POWER_OFFSET)[0]
+            city_id = struct.unpack_from("<i", data, record_offset + SPONSOR_CITY_ID_OFFSET)[0]
+            building_id = struct.unpack_from("<i", data, record_offset + SPONSOR_BUILDING_ID_OFFSET)[0]
+            wealth_factor = struct.unpack_from("<I", data, record_offset + SPONSOR_WEALTH_FACTOR_OFFSET)[0]
+            appraisal = struct.unpack_from("<I", data, record_offset + SPONSOR_APPRAISAL_OFFSET)[0]
+            packed_flags = struct.unpack_from("<I", data, record_offset + SPONSOR_FLAGS_OFFSET)[0]
+            preference_flags = packed_flags & SPONSOR_PREFERENCE_MASK
+            language_flags = (packed_flags >> 16) & SPONSOR_LANGUAGE_MASK
+            if not name or not 0 <= face_code <= SPONSOR_FACE_CODE_MAX:
+                raise ValueError(f"후원자 {identifier}번 얼굴 코드 값을 검증하지 못했습니다.")
+            if gender not in (0, 1):
+                raise ValueError(f"후원자 {identifier}번 성별 값을 검증하지 못했습니다.")
+            if not 0 <= nation_id <= SPONSOR_NATION_ID_MAX:
+                raise ValueError(f"후원자 {identifier}번 국가 값을 검증하지 못했습니다.")
+            if not SPONSOR_JOB_ID_MIN <= job_id <= SPONSOR_JOB_ID_MAX:
+                raise ValueError(f"후원자 {identifier}번 직업 값을 검증하지 못했습니다.")
+            if not SPONSOR_APPEARANCE_YEAR_MIN <= appearance_year <= SPONSOR_APPEARANCE_YEAR_MAX:
+                raise ValueError(f"후원자 {identifier}번 등장 연도 값을 검증하지 못했습니다.")
+            if not SPONSOR_COEFFICIENT_MIN <= power <= SPONSOR_COEFFICIENT_MAX:
+                raise ValueError(f"후원자 {identifier}번 권력 값을 검증하지 못했습니다.")
+            if not 0 <= city_id <= SPONSOR_CITY_ID_MAX:
+                raise ValueError(f"후원자 {identifier}번 소재 도시 값을 검증하지 못했습니다.")
+            if not 0 <= building_id <= SPONSOR_BUILDING_ID_MAX:
+                raise ValueError(f"후원자 {identifier}번 소재 시설 값을 검증하지 못했습니다.")
+            if not SPONSOR_COEFFICIENT_MIN <= wealth_factor <= SPONSOR_COEFFICIENT_MAX:
+                raise ValueError(f"후원자 {identifier}번 재산 계수 값을 검증하지 못했습니다.")
+            if not SPONSOR_COEFFICIENT_MIN <= appraisal <= SPONSOR_COEFFICIENT_MAX:
+                raise ValueError(f"후원자 {identifier}번 계약금 평가 값을 검증하지 못했습니다.")
+            records.append(SponsorRecord(
+                identifier, name, face_code, gender, nation_id, job_id, appearance_year,
+                power, city_id, building_id, wealth_factor, appraisal, preference_flags, language_flags,
+            ))
+        return tuple(records)
+    finally:
+        pe.close()
+
+
+def read_sponsor_records(target: Path) -> tuple[SponsorRecord, ...]:
+    """Read selectable sponsor entries from a supported executable."""
+    target = target.resolve(strict=True)
+    return _read_sponsor_records_from_data(target.read_bytes())
+
+
+def apply_sponsor_edit(data: bytearray, edit: SponsorEdit | None) -> bool:
+    """Write one selected sponsor's supported static master settings."""
+    if edit is None:
+        return False
+    if not 0 <= edit.identifier < SPONSOR_RECORD_COUNT:
+        raise ValueError("수정할 후원자 번호가 올바르지 않습니다.")
+    if not 0 <= edit.face_code <= SPONSOR_FACE_CODE_MAX:
+        raise ValueError("후원자 얼굴 코드는 0~412 사이여야 합니다.")
+    if edit.gender not in (0, 1):
+        raise ValueError("후원자 성별이 올바르지 않습니다.")
+    if not 0 <= edit.nation_id <= SPONSOR_NATION_ID_MAX:
+        raise ValueError("후원자 국가는 목록에서 선택해 주세요.")
+    if not SPONSOR_JOB_ID_MIN <= edit.job_id <= SPONSOR_JOB_ID_MAX:
+        raise ValueError("후원자 직업은 목록에서 선택해 주세요.")
+    if not SPONSOR_APPEARANCE_YEAR_MIN <= edit.appearance_year <= SPONSOR_APPEARANCE_YEAR_MAX:
+        raise ValueError("후원자 등장 연도는 1480~1600 사이여야 합니다.")
+    if any(
+        not SPONSOR_COEFFICIENT_MIN <= value <= SPONSOR_COEFFICIENT_MAX
+        for value in (edit.power, edit.wealth_factor, edit.appraisal)
+    ):
+        raise ValueError("후원자 권력·재산·계약금 평가는 0~99 사이여야 합니다.")
+    if not 0 <= edit.city_id <= SPONSOR_CITY_ID_MAX:
+        raise ValueError("후원자 소재 도시는 목록에서 선택해 주세요.")
+    if not 0 <= edit.building_id <= SPONSOR_BUILDING_ID_MAX:
+        raise ValueError("후원자 소재 시설은 목록에서 선택해 주세요.")
+    if not 0 <= edit.preference_flags <= SPONSOR_PREFERENCE_MASK:
+        raise ValueError("후원자 취향 값이 올바르지 않습니다.")
+    if not 0 <= edit.language_flags <= SPONSOR_LANGUAGE_MASK:
+        raise ValueError("후원자 언어 값이 올바르지 않습니다.")
+
+    records = _read_sponsor_records_from_data(bytes(data))
+    current = records[edit.identifier]
+    if (
+        current.face_code == edit.face_code
+        and current.gender == edit.gender
+        and current.nation_id == edit.nation_id
+        and current.job_id == edit.job_id
+        and current.appearance_year == edit.appearance_year
+        and current.power == edit.power
+        and current.city_id == edit.city_id
+        and current.building_id == edit.building_id
+        and current.wealth_factor == edit.wealth_factor
+        and current.appraisal == edit.appraisal
+        and current.preference_flags == edit.preference_flags
+        and current.language_flags == edit.language_flags
+    ):
+        return False
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        table_offset = pe.get_offset_from_rva(SPONSOR_TABLE_VA - pe.OPTIONAL_HEADER.ImageBase)
+        record_offset = table_offset + edit.identifier * SPONSOR_RECORD_SIZE
+        current_flags = struct.unpack_from("<I", data, record_offset + SPONSOR_FLAGS_OFFSET)[0]
+        flags = (
+            (current_flags & ~SPONSOR_EDITABLE_FLAGS_MASK)
+            | edit.preference_flags
+            | (edit.language_flags << 16)
+        )
+        struct.pack_into("<I", data, record_offset + SPONSOR_FACE_CODE_OFFSET, edit.face_code)
+        struct.pack_into("<I", data, record_offset + SPONSOR_GENDER_OFFSET, edit.gender)
+        struct.pack_into("<i", data, record_offset + SPONSOR_NATION_ID_OFFSET, edit.nation_id)
+        struct.pack_into("<i", data, record_offset + SPONSOR_JOB_ID_OFFSET, edit.job_id)
+        struct.pack_into(
+            "<i", data, record_offset + SPONSOR_APPEARANCE_YEAR_OFFSET,
+            edit.appearance_year - SPONSOR_APPEARANCE_YEAR_REFERENCE,
+        )
+        struct.pack_into("<I", data, record_offset + SPONSOR_POWER_OFFSET, edit.power)
+        struct.pack_into("<i", data, record_offset + SPONSOR_CITY_ID_OFFSET, edit.city_id)
+        struct.pack_into("<i", data, record_offset + SPONSOR_BUILDING_ID_OFFSET, edit.building_id)
+        struct.pack_into("<I", data, record_offset + SPONSOR_WEALTH_FACTOR_OFFSET, edit.wealth_factor)
+        struct.pack_into("<I", data, record_offset + SPONSOR_APPRAISAL_OFFSET, edit.appraisal)
+        struct.pack_into("<I", data, record_offset + SPONSOR_FLAGS_OFFSET, flags)
         return True
     finally:
         pe.close()
@@ -1352,7 +1957,10 @@ def read_settings(
             raise ValueError("NPC 이동 확률 명령을 검증하지 못했습니다.")
         if wait_code == NPC_ORIGINAL_WAIT:
             wait_days = 60
-        elif wait_code[:6] == NPC_COMPARE_PREFIX and -60 <= struct.unpack("b", wait_code[6:7])[0] <= 0:
+        elif (
+            wait_code[:6] == NPC_COMPARE_PREFIX
+            and -60 <= struct.unpack("b", wait_code[6:7])[0] <= MAX_NPC_ARRIVAL_WAIT_DAYS - 60
+        ):
             wait_days = struct.unpack("b", wait_code[6:7])[0] + 60
         else:
             raise ValueError("NPC 이동 대기 명령을 검증하지 못했습니다.")
@@ -1400,6 +2008,10 @@ def apply_all(
     succession_min_age: int,
     cold_north_limit: int,
     cold_south_limit: int,
+    cash_limit: int,
+    deposit_limit: int,
+    fame_limit: int,
+    infamy_limit: int,
     npc_activity_min_age: int,
     npc_activity_max_age: int,
     western_encounter_denominator: int,
@@ -1409,6 +2021,8 @@ def apply_all(
     eclipse_enabled: bool = False,
     eclipse_latitude: str | int | float | Decimal = Decimal("67"),
     mistranslation_fixes_enabled: bool = False,
+    barmaid_edit: BarmaidEdit | None = None,
+    sponsor_edit: SponsorEdit | None = None,
 ) -> Path | None:
     """Apply all selected settings atomically and create one original backup."""
     target = target.resolve(strict=True)
@@ -1434,6 +2048,10 @@ def apply_all(
         succession_min_age,
         cold_north_limit,
         cold_south_limit,
+        cash_limit,
+        deposit_limit,
+        fame_limit,
+        infamy_limit,
     )
     apply_npc_activity_ages(updated, npc_activity_min_age, npc_activity_max_age)
     apply_combat_encounter_denominators(
@@ -1444,6 +2062,8 @@ def apply_all(
     apply_pirate_variety(updated, pirate_variety_enabled, pirate_variety_settings)
     apply_mistranslation_fixes(updated, mistranslation_fixes_enabled)
     apply_eclipse_polar_caps(updated, eclipse_enabled, eclipse_latitude)
+    apply_barmaid_edit(updated, barmaid_edit)
+    apply_sponsor_edit(updated, sponsor_edit)
     if bytes(updated) == original:
         return None
 

@@ -9,7 +9,10 @@ import struct
 PATCH_SECTION_NAME = b".patch"
 PATCH_SECTION_MAGIC = b"CDS3PAT\0"
 PATCH_SECTION_VERSION = 1
+# Earlier releases reserve 0x1000 bytes.  Keep that as the normal allocation
+# and grow it in place only when a feature needs one of the new slots below.
 PATCH_SECTION_SIZE = 0x1000
+PATCH_SECTION_EXPANDED_SIZE = 0x2000
 PATCH_SECTION_CHARACTERISTICS = 0x60000020  # code | execute | read
 
 # Keep independent patches in fixed, generously sized slots.  A stable layout
@@ -27,6 +30,11 @@ ECLIPSE_SLOT_SIZE = 0x100
 # exact pre-injection discovery record and DISEV part needed for safe reversal.
 KAABA_SLOT_OFFSET = 0x600
 KAABA_SLOT_SIZE = 0xA00
+# Each tavern maid name may use up to six Korean CP949 characters (12 bytes)
+# plus a NUL terminator.  Fixed 16-byte rows keep later name edits independent.
+BARMAID_NAME_SLOT_OFFSET = 0x1000
+BARMAID_NAME_SLOT_SIZE = 0x800
+BARMAID_NAME_SLOT_STRIDE = 0x10
 
 
 @dataclass(frozen=True)
@@ -101,10 +109,16 @@ def find_patch_section(data: bytes | bytearray) -> PatchSection | None:
     return None
 
 
-def ensure_patch_section(data: bytearray) -> tuple[PatchSection, bool]:
+def ensure_patch_section(
+    data: bytearray, required_size: int = PATCH_SECTION_SIZE,
+) -> tuple[PatchSection, bool]:
+    if required_size < PATCH_SECTION_SIZE:
+        raise ValueError(".patch 섹션 요청 크기가 기본 크기보다 작습니다.")
     existing = find_patch_section(data)
     if existing is not None:
-        return existing, False
+        if existing.raw_size >= required_size and existing.virtual_size >= required_size:
+            return existing, False
+        return _expand_patch_section(data, existing, required_size), True
 
     pe_offset, optional, section_count, section_table, section_alignment, file_alignment, image_base = _pe_layout(data)
     new_header = section_table + section_count * 40
@@ -133,12 +147,12 @@ def ensure_patch_section(data: bytearray) -> tuple[PatchSection, bool]:
         raise ValueError("파일 끝의 추가 데이터가 있어 안전하게 .patch 섹션을 붙일 수 없습니다.")
 
     raw_offset = _align(max_raw_end, file_alignment)
-    raw_size = _align(PATCH_SECTION_SIZE, file_alignment)
+    raw_size = _align(required_size, file_alignment)
     virtual_address = _align(
         max(va + max(virtual_size, raw_size_existing) for va, virtual_size, _, raw_size_existing in sections),
         section_alignment,
     )
-    virtual_size = PATCH_SECTION_SIZE
+    virtual_size = required_size
 
     if raw_offset > len(data):
         data.extend(b"\0" * (raw_offset - len(data)))
@@ -173,6 +187,38 @@ def ensure_patch_section(data: bytearray) -> tuple[PatchSection, bool]:
         new_header, virtual_address, virtual_size, raw_offset, raw_size, image_base,
     )
     return section, True
+
+
+def _expand_patch_section(
+    data: bytearray, section: PatchSection, required_size: int,
+) -> PatchSection:
+    """Extend an older final .patch section without moving existing payloads."""
+    pe_offset, optional, _count, section_table, section_alignment, file_alignment, image_base = _pe_layout(data)
+    if section.raw_offset + section.raw_size != len(data):
+        raise ValueError("기존 .patch 섹션이 파일 끝이 아니어서 안전하게 확장할 수 없습니다.")
+    for index in range(_count):
+        header = section_table + index * 40
+        raw_offset, raw_size = _u32(data, header + 20), _u32(data, header + 16)
+        if raw_offset + raw_size > section.raw_offset + section.raw_size:
+            raise ValueError("기존 .patch 섹션 뒤에 다른 PE 섹션이 있어 확장할 수 없습니다.")
+    raw_size = _align(required_size, file_alignment)
+    virtual_size = required_size
+    if raw_size < section.raw_size or virtual_size < section.virtual_size:
+        raise ValueError("기존 .patch 섹션 크기가 지원 범위를 벗어납니다.")
+    data.extend(b"\0" * (raw_size - section.raw_size))
+    struct.pack_into("<I", data, section.header_offset + 8, virtual_size)
+    struct.pack_into("<I", data, section.header_offset + 16, raw_size)
+    struct.pack_into("<I", data, optional + 4, _u32(data, optional + 4) + raw_size - section.raw_size)
+    highest_image_end = max(
+        _u32(data, section_table + index * 40 + 12) + _u32(data, section_table + index * 40 + 8)
+        for index in range(_count)
+    )
+    struct.pack_into("<I", data, optional + 56, _align(highest_image_end, section_alignment))
+    struct.pack_into("<I", data, optional + 64, 0)
+    return PatchSection(
+        section.header_offset, section.virtual_address, virtual_size,
+        section.raw_offset, raw_size, image_base,
+    )
 
 
 def write_slot(

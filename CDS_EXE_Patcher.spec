@@ -23,6 +23,7 @@ exe = EXE(
     a.datas,
     [],
     name='CDS_EXE_Patcher',
+    icon=['Resources/Icon.ico'],
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
