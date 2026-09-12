@@ -6,7 +6,7 @@ import argparse
 from pathlib import Path
 import sys
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "Resources" / "py"))
 from kaaba_patch import _parse_ls12
 
 

@@ -12,7 +12,10 @@ from tkinter import filedialog, messagebox, ttk
 
 from PIL import Image, ImageTk
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+# 보조 모듈은 Resources/py에 둔다. 소스 실행과 PyInstaller one-file
+# 배포본 모두에서 동일한 리소스 위치를 사용한다.
+_runtime_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+sys.path.insert(0, str(_runtime_root / "Resources" / "py"))
 from app_update import GitHubReleaseUpdater, UpdateError, bundled_resource_path, load_update_config
 from kaaba_patch import KaabaPatchError, apply as apply_kaaba_patch, is_enabled as is_kaaba_enabled
 from kaaba_save_patch import KaabaSavePatchError, promote_game_savedata
@@ -24,6 +27,12 @@ from slave_patch import (
     is_library_enabled as is_slave_library_enabled,
 )
 from mughal_patch import MughalPatchError, apply as apply_mughal_patch, is_enabled as is_mughal_enabled
+from avi_preview import AviPreview
+from city_reader import CityImageReadError, read_city_image
+from discover_animation_preview import DiscoverAnimationPreview
+from discovery_reader import DiscoveryImageReadError, discovery_still_count, read_discovery_still
+from item_reader import ItemImageReadError, read_item_image
+from portrait_reader import PortraitReadError, portrait_count, read_portrait
 
 from patch_cds_integrated import (
     BarmaidEdit,
@@ -31,16 +40,39 @@ from patch_cds_integrated import (
     BarmaidRecord,
     SponsorEdit,
     SponsorRecord,
+    PersonEdit,
+    PersonRecord,
+    ShipTypeEdit,
+    ShipTypeRecord,
+    CityEdit,
+    CityRecord,
+    ItemEdit,
+    ItemRecord,
+    DiscoveryEdit,
+    DiscoveryRecord,
+    FigureheadEffectSettings,
     COLD_LIMIT_DISABLED_VALUE,
     PirateVarietySettings,
     apply_all,
     cold_limit_to_latitude,
+    latitude_to_world_y,
+    longitude_to_world_x,
     get_screen_bounds,
     latitude_to_cold_limit,
     read_barmaid_child_aptitudes,
     read_barmaid_records,
     read_sponsor_records,
+    read_person_records,
+    read_ship_type_records,
+    read_city_records,
+    read_trade_good_names,
+    read_trade_region_goods,
+    read_item_records,
+    read_discovery_records,
+    read_figurehead_effect_settings,
     read_settings,
+    world_x_to_longitude,
+    world_y_to_latitude,
 )
 
 
@@ -170,8 +202,70 @@ def _load_sponsor_reference() -> tuple[tuple[str, ...], tuple[str, ...], tuple[s
 
 
 SPONSOR_NATION_NAMES, SPONSOR_JOB_NAMES, SPONSOR_BUILDING_NAMES = _load_sponsor_reference()
+
+
+def _load_city_reference() -> tuple[
+    tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...],
+]:
+    """Load the verified city field labels copied from the save editor."""
+    try:
+        reference = json.loads(
+            bundled_resource_path("Resources", "data", "city_reference.json").read_text(encoding="utf-8")
+        )
+        groups = tuple(
+            tuple(reference[key])
+            for key in ("nation_names", "culture_names", "status_names", "facility_names")
+        )
+    except (OSError, KeyError, TypeError, json.JSONDecodeError) as error:
+        raise RuntimeError("도시 참조 데이터를 읽지 못했습니다.") from error
+    if (
+        tuple(map(len, groups)) != (78, 11, 14, 16)
+        or not all(isinstance(value, str) and value for group in groups for value in group)
+    ):
+        raise RuntimeError("도시 참조 데이터가 올바르지 않습니다.")
+    return groups
+
+
+CITY_NATION_NAMES, CITY_CULTURE_NAMES, CITY_STATUS_NAMES, CITY_FACILITY_NAMES = _load_city_reference()
+CITY_SHIPYARD_LEVEL_NAMES = tuple(
+    f"{level}단계 (공급량 {supply})"
+    for level, supply in enumerate((20, 50, 100, 200, 350, 500, 700, 1000))
+)
 SPONSOR_GENDER_NAMES = ("남성", "여성")
 SPONSOR_PREFERENCE_NAMES = ("지리", "역사", "보물", "종교", "교역품", "미신", "생물", "민족")
+PERSON_JOB_NAMES = ("탐험가", "발굴자", "상인", "정복자")
+PERSON_BLOOD_NAMES = ("A형", "B형", "O형", "AB형")
+# The EXE's state 0 is a rival, state 1 can converse but cannot be hired,
+# and only state 2 enters the recruitable-person list.
+PERSON_EMPLOYMENT_STATE_NAMES = ("경쟁자", "대화 가능", "등용 가능")
+PERSON_ABILITY_NAMES = ("체력", "지력", "무력", "매력", "운", "신앙심")
+PERSON_SKILL_NAMES = (
+    "항해술", "운용술", "검술", "포술", "사격술", "의학", "웅변",
+    "측량", "역사학", "회계", "조선기술", "신학", "과학",
+)
+# EXE 원본의 발견물/후원자 취향 비트 순서. CDS3_EXE_ANALYSIS.md와 대조 완료.
+DISCOVERY_CATEGORY_NAMES = ("지리", "역사", "보물", "종교", "교역품", "미신", "생물", "민족")
+# UI 분류는 세이브 에디터의 논리 분류 순서를 따른다. EXE 아이템 테이블
+# +0x14의 원시 코드는 6=선수상, 7=서적, 8=동물로 뒤섞여 있으므로, 화면에
+# 표시하거나 저장할 때 반드시 아래 대응표를 거친다.
+ITEM_CATEGORY_NAMES = ("소지품", "복식품", "항해도구", "병기", "방어도구", "발견물", "서적", "동물", "선수상")
+ITEM_RAW_CATEGORY_TO_DISPLAY = (0, 1, 2, 3, 4, 5, 8, 6, 7)
+ITEM_DISPLAY_CATEGORY_TO_RAW = (0, 1, 2, 3, 4, 5, 7, 8, 6)
+TRADE_GOOD_IMAGE_SLOT_OFFSET = 134
+FIGUREHEAD_DISASTER_NAMES = (
+    "쥐떼 발생 방지", "괴혈병·전염병 방지", "반란 방지", "폭풍·눈보라 방지",
+)
+FIGUREHEAD_DISASTER_GRADES = (1,) * 14 + (2,) * 12 + (3,) * 8
+
+
+def item_category_name(raw_category_id: int) -> str:
+    """Return the logical, user-facing item category for an EXE raw code."""
+    return ITEM_CATEGORY_NAMES[ITEM_RAW_CATEGORY_TO_DISPLAY[raw_category_id]]
+
+
+def item_category_raw_id(category_name: str) -> int:
+    """Translate a user-facing item category back to the EXE raw code."""
+    return ITEM_DISPLAY_CATEGORY_TO_RAW[ITEM_CATEGORY_NAMES.index(category_name)]
 
 
 def _windows_dpi_scale(hwnd: int = 0) -> float:
@@ -214,6 +308,7 @@ class NativeWinEdit:
         self._font_handle: int | None = None
         self.enabled = True
         self.max_bytes: int | None = None
+        self.max_characters: int | None = None
         self._user32 = None
         scale = _windows_dpi_scale(self.root.winfo_id())
         host.configure(width=round(width * scale), height=round(height * scale))
@@ -285,7 +380,8 @@ class NativeWinEdit:
             focused = self.enabled and visible and self._user32.GetFocus() == self.hwnd
             if focused:
                 raw_text = self.get()
-                text = self._limit_cp949_bytes(raw_text, self.max_bytes) if self.max_bytes is not None else raw_text
+                text = raw_text[:self.max_characters] if self.max_characters is not None else raw_text
+                text = self._limit_cp949_bytes(text, self.max_bytes) if self.max_bytes is not None else text
                 if text != raw_text:
                     self._set_text_and_place_cursor_at_end(text)
                 if text != self._last_text:
@@ -432,6 +528,114 @@ class CDSExecutablePatcher(tk.Tk):
         self._sponsor_records: tuple[SponsorRecord, ...] = ()
         self._sponsor_by_identifier: dict[int, SponsorRecord] = {}
         self._sponsor_controls: list[tk.Widget] = []
+        self.person_name = tk.StringVar()
+        self.person_face_code = tk.StringVar()
+        self.person_gender = tk.StringVar()
+        self.person_age = tk.StringVar()
+        self.person_nation = tk.StringVar()
+        self.person_job = tk.StringVar()
+        self.person_fame = tk.StringVar()
+        self.person_infamy = tk.StringVar()
+        self.person_employment_state = tk.StringVar()
+        self.person_city = tk.StringVar()
+        self.person_building = tk.StringVar()
+        self.person_blood = tk.StringVar()
+        self.person_hire_cost = tk.StringVar()
+        self.person_abilities = [tk.StringVar() for _ in PERSON_ABILITY_NAMES]
+        self.person_vitality = tk.StringVar()
+        self.person_skill_levels = [tk.StringVar() for _ in (*PERSON_SKILL_NAMES, *BARMAID_LANGUAGE_NAMES)]
+        self._person_records: tuple[PersonRecord, ...] = ()
+        self._person_by_identifier: dict[int, PersonRecord] = {}
+        self._person_controls: list[tk.Widget] = []
+        self.ship_name = tk.StringVar()
+        self.ship_shipyard_requirement = tk.StringVar()
+        self.ship_base_power = tk.StringVar()
+        self.ship_power_limit = tk.StringVar()
+        self.ship_base_durability = tk.StringVar()
+        self.ship_durability_limit = tk.StringVar()
+        self.ship_base_weight = tk.StringVar()
+        self.ship_weight_limit = tk.StringVar()
+        self.ship_base_capacity = tk.StringVar()
+        self.ship_capacity_limit = tk.StringVar()
+        self.ship_base_cannons = tk.StringVar()
+        self.ship_cannon_limit = tk.StringVar()
+        self.ship_min_crew = tk.StringVar()
+        self._ship_type_records: tuple[ShipTypeRecord, ...] = ()
+        self._ship_type_by_identifier: dict[int, ShipTypeRecord] = {}
+        self._ship_type_controls: list[tk.Widget] = []
+        self.city_name = tk.StringVar()
+        self.city_inland_connections = [tk.StringVar(), tk.StringVar()]
+        self.city_nation = tk.StringVar()
+        self.city_culture = tk.StringVar()
+        self.city_status = tk.StringVar()
+        self.city_update_counter = tk.StringVar()
+        self.city_discovered = tk.BooleanVar(value=False)
+        self.city_ship_candidates = [tk.BooleanVar(value=False) for _ in range(8)]
+        self.city_shipyard_level = tk.StringVar()
+        self.city_facilities = [tk.BooleanVar(value=False) for _ in CITY_FACILITY_NAMES]
+        self.city_trade_region = tk.StringVar()
+        self.city_common_goods = [tk.StringVar(value="없음") for _ in range(5)]
+        self.city_specialty = tk.StringVar()
+        self.city_specialty_price = tk.StringVar()
+        self.city_specialty_supply_index = tk.StringVar()
+        self.city_market_goods = [tk.StringVar() for _ in range(8)]
+        self.city_trade_region_editor = tk.StringVar(value="0")
+        self.city_trade_region_goods = [tk.StringVar(value="없음") for _ in range(5)]
+        self._trade_region_good_photos: list[ImageTk.PhotoImage | None] = [None] * 5
+        self._city_records: tuple[CityRecord, ...] = ()
+        self._city_by_identifier: dict[int, CityRecord] = {}
+        self._trade_good_names: tuple[str, ...] = ()
+        self._trade_region_goods: tuple[tuple[int, ...], ...] = ()
+        self._city_controls: list[tk.Widget] = []
+        self.item_name = tk.StringVar()
+        self.item_category = tk.StringVar()
+        self.item_buy_price = tk.StringVar()
+        self.item_sell_price = tk.StringVar()
+        self.item_effect_value = tk.StringVar()
+        self.figurehead_disaster_chances = [tk.StringVar(value=value) for value in ("11", "41", "71")]
+        self.figurehead_cannon_damage_reduction = tk.StringVar(value="20")
+        self.figurehead_shooting_damage_reduction = tk.StringVar(value="50")
+        self.figurehead_melee_damage_reduction = tk.StringVar(value="70")
+        self.figurehead_cannon_attack_percent = tk.StringVar(value="120")
+        self.figurehead_shooting_attack_percent = tk.StringVar(value="150")
+        self.figurehead_melee_attack_percent = tk.StringVar(value="200")
+        self.figurehead_special_cannon_attack_percent = tk.StringVar(value="200")
+        self.figurehead_all_attack_percent = tk.StringVar(value="150")
+        self.figurehead_hull_recovery = tk.StringVar(value="5")
+        self.figurehead_movement_bonus = tk.StringVar(value="1")
+        self.figurehead_movement_maximum = tk.StringVar(value="6")
+        self.figurehead_selected_effect = tk.StringVar(value="")
+        self.figurehead_selected_code = tk.StringVar(value="")
+        self.figurehead_disaster_description = tk.StringVar(value="")
+        self.figurehead_primary_label = tk.StringVar(value="효과 수치:")
+        self.figurehead_primary_unit = tk.StringVar(value="")
+        self.figurehead_secondary_label = tk.StringVar(value="")
+        self.figurehead_secondary_unit = tk.StringVar(value="")
+        self._figurehead_controls: list[tk.Widget] = []
+        self._figurehead_loaded = False
+        self._item_records: tuple[ItemRecord, ...] = ()
+        self._item_by_identifier: dict[int, ItemRecord] = {}
+        self._item_controls: list[tk.Widget] = []
+        self.discovery_name = tk.StringVar()
+        self.discovery_category = tk.StringVar()
+        self.discovery_still_slot = tk.StringVar()
+        self.discovery_value = tk.StringVar()
+        self.discovery_min_x = tk.StringVar()
+        self.discovery_min_y = tk.StringVar()
+        self.discovery_max_x = tk.StringVar()
+        self.discovery_max_y = tk.StringVar()
+        self.discovery_min_x_direction = tk.StringVar()
+        self.discovery_min_y_direction = tk.StringVar()
+        self.discovery_max_x_direction = tk.StringVar()
+        self.discovery_max_y_direction = tk.StringVar()
+        self._discovery_records: tuple[DiscoveryRecord, ...] = ()
+        self._discovery_by_identifier: dict[int, DiscoveryRecord] = {}
+        self._discovery_controls: list[tk.Widget] = []
+        self._discovery_coordinate_controls: list[tk.Widget] = []
+        self._discovery_still_slot_count = 85
+        # Standard archives contain 144 female and 414 male portraits.  The
+        # values are replaced with the selected installation's actual counts.
+        self._portrait_counts = {True: 144, False: 414}
         self.barmaid_selection = tk.StringVar()
         self.barmaid_face_code = tk.StringVar()
         self.barmaid_appearance_year = tk.StringVar()
@@ -453,16 +657,37 @@ class CDSExecutablePatcher(tk.Tk):
         self._splash_image: ImageTk.PhotoImage | None = None
         self._barmaid_face_photo: ImageTk.PhotoImage | None = None
         self._sponsor_face_photo: ImageTk.PhotoImage | None = None
+        self._person_face_photo: ImageTk.PhotoImage | None = None
+        self._item_image_photo: ImageTk.PhotoImage | None = None
+        self._city_image_photo: ImageTk.PhotoImage | None = None
+        self._discovery_image_photo: ImageTk.PhotoImage | None = None
+        self._ship_avi_preview: AviPreview | None = None
+        self._discovery_avi_preview: AviPreview | None = None
+        self._discover_animation_preview: DiscoverAnimationPreview | None = None
         self._integer_validation_command = self.register(self._validate_integer_text)
         self._decimal_validation_command = self.register(self._validate_decimal_text)
         self.barmaid_face_code.trace_add("write", self._on_barmaid_face_code_changed)
         self.sponsor_face_code.trace_add("write", self._on_sponsor_face_code_changed)
         self.sponsor_gender.trace_add("write", self._on_sponsor_face_code_changed)
+        self.person_face_code.trace_add("write", self._on_person_face_code_changed)
+        self.person_gender.trace_add("write", self._on_person_face_code_changed)
+        self.discovery_still_slot.trace_add("write", self._on_discovery_media_changed)
+        self.city_trade_region.trace_add("write", lambda *_args: self._refresh_city_common_goods())
         for variable in self.barmaid_child_aptitudes:
             variable.trace_add("write", self._update_barmaid_child_aptitude_total)
         self._build()
         self._center_main_window()
         self._show_splash()
+
+    def destroy(self) -> None:
+        """Release the native AVI decoder before Tk tears down its widgets."""
+        if self._ship_avi_preview is not None:
+            self._ship_avi_preview.stop()
+        if self._discovery_avi_preview is not None:
+            self._discovery_avi_preview.stop()
+        if self._discover_animation_preview is not None:
+            self._discover_animation_preview.stop()
+        super().destroy()
 
     def _set_window_icon(self) -> None:
         """Use the bundled icon for the application window and taskbar."""
@@ -576,10 +801,27 @@ class CDSExecutablePatcher(tk.Tk):
         additional_tab = ttk.Frame(settings_notebook, padding=10)
         barmaid_tab = ttk.Frame(settings_notebook, padding=10)
         sponsor_tab = ttk.Frame(settings_notebook, padding=10)
+        person_tab = ttk.Frame(settings_notebook, padding=10)
+        ship_tab = ttk.Frame(settings_notebook, padding=10)
+        city_tab = ttk.Frame(settings_notebook, padding=10)
+        trade_region_tab = ttk.Frame(settings_notebook, padding=10)
+        item_tab = ttk.Frame(settings_notebook, padding=10)
+        figurehead_tab = ttk.Frame(settings_notebook, padding=10)
+        discovery_tab = ttk.Frame(settings_notebook, padding=10)
         settings_notebook.add(basic_tab, text="기본 정보")
         settings_notebook.add(additional_tab, text="추가 패치")
         settings_notebook.add(barmaid_tab, text="여급")
         settings_notebook.add(sponsor_tab, text="후원자")
+        settings_notebook.add(person_tab, text="인물")
+        settings_notebook.add(ship_tab, text="함선")
+        settings_notebook.add(city_tab, text="도시")
+        settings_notebook.add(trade_region_tab, text="교역권")
+        settings_notebook.add(item_tab, text="아이템")
+        settings_notebook.add(figurehead_tab, text="선수상 효과")
+        settings_notebook.add(discovery_tab, text="발견물")
+        # The discovery page is shorter than the largest notebook page.  Keep
+        # its grid at the upper-left instead of centering it in the spare area.
+        discovery_tab.grid_anchor("nw")
 
         basic_left_column = ttk.Frame(basic_tab)
         basic_left_column.grid(row=0, column=0, padx=(0, 5), sticky="new")
@@ -802,8 +1044,8 @@ class CDSExecutablePatcher(tk.Tk):
         ).grid(row=2, column=3, padx=(10, 0), pady=(6, 2), sticky="w")
         self._update_cold_limit_entry_states()
 
-        translation_box = ttk.LabelFrame(additional_left_column, text="오역 수정", padding=10)
-        translation_box.grid(row=0, column=0, sticky="ew")
+        translation_box = ttk.LabelFrame(basic_right_column, text="오역 수정", padding=10)
+        translation_box.grid(row=3, column=0, pady=(10, 0), sticky="ew")
         ttk.Checkbutton(
             translation_box,
             text="용어·지명·아이템명·인명·힌트 오역 수정 적용",
@@ -816,7 +1058,7 @@ class CDSExecutablePatcher(tk.Tk):
         ).grid(row=0, column=1, padx=(10, 0), sticky="e")
 
         discovery_box = ttk.LabelFrame(additional_left_column, text="발견물", padding=10)
-        discovery_box.grid(row=1, column=0, pady=(10, 0), sticky="ew")
+        discovery_box.grid(row=0, column=0, sticky="ew")
 
         ttk.Checkbutton(
             discovery_box,
@@ -849,8 +1091,705 @@ class CDSExecutablePatcher(tk.Tk):
             command=lambda: self.show_patch_details("무제국 발견 조건", MUGHAL_DETAILS),
         ).grid(row=2, column=1, padx=(10, 0), pady=(6, 0), sticky="e")
 
+        person_list_box = ttk.LabelFrame(person_tab, text="인물 목록", padding=10)
+        person_list_box.grid(row=0, column=0, rowspan=2, sticky="nsew")
+        person_tab.grid_rowconfigure(1, weight=1)
+        person_list_box.columnconfigure(0, weight=1)
+        person_list_box.rowconfigure(1, weight=1)
+        ttk.Label(person_list_box, text="검색:").grid(row=0, column=0, sticky="w")
+        person_search_host = tk.Frame(person_list_box, width=150, height=23)
+        person_search_host.grid(row=0, column=1, padx=(6, 0), sticky="w")
+        self.person_search_entry = NativeWinEdit(person_search_host, self._schedule_person_list_refresh, width=150, height=23)
+        person_list_frame = ttk.Frame(person_list_box)
+        person_list_frame.grid(row=1, column=0, columnspan=2, pady=(8, 0), sticky="nsew")
+        self.person_list = ttk.Treeview(person_list_frame, columns=("id", "name"), show="headings", height=15, selectmode="browse")
+        self.person_list.heading("id", text="번호"); self.person_list.heading("name", text="이름")
+        self.person_list.column("id", width=48, anchor="center", stretch=False); self.person_list.column("name", width=175, anchor="w")
+        person_scroll = ttk.Scrollbar(person_list_frame, orient="vertical", command=self.person_list.yview)
+        self.person_list.configure(yscrollcommand=person_scroll.set)
+        self.person_list.grid(row=0, column=0, sticky="nsew"); person_scroll.grid(row=0, column=1, sticky="ns")
+        self.person_list.bind("<<TreeviewSelect>>", self._on_person_selected)
+        person_list_frame.columnconfigure(0, weight=1)
+        person_list_frame.rowconfigure(0, weight=1)
+
+        person_details = ttk.Notebook(person_tab)
+        person_details.grid(row=0, column=1, padx=(10, 0), sticky="nw")
+        person_basic_tab = ttk.Frame(person_details, padding=4)
+        person_skill_tab = ttk.Frame(person_details, padding=4)
+        person_details.add(person_basic_tab, text="기본 정보")
+        person_details.add(person_skill_tab, text="기술·언어")
+
+        person_box = ttk.LabelFrame(person_basic_tab, text="인물 정보", padding=10)
+        person_box.grid(row=0, column=0, sticky="nw")
+        ttk.Label(person_box, text="이름:").grid(row=0, column=0, sticky="w")
+        ttk.Label(person_box, textvariable=self.person_name, width=26).grid(row=0, column=1, columnspan=3, padx=(6, 0), sticky="w")
+        preview_box = tk.Frame(person_box, width=84, height=100, bg="#222222", relief="ridge", bd=2)
+        preview_box.grid(row=0, column=4, rowspan=6, padx=(14, 0), sticky="n"); preview_box.grid_propagate(False)
+        self.person_image_preview = tk.Label(preview_box, bg="#222222", fg="#DDDDDD", text="이미지 없음"); self.person_image_preview.pack(fill=tk.BOTH, expand=True)
+        person_rows = (("얼굴 코드", self.person_face_code, 0, 413), ("1480년 나이", self.person_age, -100, 100), ("초기 명성", self.person_fame, 0, 65535), ("초기 악명", self.person_infamy, 0, 65535), ("고용비 계수", self.person_hire_cost, 0, 2000))
+        for row, (label, variable, low, high) in enumerate(person_rows, start=1):
+            ttk.Label(person_box, text=f"{label}:").grid(row=row, column=0, pady=2, sticky="w")
+            entry = ttk.Spinbox(person_box, from_=low, to=high, textvariable=variable, width=7, state="disabled")
+            entry.grid(row=row, column=1, padx=(6, 0), pady=2, sticky="w"); self._limit_integer_input(entry, low, high); self._person_controls.append(entry)
+            if label == "얼굴 코드": self.person_face_entry = entry
+        for row, label, variable, values, width in (
+            (1, "성별", self.person_gender, SPONSOR_GENDER_NAMES, 8),
+            (2, "국가", self.person_nation, SPONSOR_NATION_NAMES, 16),
+            (3, "직업", self.person_job, PERSON_JOB_NAMES, 8),
+            (4, "등용 상태", self.person_employment_state, PERSON_EMPLOYMENT_STATE_NAMES, 10),
+            (6, "혈액형", self.person_blood, PERSON_BLOOD_NAMES, 8),
+            (7, "출현 도시", self.person_city, ("도시 없음", *BARMAID_CITY_NAMES), 16),
+            (8, "출현 시설", self.person_building, SPONSOR_BUILDING_NAMES, 8),
+        ):
+            column = 2 if row <= 4 else 0
+            ttk.Label(person_box, text=f"{label}:").grid(row=row, column=column, padx=(14, 0) if column else 0, pady=2, sticky="w")
+            combo = ttk.Combobox(person_box, textvariable=variable, values=values, width=width, state="disabled")
+            combo.grid(row=row, column=column + 1, padx=(6, 0), pady=2, sticky="w"); self._bind_combobox_arrow_selection(combo); self._person_controls.append(combo)
+
+        ability_box = ttk.LabelFrame(person_basic_tab, text="능력치", padding=10)
+        ability_box.grid(row=1, column=0, pady=(10, 0), sticky="ew")
+        for index, (name, variable) in enumerate(zip(PERSON_ABILITY_NAMES, self.person_abilities)):
+            row, column = index % 2, (index // 2) * 2
+            ttk.Label(ability_box, text=f"{name}:").grid(row=row, column=column, padx=(12, 0) if column else 0, pady=3, sticky="w")
+            entry = ttk.Spinbox(ability_box, from_=0, to=255, textvariable=variable, width=6, state="disabled")
+            entry.grid(row=row, column=column + 1, padx=(6, 0), pady=3, sticky="w")
+            self._limit_integer_input(entry, 0, 255); self._person_controls.append(entry)
+        ttk.Label(ability_box, text="생명력:").grid(row=2, column=0, pady=(8, 0), sticky="w")
+        vitality_entry = ttk.Spinbox(ability_box, from_=0, to=2000, textvariable=self.person_vitality, width=6, state="disabled")
+        vitality_entry.grid(row=2, column=1, padx=(6, 0), pady=(8, 0), sticky="w")
+        self._limit_integer_input(vitality_entry, 0, 2000); self._person_controls.append(vitality_entry)
+
+        skill_box = ttk.LabelFrame(person_skill_tab, text="기술", padding=10)
+        skill_box.grid(row=0, column=0, sticky="nw")
+        language_box = ttk.LabelFrame(person_skill_tab, text="언어", padding=10)
+        language_box.grid(row=0, column=1, padx=(8, 0), sticky="nw")
+        for index, (name, variable) in enumerate(zip(PERSON_SKILL_NAMES, self.person_skill_levels[:len(PERSON_SKILL_NAMES)])):
+            row, column = index % 7, (index // 7) * 2
+            ttk.Label(skill_box, text=f"{name}:").grid(row=row, column=column, padx=(12, 0) if column else 0, pady=2, sticky="w")
+            entry = ttk.Spinbox(skill_box, from_=0, to=3, textvariable=variable, width=3, state="disabled")
+            entry.grid(row=row, column=column + 1, padx=(4, 0), pady=2, sticky="w")
+            self._limit_integer_input(entry, 0, 3); self._person_controls.append(entry)
+        for index, (name, variable) in enumerate(zip(BARMAID_LANGUAGE_NAMES, self.person_skill_levels[len(PERSON_SKILL_NAMES):])):
+            row, column = index % 7, (index // 7) * 2
+            ttk.Label(language_box, text=f"{name}:").grid(row=row, column=column, padx=(12, 0) if column else 0, pady=2, sticky="w")
+            entry = ttk.Spinbox(language_box, from_=0, to=3, textvariable=variable, width=3, state="disabled")
+            entry.grid(row=row, column=column + 1, padx=(4, 0), pady=2, sticky="w")
+            self._limit_integer_input(entry, 0, 3); self._person_controls.append(entry)
+        self._person_controls.extend((self.person_search_entry, self.person_list))
+        self._set_person_controls_enabled(False)
+
+        ship_list_box = ttk.LabelFrame(ship_tab, text="선종 목록", padding=10)
+        ship_list_box.grid(row=0, column=0, sticky="ns")
+        self.ship_type_list = ttk.Treeview(ship_list_box, columns=("id", "name"), show="headings", height=8, selectmode="browse")
+        self.ship_type_list.heading("id", text="번호"); self.ship_type_list.heading("name", text="선종")
+        self.ship_type_list.column("id", width=48, anchor="center", stretch=False); self.ship_type_list.column("name", width=150, anchor="w")
+        ship_scroll = ttk.Scrollbar(ship_list_box, orient="vertical", command=self.ship_type_list.yview)
+        self.ship_type_list.configure(yscrollcommand=ship_scroll.set)
+        self.ship_type_list.grid(row=0, column=0, sticky="nsew"); ship_scroll.grid(row=0, column=1, sticky="ns")
+        self.ship_type_list.bind("<<TreeviewSelect>>", self._on_ship_type_selected)
+
+        ship_box = ttk.LabelFrame(ship_tab, text="선종 기본 정보", padding=10)
+        ship_box.grid(row=0, column=1, padx=(10, 0), sticky="nw")
+        ttk.Label(ship_box, text="선종 이름 (한글 최대 5자):").grid(row=0, column=0, sticky="w")
+        ship_name_host = tk.Frame(ship_box, width=180, height=23)
+        ship_name_host.grid(row=0, column=1, columnspan=3, padx=(6, 0), sticky="w")
+        self.ship_name_entry = NativeWinEdit(ship_name_host, lambda: None, width=180, height=23)
+        self.ship_name_entry.max_bytes = 10
+        self.ship_name_entry.max_characters = 5
+        ship_rows = (
+            ("조선소 조건", self.ship_shipyard_requirement, 0, 127),
+            ("기본 추진력", self.ship_base_power, 0, 255),
+            ("추진력 한계", self.ship_power_limit, 0, 255),
+            ("기본 내구력", self.ship_base_durability, 0, 0x7FFFFFFF),
+            ("내구력 한계", self.ship_durability_limit, 0, 0x7FFFFFFF),
+            ("기본 중량", self.ship_base_weight, 0, 0xFFFFFFFF),
+            ("중량 한계", self.ship_weight_limit, 0, 0xFFFFFFFF),
+            ("기본 적재(내부)", self.ship_base_capacity, 0, 0xFFFFFFFF),
+            ("적재 한계", self.ship_capacity_limit, 0, 0xFFFFFFFF),
+            ("기본 포문", self.ship_base_cannons, 0, 255),
+            ("포문 한계", self.ship_cannon_limit, 0, 255),
+            ("최소 승무원", self.ship_min_crew, 10, 265),
+        )
+        for index, (label, variable, low, high) in enumerate(ship_rows):
+            row, column = index % 6 + 1, (index // 6) * 2
+            ttk.Label(ship_box, text=f"{label}:").grid(row=row, column=column, padx=(16, 0) if column else 0, pady=2, sticky="w")
+            entry = ttk.Spinbox(ship_box, from_=low, to=high, textvariable=variable, width=11, state="disabled")
+            entry.grid(row=row, column=column + 1, padx=(6, 0), pady=2, sticky="w")
+            self._limit_integer_input(entry, low, high); self._ship_type_controls.append(entry)
+        self._ship_type_controls.extend((self.ship_name_entry, self.ship_type_list))
+        self._set_ship_type_controls_enabled(False)
+
+        # The original S00~S07 AVI clips are 240×176.  Keep that exact size
+        # directly beneath the static ship-type details.
+        ship_preview_box = tk.Frame(
+            ship_tab, width=244, height=180, bg="#222222", relief="ridge", bd=2,
+        )
+        ship_preview_box.grid(row=1, column=1, padx=(10, 0), pady=(10, 0), sticky="nw")
+        ship_preview_box.grid_propagate(False)
+        self.ship_image_preview = tk.Label(
+            ship_preview_box, bg="#222222", fg="#DDDDDD", text="이미지 없음",
+        )
+        self.ship_image_preview.pack(fill=tk.BOTH, expand=True)
+        self._ship_avi_preview = AviPreview(
+            self, self.ship_image_preview, width=240, height=176,
+        )
+
+        city_list_box = ttk.LabelFrame(city_tab, text="도시 목록", padding=10)
+        city_list_box.grid(row=0, column=0, rowspan=2, sticky="ns")
+        city_tab.grid_columnconfigure(1, weight=1)
+        city_tab.grid_rowconfigure(1, minsize=324)
+        ttk.Label(city_list_box, text="검색:").grid(row=0, column=0, sticky="w")
+        city_search_host = tk.Frame(city_list_box, width=180, height=23)
+        city_search_host.grid(row=0, column=1, padx=(6, 0), sticky="w")
+        self.city_search_entry = NativeWinEdit(
+            city_search_host, self._schedule_city_list_refresh, width=180, height=23,
+        )
+        city_list_frame = ttk.Frame(city_list_box)
+        city_list_frame.grid(row=1, column=0, columnspan=2, pady=(8, 0), sticky="nsew")
+        self.city_list = ttk.Treeview(
+            city_list_frame, columns=("id", "name"), show="headings", height=16, selectmode="browse",
+        )
+        self.city_list.heading("id", text="번호"); self.city_list.heading("name", text="이름")
+        self.city_list.column("id", width=48, anchor="center", stretch=False)
+        self.city_list.column("name", width=160, anchor="w", stretch=True)
+        city_scroll = ttk.Scrollbar(city_list_frame, orient="vertical", command=self.city_list.yview)
+        self.city_list.configure(yscrollcommand=city_scroll.set)
+        self.city_list.grid(row=0, column=0, sticky="nsew"); city_scroll.grid(row=0, column=1, sticky="ns")
+        self.city_list.bind("<<TreeviewSelect>>", self._on_city_selected)
+
+        city_details_notebook = ttk.Notebook(city_tab)
+        city_details_notebook.grid(row=0, column=1, padx=(10, 0), sticky="nsew")
+        city_info_tab = ttk.Frame(city_details_notebook, padding=2)
+        city_ship_tab = ttk.Frame(city_details_notebook, padding=2)
+        city_market_tab = ttk.Frame(city_details_notebook, padding=2)
+        city_trade_tab = ttk.Frame(city_details_notebook, padding=2)
+        city_facility_tab = ttk.Frame(city_details_notebook, padding=2)
+        city_details_notebook.add(city_info_tab, text="도시 정보")
+        city_details_notebook.add(city_ship_tab, text="조선소")
+        city_details_notebook.add(city_market_tab, text="시장 정보")
+        city_details_notebook.add(city_trade_tab, text="교역")
+        city_details_notebook.add(city_facility_tab, text="시설 정보")
+        # Reserve the lower 400×320 preview first.  The editor notebook gets
+        # only the vertical space left in the fixed-size main window.
+        city_details_notebook.configure(height=130)
+
+        city_box = ttk.Frame(city_info_tab)
+        city_box.grid(row=0, column=0, sticky="nw")
+        city_trade_box = ttk.Frame(city_trade_tab)
+        city_trade_box.grid(row=0, column=0, pady=(6, 0), sticky="nw")
+        ttk.Label(city_box, text="이름:").grid(row=0, column=0, sticky="w")
+        city_name_host = tk.Frame(city_box, width=180, height=23)
+        city_name_host.grid(row=0, column=1, padx=(6, 0), sticky="w")
+        self.city_name_entry = NativeWinEdit(city_name_host, lambda: None, width=180, height=23)
+        self.city_name_entry.max_characters = 8; self.city_name_entry.max_bytes = 16
+        self.city_discovered_check = ttk.Checkbutton(
+            city_box, text="발견", variable=self.city_discovered, state="disabled",
+        )
+        self.city_discovered_check.grid(row=0, column=2, columnspan=2, padx=(14, 0), sticky="w")
+
+        ttk.Label(city_box, text="소속 국가:").grid(row=1, column=0, pady=(4, 0), sticky="w")
+        self.city_nation_selector = ttk.Combobox(
+            city_box, textvariable=self.city_nation, values=CITY_NATION_NAMES, width=18, state="disabled",
+        )
+        self.city_nation_selector.grid(row=1, column=1, padx=(6, 0), pady=(4, 0), sticky="w")
+        self._bind_combobox_arrow_selection(self.city_nation_selector)
+        ttk.Label(city_box, text="문화권:").grid(row=1, column=2, padx=(14, 0), pady=(4, 0), sticky="w")
+        self.city_culture_selector = ttk.Combobox(
+            city_box, textvariable=self.city_culture, values=CITY_CULTURE_NAMES, width=12, state="disabled",
+        )
+        self.city_culture_selector.grid(row=1, column=3, padx=(6, 0), pady=(4, 0), sticky="w")
+        self._bind_combobox_arrow_selection(self.city_culture_selector)
+
+        ttk.Label(city_box, text="도시 상태:").grid(row=2, column=0, pady=(4, 0), sticky="w")
+        self.city_status_selector = ttk.Combobox(
+            city_box, textvariable=self.city_status, values=CITY_STATUS_NAMES, width=18, state="disabled",
+        )
+        self.city_status_selector.grid(row=2, column=1, padx=(6, 0), pady=(4, 0), sticky="w")
+        self._bind_combobox_arrow_selection(self.city_status_selector)
+        ttk.Label(city_box, text="도시 규모:").grid(row=2, column=2, padx=(14, 0), pady=(4, 0), sticky="w")
+        self.city_shipyard_level_selector = ttk.Combobox(
+            city_box, textvariable=self.city_shipyard_level,
+            values=CITY_SHIPYARD_LEVEL_NAMES, width=18, state="disabled",
+        )
+        self.city_shipyard_level_selector.grid(row=2, column=3, padx=(6, 0), pady=(4, 0), sticky="w")
+        self._bind_combobox_arrow_selection(self.city_shipyard_level_selector)
+
+        connection_values = ("연결 없음", *BARMAID_CITY_NAMES)
+        self.city_connection_selectors: list[ttk.Combobox] = []
+        for slot, variable in enumerate(self.city_inland_connections, start=1):
+            label_column = 0 if slot == 1 else 2
+            value_column = label_column + 1
+            ttk.Label(city_box, text=f"내륙 연결 {slot}:").grid(
+                row=3, column=label_column, padx=(14, 0) if slot == 2 else 0,
+                pady=(4, 0), sticky="w",
+            )
+            selector = ttk.Combobox(
+                city_box, textvariable=variable, values=connection_values, width=18, state="disabled",
+            )
+            selector.grid(row=3, column=value_column, padx=(6, 0), pady=(4, 0), sticky="w")
+            self._bind_combobox_arrow_selection(selector)
+            self.city_connection_selectors.append(selector); self._city_controls.append(selector)
+        ttk.Label(city_trade_box, text="교역권:").grid(row=0, column=0, sticky="w")
+        self.city_trade_region_entry = ttk.Spinbox(
+            city_trade_box, from_=0, to=26, textvariable=self.city_trade_region, width=6, state="disabled",
+        )
+        self.city_trade_region_entry.grid(row=0, column=1, padx=(6, 0), sticky="w")
+        self._limit_integer_input(self.city_trade_region_entry, 0, 26)
+        ttk.Label(city_trade_box, text="시세:").grid(row=1, column=0, pady=(4, 0), sticky="w")
+        self.city_update_counter_entry = ttk.Spinbox(
+            city_trade_box, from_=0, to=255, textvariable=self.city_update_counter,
+            width=6, state="disabled",
+        )
+        self.city_update_counter_entry.grid(row=1, column=1, padx=(6, 0), pady=(4, 0), sticky="w")
+        self._limit_integer_input(self.city_update_counter_entry, 0, 255)
+        ttk.Label(city_trade_box, text="특산품:").grid(row=2, column=0, pady=(4, 0), sticky="w")
+        self.city_specialty_selector = ttk.Combobox(
+            city_trade_box, textvariable=self.city_specialty, values=("특산품 없음",), width=18, state="disabled",
+        )
+        self.city_specialty_selector.grid(row=2, column=1, padx=(6, 0), pady=(4, 0), sticky="w")
+        self._bind_combobox_arrow_selection(self.city_specialty_selector)
+        ttk.Label(city_trade_box, text="기준가:").grid(row=3, column=0, pady=(4, 0), sticky="w")
+        self.city_specialty_price_entry = ttk.Spinbox(
+            city_trade_box, from_=0, to=99_999_999, textvariable=self.city_specialty_price,
+            width=10, state="disabled",
+        )
+        self.city_specialty_price_entry.grid(row=3, column=1, padx=(6, 0), pady=(4, 0), sticky="w")
+        self._limit_integer_input(self.city_specialty_price_entry, 0, 99_999_999)
+        ttk.Label(city_trade_box, text="공급 단계:").grid(row=4, column=0, pady=(4, 0), sticky="w")
+        self.city_specialty_supply_entry = ttk.Spinbox(
+            city_trade_box, from_=0, to=7, textvariable=self.city_specialty_supply_index, width=6, state="disabled",
+        )
+        self.city_specialty_supply_entry.grid(row=4, column=1, padx=(6, 0), pady=(4, 0), sticky="w")
+        self._limit_integer_input(self.city_specialty_supply_entry, 0, 7)
+        self.city_common_good_entries: list[ttk.Entry] = []
+        for identifier, variable in enumerate(self.city_common_goods):
+            ttk.Label(city_trade_box, text=f"교역품 {identifier + 1}:").grid(
+                row=identifier, column=2, padx=(24, 0),
+                pady=(4, 0) if identifier else 0, sticky="w",
+            )
+            entry = ttk.Entry(
+                city_trade_box, textvariable=variable, width=18,
+                state="readonly", takefocus=False,
+            )
+            entry.grid(
+                row=identifier, column=3, padx=(6, 0),
+                pady=(4, 0) if identifier else 0, sticky="w",
+            )
+            self.city_common_good_entries.append(entry)
+        self._city_controls.extend((
+            self.city_name_entry, self.city_list, self.city_search_entry,
+            self.city_discovered_check, self.city_nation_selector, self.city_culture_selector,
+            self.city_status_selector, self.city_update_counter_entry,
+            self.city_trade_region_entry, self.city_specialty_selector,
+            self.city_specialty_price_entry, self.city_specialty_supply_entry,
+        ))
+
+        city_ship_box = ttk.Frame(city_ship_tab, padding=2)
+        city_ship_box.grid(row=0, column=0, sticky="nw")
+        self._city_controls.append(self.city_shipyard_level_selector)
+        self.city_ship_candidate_buttons: list[ttk.Checkbutton] = []
+        for identifier, variable in enumerate(self.city_ship_candidates):
+            button = ttk.Checkbutton(city_ship_box, text=f"선종 {identifier}", variable=variable, state="disabled")
+            button.grid(
+                row=identifier // 4, column=identifier % 4,
+                padx=(8, 0) if identifier % 4 else 0, pady=(8, 0), sticky="w",
+            )
+            self.city_ship_candidate_buttons.append(button); self._city_controls.append(button)
+
+        city_facility_box = ttk.Frame(city_facility_tab, padding=2)
+        city_facility_box.grid(row=0, column=0, sticky="nw")
+        self.city_facility_buttons: list[ttk.Checkbutton] = []
+        for identifier, (name, variable) in enumerate(zip(CITY_FACILITY_NAMES, self.city_facilities)):
+            button = ttk.Checkbutton(city_facility_box, text=name, variable=variable, state="disabled")
+            button.grid(
+                row=identifier // 4, column=identifier % 4,
+                padx=(10, 0) if identifier % 4 else 0, pady=(4, 0), sticky="w",
+            )
+            self.city_facility_buttons.append(button); self._city_controls.append(button)
+
+        city_trade_region_box = ttk.LabelFrame(trade_region_tab, text="교역권 정보", padding=10)
+        city_trade_region_box.grid(row=0, column=0, sticky="nw")
+        ttk.Label(city_trade_region_box, text="교역권:").grid(row=0, column=0, sticky="w")
+        self.city_trade_region_editor_selector = ttk.Combobox(
+            city_trade_region_box, textvariable=self.city_trade_region_editor,
+            values=tuple(str(identifier) for identifier in range(27)),
+            width=6, state="disabled",
+        )
+        self.city_trade_region_editor_selector.grid(row=0, column=1, padx=(6, 0), sticky="w")
+        self._bind_combobox_arrow_selection(self.city_trade_region_editor_selector)
+        self.city_trade_region_editor_selector.bind(
+            "<<ComboboxSelected>>", self._show_trade_region_editor,
+        )
+        self._city_controls.append(self.city_trade_region_editor_selector)
+        self.city_trade_region_good_selectors: list[ttk.Combobox] = []
+        self.city_trade_region_good_image_labels: list[tk.Label] = []
+        for identifier, variable in enumerate(self.city_trade_region_goods):
+            good_box = ttk.Frame(city_trade_region_box)
+            good_box.grid(
+                row=1, column=identifier, padx=(0, 10) if identifier < 4 else 0,
+                pady=(12, 0), sticky="w",
+            )
+            ttk.Label(good_box, text=f"교역품 {identifier + 1}").pack(anchor="w")
+            selector = ttk.Combobox(
+                good_box, textvariable=variable,
+                values=("없음",), width=15, state="disabled",
+            )
+            selector.pack(pady=(4, 0), anchor="w")
+            self._bind_combobox_arrow_selection(selector)
+            selector.bind(
+                "<<ComboboxSelected>>",
+                lambda _event, slot=identifier: self._on_trade_region_good_selected(slot),
+            )
+            self.city_trade_region_good_selectors.append(selector)
+            self._city_controls.append(selector)
+
+            preview_box = tk.Frame(
+                city_trade_region_box, width=124, height=124,
+                bg="#222222", relief="ridge", bd=2,
+            )
+            preview_box.grid(
+                row=2, column=identifier, padx=(0, 10) if identifier < 4 else 0,
+                pady=(8, 0), sticky="nw",
+            )
+            preview_box.pack_propagate(False)
+            preview_label = tk.Label(
+                preview_box, bg="#222222", fg="#dddddd", text="이미지 없음",
+            )
+            preview_label.pack(fill=tk.BOTH, expand=True)
+            self.city_trade_region_good_image_labels.append(preview_label)
+
+        city_market_box = ttk.Frame(city_market_tab)
+        city_market_box.grid(row=0, column=0, sticky="nw")
+        self.city_market_good_selectors: list[ttk.Combobox] = []
+        for identifier, variable in enumerate(self.city_market_goods):
+            row, column = identifier % 4, (identifier // 4) * 2
+            ttk.Label(city_market_box, text=f"품목 {identifier + 1}:").grid(
+                row=row, column=column, padx=(10, 0) if column else 0, pady=(4, 0), sticky="w",
+            )
+            selector = ttk.Combobox(
+                city_market_box, textvariable=variable, values=("없음",), width=13, state="disabled",
+            )
+            selector.grid(row=row, column=column + 1, padx=(5, 0), pady=(4, 0), sticky="w")
+            self._bind_combobox_arrow_selection(selector)
+            self.city_market_good_selectors.append(selector); self._city_controls.append(selector)
+
+        city_preview_box = tk.Frame(city_tab, width=404, height=324, bg="#222222", relief="ridge", bd=2)
+        # CITYCG 원본 크기는 도시 정보 아래에 별도 프레임으로 둔다.
+        city_preview_box.grid(row=1, column=1, padx=(10, 0), pady=(10, 0), sticky="sw")
+        city_preview_box.grid_propagate(False)
+        city_preview_box.pack_propagate(False)
+        self.city_image_preview = tk.Label(city_preview_box, bg="#222222", fg="#DDDDDD", text="이미지 없음")
+        self.city_image_preview.pack(fill=tk.BOTH, expand=True)
+        self._set_city_controls_enabled(False)
+
+        item_list_box = ttk.LabelFrame(item_tab, text="아이템 목록", padding=10)
+        item_list_box.grid(row=0, column=0, rowspan=2, sticky="nsew")
+        item_tab.grid_rowconfigure(1, weight=1)
+        item_list_box.columnconfigure(0, weight=1)
+        item_list_box.rowconfigure(1, weight=1)
+        ttk.Label(item_list_box, text="검색:").grid(row=0, column=0, sticky="w")
+        item_search_host = tk.Frame(item_list_box, width=180, height=23)
+        item_search_host.grid(row=0, column=1, padx=(6, 0), sticky="w")
+        self.item_search_entry = NativeWinEdit(item_search_host, self._schedule_item_list_refresh, width=180, height=23)
+        item_list_frame = ttk.Frame(item_list_box)
+        item_list_frame.grid(row=1, column=0, columnspan=2, pady=(8, 0), sticky="nsew")
+        self.item_list = ttk.Treeview(
+            item_list_frame, columns=("id", "category", "name"), show="headings", height=17, selectmode="browse",
+        )
+        self.item_list.heading("id", text="번호"); self.item_list.heading("category", text="분류"); self.item_list.heading("name", text="이름")
+        self.item_list.column("id", width=48, anchor="center", stretch=False)
+        self.item_list.column("category", width=68, anchor="center", stretch=False)
+        self.item_list.column("name", width=185, anchor="w")
+        item_scroll = ttk.Scrollbar(item_list_frame, orient="vertical", command=self.item_list.yview)
+        self.item_list.configure(yscrollcommand=item_scroll.set)
+        self.item_list.grid(row=0, column=0, sticky="nsew"); item_scroll.grid(row=0, column=1, sticky="ns")
+        self.item_list.bind("<<TreeviewSelect>>", self._on_item_selected)
+        item_list_frame.columnconfigure(0, weight=1)
+        item_list_frame.rowconfigure(0, weight=1)
+
+        item_box = ttk.LabelFrame(item_tab, text="아이템 정보", padding=10)
+        item_box.grid(row=0, column=1, padx=(10, 0), sticky="nw")
+        ttk.Label(item_box, text="이름 (한글 최대 11자):").grid(row=0, column=0, sticky="w")
+        item_name_host = tk.Frame(item_box, width=220, height=23)
+        item_name_host.grid(row=0, column=1, padx=(6, 0), sticky="w")
+        self.item_name_entry = NativeWinEdit(item_name_host, lambda: None, width=220, height=23)
+        self.item_name_entry.max_characters = 11
+        self.item_name_entry.max_bytes = 21
+        ttk.Label(item_box, text="분류:").grid(row=1, column=0, pady=(8, 0), sticky="w")
+        self.item_category_selector = ttk.Combobox(
+            item_box, textvariable=self.item_category, values=ITEM_CATEGORY_NAMES, width=12, state="disabled",
+        )
+        self.item_category_selector.grid(row=1, column=1, padx=(6, 0), pady=(8, 0), sticky="w")
+        self._bind_combobox_arrow_selection(self.item_category_selector)
+        ttk.Label(item_box, text="구매가:").grid(row=2, column=0, pady=(8, 0), sticky="w")
+        self.item_buy_price_entry = ttk.Spinbox(
+            item_box, from_=0, to=99_999_999, textvariable=self.item_buy_price, width=11, state="disabled",
+        )
+        self.item_buy_price_entry.grid(row=2, column=1, padx=(6, 0), pady=(8, 0), sticky="w")
+        self._limit_integer_input(self.item_buy_price_entry, 0, 99_999_999)
+        ttk.Label(item_box, text="판매가:").grid(row=3, column=0, pady=(8, 0), sticky="w")
+        self.item_sell_price_entry = ttk.Spinbox(
+            item_box, from_=0, to=99_999_999, textvariable=self.item_sell_price, width=11, state="disabled",
+        )
+        self.item_sell_price_entry.grid(row=3, column=1, padx=(6, 0), pady=(8, 0), sticky="w")
+        self._limit_integer_input(self.item_sell_price_entry, 0, 99_999_999)
+        ttk.Label(item_box, text="효과 코드:").grid(row=4, column=0, pady=(8, 0), sticky="w")
+        self.item_effect_entry = ttk.Spinbox(
+            item_box, from_=0, to=255, textvariable=self.item_effect_value, width=7, state="disabled",
+        )
+        self.item_effect_entry.grid(row=4, column=1, padx=(6, 0), pady=(8, 0), sticky="w")
+        self._limit_integer_input(self.item_effect_entry, 0, 255)
+        item_preview_box = tk.Frame(item_tab, width=124, height=124, bg="#222222", relief="ridge", bd=2)
+        item_preview_box.grid(row=1, column=1, padx=(10, 0), pady=(10, 0), sticky="nw")
+        item_preview_box.grid_propagate(False)
+        self.item_image_preview = tk.Label(item_preview_box, bg="#222222", fg="#DDDDDD", text="이미지 없음")
+        self.item_image_preview.pack(expand=True)
+        self._item_controls.extend((
+            self.item_search_entry, self.item_list, self.item_name_entry,
+            self.item_category_selector, self.item_buy_price_entry,
+            self.item_sell_price_entry, self.item_effect_entry,
+        ))
+        self._set_item_controls_enabled(False)
+
+        figurehead_tab.columnconfigure(0, weight=1)
+        figurehead_tab.columnconfigure(1, weight=1)
+        figurehead_tab.rowconfigure(0, weight=1)
+
+        figurehead_list_box = ttk.LabelFrame(figurehead_tab, text="선수상 효과 목록", padding=10)
+        figurehead_list_box.grid(row=0, column=0, padx=(0, 5), sticky="nsew")
+        figurehead_list_box.columnconfigure(0, weight=1)
+        figurehead_list_box.rowconfigure(0, weight=1)
+        figurehead_list_frame = ttk.Frame(figurehead_list_box)
+        figurehead_list_frame.grid(row=0, column=0, sticky="nsew")
+        figurehead_list_frame.columnconfigure(0, weight=1)
+        figurehead_list_frame.rowconfigure(0, weight=1)
+        self.figurehead_list = ttk.Treeview(
+            figurehead_list_frame,
+            columns=("code", "effect", "setting"),
+            show="headings",
+            height=20,
+            selectmode="none",
+        )
+        self.figurehead_list.heading("code", text="코드")
+        self.figurehead_list.heading("effect", text="효과")
+        self.figurehead_list.heading("setting", text="설정값")
+        self.figurehead_list.column("code", width=45, anchor="center", stretch=False)
+        self.figurehead_list.column("effect", width=205, anchor="w", stretch=False)
+        self.figurehead_list.column("setting", width=160, anchor="w", stretch=True)
+        figurehead_scroll = ttk.Scrollbar(
+            figurehead_list_frame, orient="vertical", command=self.figurehead_list.yview,
+        )
+        self.figurehead_list.configure(yscrollcommand=figurehead_scroll.set)
+        self.figurehead_list.grid(row=0, column=0, sticky="nsew")
+        figurehead_scroll.grid(row=0, column=1, sticky="ns")
+        self.figurehead_list.bind("<<TreeviewSelect>>", self._on_figurehead_effect_selected)
+
+        figurehead_detail_box = ttk.LabelFrame(figurehead_tab, text="선택한 선수상 효과", padding=10)
+        figurehead_detail_box.grid(row=0, column=1, padx=(5, 0), sticky="new")
+        ttk.Label(figurehead_detail_box, text="효과 코드:").grid(row=0, column=0, sticky="w")
+        ttk.Label(figurehead_detail_box, textvariable=self.figurehead_selected_code).grid(
+            row=0, column=1, columnspan=2, padx=(8, 0), sticky="w",
+        )
+        ttk.Label(figurehead_detail_box, text="효과:").grid(row=1, column=0, pady=(8, 0), sticky="w")
+        ttk.Label(figurehead_detail_box, textvariable=self.figurehead_selected_effect).grid(
+            row=1, column=1, columnspan=2, padx=(8, 0), pady=(8, 0), sticky="w",
+        )
+
+        figurehead_disaster_box = ttk.LabelFrame(
+            figurehead_detail_box, text="해상 재해 방지", padding=10,
+        )
+        figurehead_disaster_box.grid(row=2, column=0, columnspan=3, pady=(12, 0), sticky="ew")
+        figurehead_disaster_box.columnconfigure(1, weight=1)
+        ttk.Label(
+            figurehead_disaster_box, textvariable=self.figurehead_disaster_description,
+        ).grid(row=0, column=0, columnspan=3, sticky="w")
+        ttk.Label(figurehead_disaster_box, text="방지 확률:").grid(row=1, column=0, pady=(8, 0), sticky="w")
+        self.figurehead_disaster_entry = ttk.Spinbox(
+            figurehead_disaster_box, from_=0, to=100,
+            textvariable=self.figurehead_disaster_chances[0], width=8, state="disabled",
+        )
+        self.figurehead_disaster_entry.grid(row=1, column=1, padx=(8, 4), pady=(8, 0), sticky="w")
+        ttk.Label(figurehead_disaster_box, text="%").grid(row=1, column=2, pady=(8, 0), sticky="w")
+        self._limit_integer_input(self.figurehead_disaster_entry, 0, 100)
+
+        figurehead_value_box = ttk.LabelFrame(
+            figurehead_detail_box, text="고유 효과", padding=10,
+        )
+        figurehead_value_box.grid(row=3, column=0, columnspan=3, pady=(10, 0), sticky="ew")
+        self.figurehead_primary_label_widget = ttk.Label(
+            figurehead_value_box, textvariable=self.figurehead_primary_label,
+        )
+        self.figurehead_primary_label_widget.grid(row=0, column=0, sticky="w")
+        self.figurehead_primary_entry = ttk.Spinbox(
+            figurehead_value_box, from_=0, to=1000, width=8, state="disabled",
+        )
+        self.figurehead_primary_entry.grid(row=0, column=1, padx=(8, 4), sticky="w")
+        self.figurehead_primary_unit_widget = ttk.Label(
+            figurehead_value_box, textvariable=self.figurehead_primary_unit,
+        )
+        self.figurehead_primary_unit_widget.grid(row=0, column=2, sticky="w")
+        self.figurehead_secondary_label_widget = ttk.Label(
+            figurehead_value_box, textvariable=self.figurehead_secondary_label,
+        )
+        self.figurehead_secondary_label_widget.grid(row=1, column=0, pady=(8, 0), sticky="w")
+        self.figurehead_secondary_entry = ttk.Spinbox(
+            figurehead_value_box, from_=1, to=127, width=8, state="disabled",
+        )
+        self.figurehead_secondary_entry.grid(row=1, column=1, padx=(8, 4), pady=(8, 0), sticky="w")
+        self.figurehead_secondary_unit_widget = ttk.Label(
+            figurehead_value_box, textvariable=self.figurehead_secondary_unit,
+        )
+        self.figurehead_secondary_unit_widget.grid(row=1, column=2, pady=(8, 0), sticky="w")
+        self._figurehead_controls.extend((
+            self.figurehead_list, self.figurehead_disaster_entry,
+            self.figurehead_primary_entry, self.figurehead_secondary_entry,
+        ))
+        for variable in (
+            *self.figurehead_disaster_chances,
+            self.figurehead_cannon_damage_reduction,
+            self.figurehead_shooting_damage_reduction,
+            self.figurehead_melee_damage_reduction,
+            self.figurehead_cannon_attack_percent,
+            self.figurehead_shooting_attack_percent,
+            self.figurehead_melee_attack_percent,
+            self.figurehead_hull_recovery,
+            self.figurehead_movement_bonus,
+            self.figurehead_movement_maximum,
+            self.figurehead_special_cannon_attack_percent,
+            self.figurehead_all_attack_percent,
+        ):
+            variable.trace_add("write", self._on_figurehead_effect_value_changed)
+        self._refresh_figurehead_effect_list()
+        self._set_figurehead_controls_enabled(False)
+
+        discovery_list_box = ttk.LabelFrame(discovery_tab, text="발견물 목록", padding=10)
+        discovery_list_box.grid(row=0, column=0, rowspan=3, sticky="nsew")
+        discovery_tab.grid_rowconfigure(2, weight=1)
+        discovery_list_box.columnconfigure(0, weight=1)
+        discovery_list_box.rowconfigure(1, weight=1)
+        ttk.Label(discovery_list_box, text="검색:").grid(row=0, column=0, sticky="w")
+        discovery_search_host = tk.Frame(discovery_list_box, width=160, height=23)
+        discovery_search_host.grid(row=0, column=1, padx=(6, 0), sticky="w")
+        self.discovery_search_entry = NativeWinEdit(
+            discovery_search_host, self._schedule_discovery_list_refresh, width=160, height=23,
+        )
+        discovery_list_frame = ttk.Frame(discovery_list_box)
+        discovery_list_frame.grid(row=1, column=0, columnspan=2, pady=(8, 0), sticky="nsew")
+        self.discovery_list = ttk.Treeview(
+            discovery_list_frame, columns=("id", "category", "name"), show="headings",
+            height=16, selectmode="browse",
+        )
+        self.discovery_list.heading("id", text="번호")
+        self.discovery_list.heading("category", text="분류")
+        self.discovery_list.heading("name", text="이름")
+        self.discovery_list.column("id", width=48, anchor="center", stretch=False)
+        self.discovery_list.column("category", width=58, anchor="center", stretch=False)
+        self.discovery_list.column("name", width=150, anchor="w", stretch=True)
+        discovery_scroll = ttk.Scrollbar(
+            discovery_list_frame, orient="vertical", command=self.discovery_list.yview,
+        )
+        self.discovery_list.configure(yscrollcommand=discovery_scroll.set)
+        self.discovery_list.grid(row=0, column=0, sticky="nsew")
+        discovery_scroll.grid(row=0, column=1, sticky="ns")
+        self.discovery_list.bind("<<TreeviewSelect>>", self._on_discovery_selected)
+        discovery_list_frame.columnconfigure(0, weight=1)
+        discovery_list_frame.rowconfigure(0, weight=1)
+
+        discovery_box = ttk.LabelFrame(discovery_tab, text="발견물 정보", padding=10)
+        discovery_box.grid(row=0, column=1, padx=(10, 0), sticky="nw")
+        discovery_name_row = ttk.Frame(discovery_box)
+        discovery_name_row.grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(discovery_name_row, text="이름:").grid(row=0, column=0, sticky="w")
+        discovery_name_host = tk.Frame(discovery_name_row, width=230, height=23)
+        discovery_name_host.grid(row=0, column=1, padx=(6, 0), sticky="w")
+        self.discovery_name_entry = NativeWinEdit(discovery_name_host, lambda: None, width=230, height=23)
+        self.discovery_name_entry.max_bytes = 31
+        self.discovery_media_label = ttk.Label(discovery_box, text="미디어 번호:")
+        self.discovery_media_label.grid(row=0, column=2, padx=(14, 0), sticky="w")
+        self.discovery_still_slot_entry = ttk.Spinbox(
+            discovery_box, from_=0, to=84, textvariable=self.discovery_still_slot,
+            width=7, state="disabled",
+        )
+        self.discovery_still_slot_entry.grid(row=0, column=3, padx=(6, 0), sticky="w")
+        self._limit_integer_input(self.discovery_still_slot_entry, 0, 84)
+        ttk.Label(discovery_box, text="분류:").grid(row=1, column=2, padx=(14, 0), pady=3, sticky="w")
+        self.discovery_category_selector = ttk.Combobox(
+            discovery_box, textvariable=self.discovery_category, values=DISCOVERY_CATEGORY_NAMES,
+            width=10, state="disabled",
+        )
+        self.discovery_category_selector.grid(row=1, column=3, padx=(6, 0), pady=3, sticky="w")
+        self._bind_combobox_arrow_selection(self.discovery_category_selector)
+        ttk.Label(discovery_box, text="가치:").grid(row=2, column=2, padx=(14, 0), pady=3, sticky="w")
+        self.discovery_value_entry = ttk.Spinbox(
+            discovery_box, from_=0, to=99_999_999, textvariable=self.discovery_value,
+            width=11, state="disabled",
+        )
+        self.discovery_value_entry.grid(row=2, column=3, padx=(6, 0), pady=3, sticky="w")
+        self._limit_integer_input(self.discovery_value_entry, 0, 99_999_999)
+
+        discovery_coordinates_box = ttk.Frame(discovery_box)
+        discovery_coordinates_box.grid(row=1, column=0, rowspan=2, columnspan=2, pady=(3, 0), sticky="nw")
+        for row, (axis, directions, first_direction, first, second_direction, second, high) in enumerate((
+            ("위도", ("북위", "남위"), self.discovery_min_y_direction, self.discovery_min_y,
+             self.discovery_max_y_direction, self.discovery_max_y, 90),
+            ("경도", ("동경", "서경"), self.discovery_min_x_direction, self.discovery_min_x,
+             self.discovery_max_x_direction, self.discovery_max_x, 180),
+        )):
+            ttk.Label(discovery_coordinates_box, text=f"{axis}:").grid(row=row, column=0, pady=3, sticky="w")
+            first_direction_selector = ttk.Combobox(
+                discovery_coordinates_box, textvariable=first_direction, values=directions,
+                width=4, state="disabled",
+            )
+            first_direction_selector.grid(row=row, column=1, padx=(6, 0), pady=3, sticky="w")
+            self._bind_combobox_arrow_selection(first_direction_selector)
+            first_entry = ttk.Entry(discovery_coordinates_box, textvariable=first, width=7, state="disabled")
+            first_entry.grid(row=row, column=2, padx=(4, 0), pady=3, sticky="w")
+            self._limit_decimal_input(first_entry, 0, high)
+            ttk.Label(discovery_coordinates_box, text="~").grid(row=row, column=3, padx=(4, 0), pady=3, sticky="w")
+            second_direction_selector = ttk.Combobox(
+                discovery_coordinates_box, textvariable=second_direction, values=directions,
+                width=4, state="disabled",
+            )
+            second_direction_selector.grid(row=row, column=4, padx=(4, 0), pady=3, sticky="w")
+            self._bind_combobox_arrow_selection(second_direction_selector)
+            second_entry = ttk.Entry(discovery_coordinates_box, textvariable=second, width=7, state="disabled")
+            second_entry.grid(row=row, column=5, padx=(4, 0), pady=3, sticky="w")
+            self._limit_decimal_input(second_entry, 0, high)
+            self._discovery_controls.extend((
+                first_direction_selector, first_entry, second_direction_selector, second_entry,
+            ))
+            self._discovery_coordinate_controls.extend((
+                first_direction_selector, first_entry, second_direction_selector, second_entry,
+            ))
+
+        discovery_preview_box = tk.Frame(discovery_tab, width=324, height=244, bg="#222222", relief="ridge", bd=2)
+        discovery_preview_box.grid(row=1, column=1, padx=(10, 0), pady=(10, 0), sticky="nw")
+        discovery_preview_box.grid_propagate(False)
+        self.discovery_image_preview = tk.Label(
+            discovery_preview_box, bg="#222222", fg="#DDDDDD", text="이미지 없음",
+        )
+        self.discovery_image_preview.pack(expand=True)
+        self._discovery_avi_preview = AviPreview(
+            self, self.discovery_image_preview, width=320, height=240,
+        )
+        self._discover_animation_preview = DiscoverAnimationPreview(
+            self, self.discovery_image_preview,
+        )
+        self._discovery_controls.extend((
+            self.discovery_search_entry,
+            self.discovery_name_entry,
+            self.discovery_list,
+            self.discovery_category_selector,
+            self.discovery_value_entry,
+            self.discovery_still_slot_entry,
+        ))
+        self._set_discovery_controls_enabled(False)
+
         barmaid_list_box = ttk.LabelFrame(barmaid_tab, text="여급 목록", padding=10)
-        barmaid_list_box.grid(row=0, column=0, rowspan=2, sticky="ns")
+        barmaid_list_box.grid(row=0, column=0, rowspan=3, sticky="nsew")
+        barmaid_tab.grid_rowconfigure(2, weight=1)
+        barmaid_list_box.columnconfigure(0, weight=1)
+        barmaid_list_box.rowconfigure(1, weight=1)
         ttk.Label(barmaid_list_box, text="검색:").grid(row=0, column=0, sticky="w")
         barmaid_search_host = tk.Frame(barmaid_list_box, width=150, height=23)
         barmaid_search_host.grid(row=0, column=1, padx=(6, 0), sticky="w")
@@ -963,7 +1902,10 @@ class CDSExecutablePatcher(tk.Tk):
         self._set_barmaid_controls_enabled(False)
 
         sponsor_list_box = ttk.LabelFrame(sponsor_tab, text="후원자 목록", padding=10)
-        sponsor_list_box.grid(row=0, column=0, rowspan=3, sticky="ns")
+        sponsor_list_box.grid(row=0, column=0, rowspan=4, sticky="nsew")
+        sponsor_tab.grid_rowconfigure(3, weight=1)
+        sponsor_list_box.columnconfigure(0, weight=1)
+        sponsor_list_box.rowconfigure(1, weight=1)
         ttk.Label(sponsor_list_box, text="검색:").grid(row=0, column=0, sticky="w")
         sponsor_search_host = tk.Frame(sponsor_list_box, width=150, height=23)
         sponsor_search_host.grid(row=0, column=1, padx=(6, 0), sticky="w")
@@ -978,7 +1920,7 @@ class CDSExecutablePatcher(tk.Tk):
         self.sponsor_list.heading("id", text="번호")
         self.sponsor_list.heading("name", text="이름")
         self.sponsor_list.column("id", width=48, anchor="center", stretch=False)
-        self.sponsor_list.column("name", width=150, anchor="w", stretch=True)
+        self.sponsor_list.column("name", width=165, anchor="w", stretch=True)
         sponsor_list_scroll = ttk.Scrollbar(sponsor_list_frame, orient="vertical", command=self.sponsor_list.yview)
         self.sponsor_list.configure(yscrollcommand=sponsor_list_scroll.set)
         self.sponsor_list.grid(row=0, column=0, sticky="nsew")
@@ -1004,10 +1946,10 @@ class CDSExecutablePatcher(tk.Tk):
         self.sponsor_image_preview.pack(fill=tk.BOTH, expand=True)
         ttk.Label(sponsor_box, text="얼굴 코드:").grid(row=1, column=0, pady=(8, 0), sticky="w")
         self.sponsor_face_code_entry = ttk.Spinbox(
-            sponsor_box, from_=0, to=412, textvariable=self.sponsor_face_code, width=5, state="disabled",
+            sponsor_box, from_=0, to=413, textvariable=self.sponsor_face_code, width=5, state="disabled",
         )
         self.sponsor_face_code_entry.grid(row=1, column=1, padx=(6, 0), pady=(8, 0), sticky="w")
-        self._limit_integer_input(self.sponsor_face_code_entry, 0, 412)
+        self._limit_integer_input(self.sponsor_face_code_entry, 0, 413)
         ttk.Label(sponsor_box, text="성별:").grid(row=1, column=2, padx=(14, 0), pady=(8, 0), sticky="w")
         self.sponsor_gender_selector = ttk.Combobox(
             sponsor_box, textvariable=self.sponsor_gender, values=SPONSOR_GENDER_NAMES, width=7, state="disabled",
@@ -1232,19 +2174,43 @@ class CDSExecutablePatcher(tk.Tk):
         self._refresh_barmaid_child_aptitudes(face_code)
         self._show_barmaid_face(face_code)
 
+    def _portrait_max_code(self, *, female: bool) -> int:
+        """Return the last valid portrait code from the selected game files."""
+        return max(0, self._portrait_counts[female] - 1)
+
+    def _configure_face_code_entry(self, entry: ttk.Spinbox, *, female: bool) -> None:
+        maximum = self._portrait_max_code(female=female)
+        entry.configure(
+            from_=0,
+            to=maximum,
+            validatecommand=(self._integer_validation_command, "%P", "0", str(maximum)),
+        )
+
+    def _configure_portrait_code_ranges(self) -> None:
+        """Synchronize all face-code editors with the archive part counts."""
+        self._configure_face_code_entry(self.barmaid_face_code_entry, female=True)
+        sponsor_gender = self.sponsor_gender_selector.current()
+        self._configure_face_code_entry(
+            self.sponsor_face_code_entry, female=sponsor_gender == 1,
+        )
+        try:
+            person_gender = SPONSOR_GENDER_NAMES.index(self.person_gender.get())
+        except ValueError:
+            person_gender = 0
+        self._configure_face_code_entry(
+            self.person_face_entry, female=person_gender == 1,
+        )
+
     def _show_barmaid_face(self, face_code: int | None) -> None:
-        """Display the FEMALE.CDS portrait assigned to the current face code."""
+        """Display the selected game's FEMALE.CDS portrait for this face code."""
         if face_code is None:
             self._barmaid_face_photo = None
             self.barmaid_image_preview.configure(image="", text="이미지 없음")
             return
-        image_path = bundled_resource_path(
-            "Resources", "faces", "female", f"female_{face_code:03d}.png",
-        )
         try:
-            with Image.open(image_path) as source:
-                self._barmaid_face_photo = ImageTk.PhotoImage(source.convert("RGBA"))
-        except (OSError, tk.TclError):
+            source = self._read_game_portrait(face_code, female=True)
+            self._barmaid_face_photo = ImageTk.PhotoImage(source.convert("RGBA"))
+        except (PortraitReadError, tk.TclError):
             self._barmaid_face_photo = None
             self.barmaid_image_preview.configure(image="", text="이미지 없음")
             return
@@ -1252,12 +2218,15 @@ class CDSExecutablePatcher(tk.Tk):
 
     def _on_sponsor_face_code_changed(self, *_args: str) -> None:
         """Refresh the sponsor portrait after face code or gender changes."""
+        gender = self.sponsor_gender_selector.current()
+        if gender in (0, 1):
+            self._configure_face_code_entry(self.sponsor_face_code_entry, female=gender == 1)
         try:
             face_code = int(self.sponsor_face_code.get())
         except ValueError:
             self._show_sponsor_face(None, None)
             return
-        self._show_sponsor_face(face_code, self.sponsor_gender_selector.current())
+        self._show_sponsor_face(face_code, gender)
 
     def _show_sponsor_face(self, face_code: int | None, gender: int | None) -> None:
         """Display the portrait from MALE.CDS or FEMALE.CDS for the sponsor."""
@@ -1265,18 +2234,1079 @@ class CDSExecutablePatcher(tk.Tk):
             self._sponsor_face_photo = None
             self.sponsor_image_preview.configure(image="", text="이미지 없음")
             return
-        archive = "female" if gender == 1 else "male"
-        image_path = bundled_resource_path(
-            "Resources", "faces", archive, f"{archive}_{face_code:03d}.png",
-        )
         try:
-            with Image.open(image_path) as source:
-                self._sponsor_face_photo = ImageTk.PhotoImage(source.convert("RGBA"))
-        except (OSError, tk.TclError):
+            source = self._read_game_portrait(face_code, female=gender == 1)
+            self._sponsor_face_photo = ImageTk.PhotoImage(source.convert("RGBA"))
+        except (PortraitReadError, tk.TclError):
             self._sponsor_face_photo = None
             self.sponsor_image_preview.configure(image="", text="이미지 없음")
             return
         self.sponsor_image_preview.configure(image=self._sponsor_face_photo, text="")
+
+    def _set_person_controls_enabled(self, enabled: bool) -> None:
+        for control in self._person_controls:
+            if isinstance(control, NativeWinEdit): control.set_enabled(enabled)
+            elif isinstance(control, ttk.Treeview): control.configure(selectmode="browse" if enabled else "none")
+            elif isinstance(control, ttk.Combobox): control.configure(state="readonly" if enabled else "disabled")
+            else: control.state(["!disabled"] if enabled else ["disabled"])
+
+    def _schedule_person_list_refresh(self) -> None:
+        job = getattr(self, "_person_search_job", None)
+        if job: self.after_cancel(job)
+        self._person_search_job = self.after(120, self._refresh_person_list)
+
+    def _refresh_person_list(self) -> None:
+        tree = self.person_list; selected = tree.selection()
+        for item in tree.get_children(): tree.delete(item)
+        query = self.person_search_entry.get().strip().casefold()
+        for record in self._person_records:
+            if not query or query in record.name.casefold(): tree.insert("", "end", iid=str(record.identifier), values=(f"{record.identifier:03d}", record.name))
+        if selected and tree.exists(selected[0]): tree.selection_set(selected[0])
+
+    def _selected_person_record(self) -> PersonRecord | None:
+        selection = self.person_list.selection()
+        return self._person_by_identifier.get(int(selection[0])) if selection else None
+
+    def _load_person_records(self, records: tuple[PersonRecord, ...]) -> None:
+        self._person_records = records; self._person_by_identifier = {record.identifier: record for record in records}
+        self.person_search_entry.set(""); self._refresh_person_list(); self._set_person_controls_enabled(bool(records))
+        if records:
+            self.person_list.selection_set(str(records[0].identifier)); self._on_person_selected()
+
+    def _on_person_selected(self, _event: tk.Event | None = None) -> None:
+        record = self._selected_person_record()
+        if not record: return
+        self.person_name.set(record.name); self.person_gender.set(SPONSOR_GENDER_NAMES[record.gender]); self.person_face_code.set(str(record.face_code)); self.person_age.set(str(record.age_at_1480)); self.person_nation.set(SPONSOR_NATION_NAMES[record.nation_id]); self.person_job.set(PERSON_JOB_NAMES[record.job_id]); self.person_fame.set(str(record.fame)); self.person_infamy.set(str(record.infamy)); self.person_employment_state.set(PERSON_EMPLOYMENT_STATE_NAMES[record.employment_state]); self.person_city.set("도시 없음" if record.city_id < 0 else BARMAID_CITY_NAMES[record.city_id]); self.person_building.set(SPONSOR_BUILDING_NAMES[record.building_id]); self.person_blood.set(PERSON_BLOOD_NAMES[record.blood_id]); self.person_hire_cost.set(str(record.hire_cost))
+        for variable, value in zip(self.person_abilities, record.abilities): variable.set(str(value))
+        self.person_vitality.set(str(record.vitality))
+        for variable, value in zip(self.person_skill_levels, record.skills): variable.set(str(value))
+        self._show_person_face(record.face_code, record.gender)
+
+    def _on_person_face_code_changed(self, *_args: str) -> None:
+        try:
+            gender = SPONSOR_GENDER_NAMES.index(self.person_gender.get())
+            self._configure_face_code_entry(self.person_face_entry, female=gender == 1)
+            self._show_person_face(int(self.person_face_code.get()), gender)
+        except ValueError: self._show_person_face(None, None)
+
+    def _show_person_face(self, face_code: int | None, gender: int | None) -> None:
+        if face_code is None or gender not in (0, 1): self._person_face_photo = None; self.person_image_preview.configure(image="", text="이미지 없음"); return
+        try:
+            source = self._read_game_portrait(face_code, female=gender == 1); self._person_face_photo = ImageTk.PhotoImage(source.convert("RGBA"))
+            self.person_image_preview.configure(image=self._person_face_photo, text="")
+        except (PortraitReadError, tk.TclError): self._person_face_photo = None; self.person_image_preview.configure(image="", text="이미지 없음")
+
+    def _read_game_portrait(self, face_code: int, *, female: bool) -> Image.Image:
+        if not self.path.get():
+            raise PortraitReadError("대상 실행 파일을 먼저 선택해 주세요.")
+        return read_portrait(
+            self.path.get(), female=female, face_code=face_code,
+            palette_path=bundled_resource_path("Resources", "face_palette.png"),
+        )
+
+    def _current_person_edit(self) -> PersonEdit | None:
+        record = self._selected_person_record()
+        if record is None: return None
+        try:
+            face_code = int(self.person_face_code.get())
+            gender = SPONSOR_GENDER_NAMES.index(self.person_gender.get())
+            city = -1 if self.person_city.get() == "도시 없음" else BARMAID_CITY_NAMES.index(self.person_city.get())
+            abilities = tuple(int(variable.get()) for variable in self.person_abilities)
+            skills = tuple(int(variable.get()) for variable in self.person_skill_levels)
+            if not 0 <= face_code <= self._portrait_max_code(female=gender == 1):
+                raise ValueError("인물 얼굴 코드가 선택한 성별의 이미지 범위를 벗어났습니다.")
+            return PersonEdit(record.identifier, face_code, gender, int(self.person_age.get()), SPONSOR_NATION_NAMES.index(self.person_nation.get()), PERSON_JOB_NAMES.index(self.person_job.get()), int(self.person_fame.get()), int(self.person_infamy.get()), PERSON_EMPLOYMENT_STATE_NAMES.index(self.person_employment_state.get()), city, SPONSOR_BUILDING_NAMES.index(self.person_building.get()), PERSON_BLOOD_NAMES.index(self.person_blood.get()), int(self.person_vitality.get()), int(self.person_hire_cost.get()), abilities, skills)
+        except (ValueError, IndexError) as error: raise ValueError("인물 입력값을 확인해 주세요.") from error
+
+    def _set_ship_type_controls_enabled(self, enabled: bool) -> None:
+        for control in self._ship_type_controls:
+            if isinstance(control, NativeWinEdit): control.set_enabled(enabled)
+            elif isinstance(control, ttk.Treeview): control.configure(selectmode="browse" if enabled else "none")
+            else: control.state(["!disabled"] if enabled else ["disabled"])
+
+    def _selected_ship_type_record(self) -> ShipTypeRecord | None:
+        selection = self.ship_type_list.selection()
+        return self._ship_type_by_identifier.get(int(selection[0])) if selection else None
+
+    def _load_ship_type_records(self, records: tuple[ShipTypeRecord, ...]) -> None:
+        self._ship_type_records = records
+        self._ship_type_by_identifier = {record.identifier: record for record in records}
+        self.ship_type_list.delete(*self.ship_type_list.get_children())
+        for record in records:
+            self.ship_type_list.insert("", "end", iid=str(record.identifier), values=(f"{record.identifier:02d}", record.name))
+        self._set_ship_type_controls_enabled(bool(records))
+        if records:
+            self.ship_type_list.selection_set(str(records[0].identifier))
+            self.ship_type_list.focus(str(records[0].identifier))
+            self._on_ship_type_selected()
+
+    def _on_ship_type_selected(self, _event: tk.Event | None = None) -> None:
+        record = self._selected_ship_type_record()
+        if record is None: return
+        self.ship_name.set(record.name)
+        self.ship_name_entry.set(record.name)
+        for variable, value in zip(
+            (self.ship_shipyard_requirement, self.ship_base_power, self.ship_power_limit,
+             self.ship_base_durability, self.ship_durability_limit, self.ship_base_weight,
+             self.ship_weight_limit, self.ship_base_capacity, self.ship_capacity_limit,
+             self.ship_base_cannons, self.ship_cannon_limit, self.ship_min_crew),
+            (record.shipyard_requirement, record.base_power, record.power_limit,
+             record.base_durability, record.durability_limit, record.base_weight,
+             record.weight_limit, record.base_capacity, record.capacity_limit,
+             record.base_cannons, record.cannon_limit, record.min_crew),
+        ):
+            variable.set(str(value))
+        self._show_ship_preview(record.identifier)
+
+    def _show_ship_preview(self, ship_type_id: int) -> None:
+        """Loop the selected game's original ship movie for the ship type."""
+        video_path = self._game_ship_avi_path(ship_type_id)
+        if (
+            video_path is not None
+            and self._ship_avi_preview is not None
+            and self._ship_avi_preview.show(video_path)
+        ):
+            return
+        if self._ship_avi_preview is not None:
+            self._ship_avi_preview.stop()
+        self.ship_image_preview.configure(image="", text="이미지 없음")
+
+    def _game_ship_avi_path(self, ship_type_id: int) -> Path | None:
+        """Locate `AVI/Sxx_0001.AVI` using the static EXE ship-type ID."""
+        if not self.path.get() or not 0 <= ship_type_id < 8:
+            return None
+        avi_path = Path(self.path.get()).resolve().parent / "AVI" / f"S{ship_type_id:02d}_0001.AVI"
+        return avi_path if avi_path.is_file() else None
+
+    def _current_ship_type_edit(self) -> ShipTypeEdit | None:
+        record = self._selected_ship_type_record()
+        if record is None: return None
+        try:
+            return ShipTypeEdit(
+                record.identifier, self.ship_name_entry.get().strip(), int(self.ship_shipyard_requirement.get()),
+                int(self.ship_base_power.get()), int(self.ship_power_limit.get()),
+                int(self.ship_base_durability.get()), int(self.ship_durability_limit.get()),
+                int(self.ship_base_weight.get()), int(self.ship_weight_limit.get()),
+                int(self.ship_base_capacity.get()), int(self.ship_capacity_limit.get()),
+                int(self.ship_base_cannons.get()), int(self.ship_cannon_limit.get()),
+                int(self.ship_min_crew.get()),
+            )
+        except ValueError as error:
+            raise ValueError("선종 이름 또는 숫자 입력값을 확인해 주세요.") from error
+
+    def _remember_ship_type_edit(self, edit: ShipTypeEdit | None) -> None:
+        if edit is None:
+            return
+        self._ship_type_records = tuple(
+            ShipTypeRecord(
+                record.identifier,
+                edit.name if record.identifier == edit.identifier else record.name,
+                edit.shipyard_requirement if record.identifier == edit.identifier else record.shipyard_requirement,
+                edit.base_power if record.identifier == edit.identifier else record.base_power,
+                edit.power_limit if record.identifier == edit.identifier else record.power_limit,
+                edit.base_durability if record.identifier == edit.identifier else record.base_durability,
+                edit.durability_limit if record.identifier == edit.identifier else record.durability_limit,
+                edit.base_weight if record.identifier == edit.identifier else record.base_weight,
+                edit.weight_limit if record.identifier == edit.identifier else record.weight_limit,
+                edit.base_capacity if record.identifier == edit.identifier else record.base_capacity,
+                edit.capacity_limit if record.identifier == edit.identifier else record.capacity_limit,
+                edit.base_cannons if record.identifier == edit.identifier else record.base_cannons,
+                edit.cannon_limit if record.identifier == edit.identifier else record.cannon_limit,
+                edit.min_crew if record.identifier == edit.identifier else record.min_crew,
+            )
+            for record in self._ship_type_records
+        )
+        self._ship_type_by_identifier = {record.identifier: record for record in self._ship_type_records}
+        self.ship_type_list.item(str(edit.identifier), values=(f"{edit.identifier:02d}", edit.name))
+
+    def _set_city_controls_enabled(self, enabled: bool) -> None:
+        for control in self._city_controls:
+            if isinstance(control, NativeWinEdit):
+                control.set_enabled(enabled)
+            elif isinstance(control, ttk.Treeview):
+                control.configure(selectmode="browse" if enabled else "none")
+            elif isinstance(control, ttk.Combobox):
+                control.configure(state="readonly" if enabled else "disabled")
+            else:
+                control.state(["!disabled"] if enabled else ["disabled"])
+
+    def _schedule_city_list_refresh(self) -> None:
+        job = getattr(self, "_city_search_job", None)
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+        self._city_search_job = self.after(120, self._refresh_city_list)
+
+    def _refresh_city_list(self) -> None:
+        tree = self.city_list
+        selected = tree.selection()
+        selected_identifier = selected[0] if selected else ""
+        tree.delete(*tree.get_children())
+        query = self.city_search_entry.get().strip().casefold()
+        for record in self._city_records:
+            if query and query not in record.name.casefold():
+                continue
+            tree.insert("", "end", iid=str(record.identifier), values=(f"{record.identifier:03d}", record.name))
+        if selected_identifier and tree.exists(selected_identifier):
+            tree.selection_set(selected_identifier)
+            tree.focus(selected_identifier)
+            tree.see(selected_identifier)
+
+    def _selected_city_record(self) -> CityRecord | None:
+        selection = self.city_list.selection()
+        return self._city_by_identifier.get(int(selection[0])) if selection else None
+
+    def _city_connection_values(self) -> tuple[str, ...]:
+        return ("연결 없음", *(record.name for record in self._city_records))
+
+    def _configure_city_dependent_values(self) -> None:
+        connection_values = self._city_connection_values()
+        for selector in self.city_connection_selectors:
+            selector.configure(values=connection_values)
+        self.city_specialty_selector.configure(values=("특산품 없음", *self._trade_good_names))
+        self._trade_good_by_name = {
+            name: identifier for identifier, name in enumerate(self._trade_good_names)
+        }
+        for selector in self.city_trade_region_good_selectors:
+            selector.configure(values=("없음", *self._trade_good_names))
+        self._city_market_good_by_name: dict[str, int] = {}
+        market_values = ["없음"]
+        for item in self._item_records:
+            label = item.name
+            if label in self._city_market_good_by_name:
+                label = f"{item.name} ({item.identifier})"
+            self._city_market_good_by_name[label] = item.identifier
+            market_values.append(label)
+        for selector in self.city_market_good_selectors:
+            selector.configure(values=market_values)
+        for identifier, button in enumerate(self.city_ship_candidate_buttons):
+            name = self._ship_type_by_identifier.get(identifier)
+            button.configure(text=name.name if name is not None else f"선종 {identifier}")
+
+    def _refresh_city_common_goods(self) -> None:
+        try:
+            region_id = int(self.city_trade_region.get())
+            goods = self._trade_region_goods[region_id]
+        except (IndexError, ValueError):
+            for variable in self.city_common_goods:
+                variable.set("없음")
+            return
+        for variable, good_id in zip(self.city_common_goods, goods):
+            variable.set(
+                self._trade_good_names[good_id]
+                if 0 <= good_id < len(self._trade_good_names)
+                else "없음"
+            )
+
+    def _show_trade_region_editor(self, _event: tk.Event | None = None) -> None:
+        """Load one global trade-region row into its five editable selectors."""
+        try:
+            region_id = int(self.city_trade_region_editor.get())
+            goods = self._trade_region_goods[region_id]
+        except (IndexError, ValueError):
+            goods = (-1,) * len(self.city_trade_region_goods)
+        for slot, (variable, good_id) in enumerate(zip(self.city_trade_region_goods, goods)):
+            variable.set(
+                self._trade_good_names[good_id]
+                if 0 <= good_id < len(self._trade_good_names)
+                else "없음"
+            )
+            self._show_trade_region_good_image(slot, good_id)
+
+    def _show_trade_region_good_image(self, slot: int, good_id: int) -> None:
+        """Show the selected trade good's original 120×120 ITEM.CDS image."""
+        try:
+            label = self.city_trade_region_good_image_labels[slot]
+        except (AttributeError, IndexError):
+            return
+        if good_id < 0 or not self.path.get():
+            self._trade_region_good_photos[slot] = None
+            label.configure(image="", text="이미지 없음")
+            return
+        try:
+            image = self._read_game_item_image(good_id + TRADE_GOOD_IMAGE_SLOT_OFFSET)
+            photo = ImageTk.PhotoImage(image.convert("RGBA"))
+        except (ItemImageReadError, tk.TclError):
+            self._trade_region_good_photos[slot] = None
+            label.configure(image="", text="이미지 없음")
+            return
+        self._trade_region_good_photos[slot] = photo
+        label.configure(image=photo, text="")
+
+    def _on_trade_region_good_selected(self, slot: int) -> None:
+        """Keep edits for every trade region in memory until the EXE is saved."""
+        try:
+            region_id = int(self.city_trade_region_editor.get())
+            value = self.city_trade_region_goods[slot].get()
+            good_id = -1 if value == "없음" else self._trade_good_by_name[value]
+            regions = [list(goods) for goods in self._trade_region_goods]
+            regions[region_id][slot] = good_id
+        except (IndexError, KeyError, ValueError):
+            return
+        self._trade_region_goods = tuple(tuple(goods) for goods in regions)
+        self._show_trade_region_good_image(slot, good_id)
+        self._refresh_city_common_goods()
+
+    def _current_trade_region_goods(self) -> tuple[tuple[int, ...], ...]:
+        """Return the complete edited table after validating all 27 rows."""
+        if (
+            len(self._trade_region_goods) != 27
+            or any(len(goods) != 5 for goods in self._trade_region_goods)
+            or any(not -1 <= good_id < len(self._trade_good_names)
+                   for goods in self._trade_region_goods for good_id in goods)
+        ):
+            raise ValueError("교역권 품목 입력값을 확인해 주세요.")
+        return self._trade_region_goods
+
+    def _load_city_records(
+        self, records: tuple[CityRecord, ...], trade_good_names: tuple[str, ...],
+        trade_region_goods: tuple[tuple[int, ...], ...],
+    ) -> None:
+        self._city_records = records
+        self._city_by_identifier = {record.identifier: record for record in records}
+        self._trade_good_names = trade_good_names
+        self._trade_region_goods = trade_region_goods
+        self._configure_city_dependent_values()
+        self.city_search_entry.set("")
+        self._refresh_city_list()
+        self._set_city_controls_enabled(bool(records))
+        if records:
+            first_identifier = str(records[0].identifier)
+            self.city_list.selection_set(first_identifier)
+            self.city_list.focus(first_identifier)
+            self._on_city_selected()
+
+    def _on_city_selected(self, _event: tk.Event | None = None) -> None:
+        record = self._selected_city_record()
+        if record is None:
+            return
+        self.city_name.set(record.name)
+        self.city_name_entry.set(record.name)
+        for variable, connection_id in zip(self.city_inland_connections, record.inland_connection_ids):
+            connection = self._city_by_identifier.get(connection_id)
+            variable.set(connection.name if connection is not None else "연결 없음")
+        self.city_nation.set(CITY_NATION_NAMES[record.nation_id])
+        self.city_culture.set(CITY_CULTURE_NAMES[record.culture_id])
+        self.city_status.set(CITY_STATUS_NAMES[record.city_status])
+        self.city_update_counter.set(str(record.update_counter))
+        self.city_discovered.set(bool(record.default_flags & 0x0001))
+        for identifier, variable in enumerate(self.city_ship_candidates):
+            variable.set(bool(record.ship_candidate_mask & (1 << identifier)))
+        self.city_shipyard_level.set(CITY_SHIPYARD_LEVEL_NAMES[record.shipyard_level])
+        for identifier, variable in enumerate(self.city_facilities):
+            variable.set(bool(record.facility_flags & (1 << identifier)))
+        self.city_trade_region.set(str(record.trade_region_id))
+        self.city_trade_region_editor.set(str(record.trade_region_id))
+        self._show_trade_region_editor()
+        self.city_specialty.set(
+            "특산품 없음" if record.specialty_id < 0 else self._trade_good_names[record.specialty_id]
+        )
+        self.city_specialty_price.set(str(record.specialty_price))
+        self.city_specialty_supply_index.set(str(record.specialty_supply_index))
+        market_names_by_identifier = {identifier: name for name, identifier in self._city_market_good_by_name.items()}
+        for variable, good_id in zip(self.city_market_goods, record.default_market_goods):
+            variable.set("없음" if good_id < 0 else market_names_by_identifier.get(good_id, "없음"))
+        self._refresh_city_common_goods()
+        self._show_city_image(record.identifier)
+
+    def _show_city_image(self, city_id: int) -> None:
+        try:
+            image = read_city_image(self.path.get(), city_id=city_id)
+            self._city_image_photo = ImageTk.PhotoImage(image.convert("RGBA"))
+            self.city_image_preview.configure(image=self._city_image_photo, text="")
+        except (CityImageReadError, tk.TclError):
+            self._city_image_photo = None
+            self.city_image_preview.configure(image="", text="이미지 없음")
+
+    def _current_city_edit(self) -> CityEdit | None:
+        record = self._selected_city_record()
+        if record is None:
+            return None
+        try:
+            name_to_identifier = {city.name: city.identifier for city in self._city_records}
+            connections = tuple(
+                -1 if value.get() == "연결 없음" else name_to_identifier[value.get()]
+                for value in self.city_inland_connections
+            )
+            ship_mask = sum(
+                1 << identifier for identifier, value in enumerate(self.city_ship_candidates) if value.get()
+            )
+            specialty = (
+                -1 if self.city_specialty.get() == "특산품 없음"
+                else self._trade_good_names.index(self.city_specialty.get())
+            )
+            market_goods = tuple(
+                -1 if variable.get() == "없음" else self._city_market_good_by_name[variable.get()]
+                for variable in self.city_market_goods
+            )
+            default_flags = (record.default_flags & ~0x0001) | int(self.city_discovered.get())
+            facility_flags = sum(
+                1 << identifier for identifier, value in enumerate(self.city_facilities) if value.get()
+            )
+            return CityEdit(
+                record.identifier, self.city_name_entry.get().strip(),
+                record.world_x, record.world_y,
+                connections, ship_mask, int(self.city_trade_region.get()),
+                CITY_CULTURE_NAMES.index(self.city_culture.get()),
+                CITY_NATION_NAMES.index(self.city_nation.get()),
+                CITY_SHIPYARD_LEVEL_NAMES.index(self.city_shipyard_level.get()),
+                int(self.city_update_counter.get()), specialty,
+                int(self.city_specialty_price.get()), int(self.city_specialty_supply_index.get()),
+                market_goods, CITY_STATUS_NAMES.index(self.city_status.get()),
+                facility_flags, default_flags,
+            )
+        except (ValueError, IndexError, KeyError) as error:
+            raise ValueError("도시 입력값을 확인해 주세요.") from error
+
+    def _remember_city_edit(self, edit: CityEdit | None) -> None:
+        if edit is None:
+            return
+        self._city_records = tuple(
+            CityRecord(
+                record.identifier,
+                edit.name if record.identifier == edit.identifier else record.name,
+                edit.world_x if record.identifier == edit.identifier else record.world_x,
+                edit.world_y if record.identifier == edit.identifier else record.world_y,
+                edit.inland_connection_ids if record.identifier == edit.identifier else record.inland_connection_ids,
+                edit.ship_candidate_mask if record.identifier == edit.identifier else record.ship_candidate_mask,
+                edit.trade_region_id if record.identifier == edit.identifier else record.trade_region_id,
+                edit.culture_id if record.identifier == edit.identifier else record.culture_id,
+                edit.nation_id if record.identifier == edit.identifier else record.nation_id,
+                edit.shipyard_level if record.identifier == edit.identifier else record.shipyard_level,
+                edit.update_counter if record.identifier == edit.identifier else record.update_counter,
+                edit.specialty_id if record.identifier == edit.identifier else record.specialty_id,
+                edit.specialty_price if record.identifier == edit.identifier else record.specialty_price,
+                edit.specialty_supply_index if record.identifier == edit.identifier else record.specialty_supply_index,
+                edit.default_market_goods if record.identifier == edit.identifier else record.default_market_goods,
+                edit.city_status if record.identifier == edit.identifier else record.city_status,
+                edit.facility_flags if record.identifier == edit.identifier else record.facility_flags,
+                edit.default_flags if record.identifier == edit.identifier else record.default_flags,
+            )
+            for record in self._city_records
+        )
+        self._city_by_identifier = {record.identifier: record for record in self._city_records}
+        self._configure_city_dependent_values()
+        self._refresh_city_list()
+
+    def _set_item_controls_enabled(self, enabled: bool) -> None:
+        for control in self._item_controls:
+            if isinstance(control, NativeWinEdit):
+                control.set_enabled(enabled)
+            elif isinstance(control, ttk.Treeview):
+                control.configure(selectmode="browse" if enabled else "none")
+            elif isinstance(control, ttk.Combobox):
+                control.configure(state="readonly" if enabled else "disabled")
+            else:
+                control.state(["!disabled"] if enabled else ["disabled"])
+
+    def _figurehead_effect_name(self, code: int) -> str:
+        names: list[str] = []
+        if code <= 33:
+            names.append(FIGUREHEAD_DISASTER_NAMES[code % 4])
+        unique_names = {
+            26: "받는 함포 피해 감소",
+            27: "받는 인접 사격 피해 감소",
+            28: "받는 백병 피해 감소",
+            29: "함포 공격 강화",
+            30: "인접 사격 공격 강화",
+            31: "백병 공격 강화",
+            32: "턴당 내구 회복",
+            33: "해전 이동력 증가",
+            34: "특수 함포 공격 강화",
+            35: "전 공격 강화",
+        }
+        if code in unique_names:
+            names.append(unique_names[code])
+        return " / ".join(names)
+
+    def _figurehead_unique_effect_fields(
+        self, code: int,
+    ) -> tuple[tuple[str, tk.StringVar, int, int, str], ...]:
+        effects = {
+            26: (("받는 함포 피해 감소:", self.figurehead_cannon_damage_reduction, 0, 100, "%"),),
+            27: (("받는 인접 사격 피해 감소:", self.figurehead_shooting_damage_reduction, 0, 100, "%"),),
+            28: (("받는 백병 피해 감소:", self.figurehead_melee_damage_reduction, 0, 100, "%"),),
+            29: (("함포 공격 배율:", self.figurehead_cannon_attack_percent, 0, 1000, "%"),),
+            30: (("인접 사격 공격 배율:", self.figurehead_shooting_attack_percent, 0, 1000, "%"),),
+            31: (("백병 공격 배율:", self.figurehead_melee_attack_percent, 0, 1000, "%"),),
+            32: (("턴당 내구 회복:", self.figurehead_hull_recovery, 0, 9999, ""),),
+            33: (
+                ("해전 이동 보너스:", self.figurehead_movement_bonus, 0, 127, ""),
+                ("해전 이동 최대값:", self.figurehead_movement_maximum, 1, 127, ""),
+            ),
+            34: (("함포 공격 배율:", self.figurehead_special_cannon_attack_percent, 0, 1000, "%"),),
+            35: (("전 공격 배율:", self.figurehead_all_attack_percent, 0, 1000, "%"),),
+        }
+        return effects.get(code, ())
+
+    def _figurehead_effect_summary(self, code: int) -> str:
+        parts: list[str] = []
+        if code <= 33:
+            grade = FIGUREHEAD_DISASTER_GRADES[code]
+            chance = self.figurehead_disaster_chances[grade - 1].get() or "?"
+            parts.append(f"{grade}등급 {chance}%")
+        fields = self._figurehead_unique_effect_fields(code)
+        if fields:
+            if code in (26, 27, 28):
+                parts.append(f"{fields[0][1].get() or '?'}% 감소")
+            elif code in (29, 30, 31, 34, 35):
+                parts.append(f"{fields[0][1].get() or '?'}%")
+            elif code == 32:
+                parts.append(f"+{fields[0][1].get() or '?'}")
+            else:
+                parts.append(
+                    f"+{fields[0][1].get() or '?'} / 최대 {fields[1][1].get() or '?'}"
+                )
+        return " / ".join(parts)
+
+    def _refresh_figurehead_effect_list(self) -> None:
+        if not hasattr(self, "figurehead_list"):
+            return
+        selected = self.figurehead_list.selection()
+        selected_code = selected[0] if selected else ""
+        for code in range(36):
+            item_id = str(code)
+            values = (
+                f"{code:02d}",
+                self._figurehead_effect_name(code),
+                self._figurehead_effect_summary(code),
+            )
+            if self.figurehead_list.exists(item_id):
+                self.figurehead_list.item(item_id, values=values)
+            else:
+                self.figurehead_list.insert("", "end", iid=item_id, values=values)
+        if selected_code and self.figurehead_list.exists(selected_code):
+            self.figurehead_list.selection_set(selected_code)
+            self.figurehead_list.focus(selected_code)
+
+    def _configure_figurehead_value_entry(
+        self,
+        entry: ttk.Spinbox,
+        variable: tk.StringVar,
+        minimum: int,
+        maximum: int,
+    ) -> None:
+        entry.configure(
+            from_=minimum,
+            to=maximum,
+            textvariable=variable,
+            validate="key",
+            validatecommand=(
+                self._integer_validation_command, "%P", str(minimum), str(maximum),
+            ),
+        )
+
+    def _on_figurehead_effect_selected(self, _event: tk.Event | None = None) -> None:
+        selection = self.figurehead_list.selection()
+        if not selection:
+            return
+        code = int(selection[0])
+        self.figurehead_selected_effect.set(self._figurehead_effect_name(code))
+        self.figurehead_selected_code.set(str(code))
+        editable = self._figurehead_loaded
+
+        if code <= 33:
+            grade = FIGUREHEAD_DISASTER_GRADES[code]
+            self.figurehead_disaster_description.set(
+                f"{FIGUREHEAD_DISASTER_NAMES[code % 4]} · {grade}등급 (동일 등급 공통)"
+            )
+            self._configure_figurehead_value_entry(
+                self.figurehead_disaster_entry,
+                self.figurehead_disaster_chances[grade - 1], 0, 100,
+            )
+            self.figurehead_disaster_entry.state(["!disabled"] if editable else ["disabled"])
+        else:
+            self.figurehead_disaster_description.set("해상 재해 방지 효과 없음")
+            self.figurehead_disaster_entry.state(["disabled"])
+
+        fields = self._figurehead_unique_effect_fields(code)
+        widgets = (
+            (
+                self.figurehead_primary_label_widget,
+                self.figurehead_primary_entry,
+                self.figurehead_primary_unit_widget,
+                self.figurehead_primary_label,
+                self.figurehead_primary_unit,
+            ),
+            (
+                self.figurehead_secondary_label_widget,
+                self.figurehead_secondary_entry,
+                self.figurehead_secondary_unit_widget,
+                self.figurehead_secondary_label,
+                self.figurehead_secondary_unit,
+            ),
+        )
+        for index, widget_group in enumerate(widgets):
+            label_widget, entry, unit_widget, label_variable, unit_variable = widget_group
+            if index < len(fields):
+                label, variable, minimum, maximum, unit = fields[index]
+                label_variable.set(label)
+                unit_variable.set(unit)
+                self._configure_figurehead_value_entry(entry, variable, minimum, maximum)
+                label_widget.grid()
+                entry.grid()
+                unit_widget.grid()
+                entry.state(["!disabled"] if editable else ["disabled"])
+            else:
+                label_widget.grid_remove()
+                entry.grid_remove()
+                unit_widget.grid_remove()
+
+    def _on_figurehead_effect_value_changed(self, *_args) -> None:
+        self._refresh_figurehead_effect_list()
+
+    def _set_figurehead_controls_enabled(self, enabled: bool) -> None:
+        self._figurehead_loaded = enabled
+        self.figurehead_list.configure(selectmode="browse" if enabled else "none")
+        if enabled and not self.figurehead_list.selection() and self.figurehead_list.exists("0"):
+            self.figurehead_list.selection_set("0")
+            self.figurehead_list.focus("0")
+            self.figurehead_list.see("0")
+        self._on_figurehead_effect_selected()
+
+    def _load_figurehead_effect_settings(self, settings: FigureheadEffectSettings) -> None:
+        for variable, value in zip(
+            self.figurehead_disaster_chances,
+            (
+                settings.disaster_grade1_chance,
+                settings.disaster_grade2_chance,
+                settings.disaster_grade3_chance,
+            ),
+        ):
+            variable.set(str(value))
+        for variable, value in (
+            (self.figurehead_cannon_damage_reduction, settings.cannon_damage_reduction),
+            (self.figurehead_shooting_damage_reduction, settings.shooting_damage_reduction),
+            (self.figurehead_melee_damage_reduction, settings.melee_damage_reduction),
+            (self.figurehead_cannon_attack_percent, settings.cannon_attack_percent),
+            (self.figurehead_shooting_attack_percent, settings.shooting_attack_percent),
+            (self.figurehead_melee_attack_percent, settings.melee_attack_percent),
+            (self.figurehead_special_cannon_attack_percent, settings.special_cannon_attack_percent),
+            (self.figurehead_all_attack_percent, settings.all_attack_percent),
+            (self.figurehead_hull_recovery, settings.hull_recovery),
+            (self.figurehead_movement_bonus, settings.movement_bonus),
+            (self.figurehead_movement_maximum, settings.movement_maximum),
+        ):
+            variable.set(str(value))
+        self._set_figurehead_controls_enabled(True)
+
+    def _current_figurehead_effect_settings(self) -> FigureheadEffectSettings:
+        try:
+            chances = tuple(int(variable.get()) for variable in self.figurehead_disaster_chances)
+            return FigureheadEffectSettings(
+                chances[0], chances[1], chances[2],
+                int(self.figurehead_cannon_damage_reduction.get()),
+                int(self.figurehead_shooting_damage_reduction.get()),
+                int(self.figurehead_melee_damage_reduction.get()),
+                int(self.figurehead_cannon_attack_percent.get()),
+                int(self.figurehead_shooting_attack_percent.get()),
+                int(self.figurehead_melee_attack_percent.get()),
+                int(self.figurehead_hull_recovery.get()),
+                int(self.figurehead_movement_bonus.get()),
+                int(self.figurehead_movement_maximum.get()),
+                int(self.figurehead_special_cannon_attack_percent.get()),
+                int(self.figurehead_all_attack_percent.get()),
+            )
+        except (ValueError, IndexError) as error:
+            raise ValueError("선수상 효과 입력값을 확인해 주세요.") from error
+
+    def _schedule_item_list_refresh(self) -> None:
+        job = getattr(self, "_item_search_job", None)
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+        self._item_search_job = self.after(120, self._refresh_item_list)
+
+    def _refresh_item_list(self) -> None:
+        tree = self.item_list
+        selected = tree.selection()
+        selected_identifier = selected[0] if selected else ""
+        tree.delete(*tree.get_children())
+        query = self.item_search_entry.get().strip().casefold()
+        for record in self._item_records:
+            category = item_category_name(record.category_id)
+            if query and query not in record.name.casefold() and query not in category.casefold():
+                continue
+            tree.insert(
+                "", "end", iid=str(record.identifier),
+                values=(f"{record.identifier:03d}", category, record.name),
+            )
+        if selected_identifier and tree.exists(selected_identifier):
+            tree.selection_set(selected_identifier)
+            tree.focus(selected_identifier)
+            tree.see(selected_identifier)
+
+    def _selected_item_record(self) -> ItemRecord | None:
+        selection = self.item_list.selection()
+        return self._item_by_identifier.get(int(selection[0])) if selection else None
+
+    def _load_item_records(self, records: tuple[ItemRecord, ...]) -> None:
+        self._item_records = records
+        self._item_by_identifier = {record.identifier: record for record in records}
+        self.item_search_entry.set("")
+        self._refresh_item_list()
+        self._set_item_controls_enabled(bool(records))
+        if records:
+            first_identifier = str(records[0].identifier)
+            self.item_list.selection_set(first_identifier)
+            self.item_list.focus(first_identifier)
+            self._on_item_selected()
+
+    def _on_item_selected(self, _event: tk.Event | None = None) -> None:
+        record = self._selected_item_record()
+        if record is None:
+            return
+        self.item_name.set(record.name)
+        self.item_name_entry.set(record.name)
+        self.item_category.set(item_category_name(record.category_id))
+        self._show_item_image(record.image_id)
+        self.item_buy_price.set(str(record.buy_price))
+        self.item_sell_price.set(str(record.sell_price))
+        self.item_effect_value.set(str(record.effect_value))
+
+    def _show_item_image(self, image_slot: int | None) -> None:
+        """Display the original 120×120 ITEM.CDS image assigned by the EXE."""
+        if image_slot is None:
+            self._item_image_photo = None
+            self.item_image_preview.configure(image="", text="이미지 없음")
+            return
+        try:
+            image = self._read_game_item_image(image_slot)
+            self._item_image_photo = ImageTk.PhotoImage(image.convert("RGBA"))
+            self.item_image_preview.configure(image=self._item_image_photo, text="")
+        except (ItemImageReadError, tk.TclError):
+            self._item_image_photo = None
+            self.item_image_preview.configure(image="", text="이미지 없음")
+
+    def _read_game_item_image(self, image_slot: int) -> Image.Image:
+        if not self.path.get():
+            raise ItemImageReadError("대상 실행 파일을 먼저 선택해 주세요.")
+        return read_item_image(
+            self.path.get(), image_slot=image_slot,
+            palette_path=bundled_resource_path("Resources", "face_palette.png"),
+        )
+
+    def _current_item_edit(self) -> ItemEdit | None:
+        record = self._selected_item_record()
+        if record is None:
+            return None
+        try:
+            return ItemEdit(
+                record.identifier, self.item_name_entry.get().strip(),
+                int(self.item_buy_price.get()), int(self.item_sell_price.get()),
+                int(self.item_effect_value.get()), item_category_raw_id(self.item_category.get()),
+            )
+        except (ValueError, IndexError) as error:
+            raise ValueError("아이템 입력값을 확인해 주세요.") from error
+
+    def _remember_item_edit(self, edit: ItemEdit | None) -> None:
+        if edit is None:
+            return
+        self._item_records = tuple(
+            ItemRecord(
+                record.identifier,
+                edit.name if record.identifier == edit.identifier else record.name,
+                record.image_id,
+                edit.buy_price if record.identifier == edit.identifier else record.buy_price,
+                edit.sell_price if record.identifier == edit.identifier else record.sell_price,
+                edit.effect_value if record.identifier == edit.identifier else record.effect_value,
+                edit.category_id if record.identifier == edit.identifier else record.category_id,
+            )
+            for record in self._item_records
+        )
+        self._item_by_identifier = {record.identifier: record for record in self._item_records}
+        self.item_list.item(
+            str(edit.identifier),
+            values=(f"{edit.identifier:03d}", item_category_name(edit.category_id), edit.name),
+        )
+
+    def _set_discovery_controls_enabled(self, enabled: bool) -> None:
+        for control in self._discovery_controls:
+            if isinstance(control, NativeWinEdit):
+                control.set_enabled(enabled)
+            elif isinstance(control, ttk.Treeview):
+                control.configure(selectmode="browse" if enabled else "none")
+            elif isinstance(control, ttk.Combobox):
+                control.configure(state="readonly" if enabled else "disabled")
+            else:
+                control.state(["!disabled"] if enabled else ["disabled"])
+
+    def _schedule_discovery_list_refresh(self) -> None:
+        job = getattr(self, "_discovery_search_job", None)
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+        self._discovery_search_job = self.after(120, self._refresh_discovery_list)
+
+    def _refresh_discovery_list(self) -> None:
+        tree = self.discovery_list
+        selected = tree.selection()
+        selected_identifier = selected[0] if selected else ""
+        tree.delete(*tree.get_children())
+        query = self.discovery_search_entry.get().strip().casefold()
+        for record in self._discovery_records:
+            category = DISCOVERY_CATEGORY_NAMES[record.category_id]
+            if query and query not in record.name.casefold() and query not in category.casefold():
+                continue
+            tree.insert(
+                "", "end", iid=str(record.identifier),
+                values=(f"{record.identifier:03d}", category, record.name),
+            )
+        if selected_identifier and tree.exists(selected_identifier):
+            tree.selection_set(selected_identifier)
+            tree.focus(selected_identifier)
+            tree.see(selected_identifier)
+
+    def _selected_discovery_record(self) -> DiscoveryRecord | None:
+        selection = self.discovery_list.selection()
+        return self._discovery_by_identifier.get(int(selection[0])) if selection else None
+
+    def _load_discovery_records(self, records: tuple[DiscoveryRecord, ...]) -> None:
+        self._discovery_records = records
+        self._discovery_by_identifier = {record.identifier: record for record in records}
+        self.discovery_search_entry.set("")
+        self._refresh_discovery_list()
+        self._set_discovery_controls_enabled(bool(records))
+        if records:
+            first_identifier = str(records[0].identifier)
+            self.discovery_list.selection_set(first_identifier)
+            self.discovery_list.focus(first_identifier)
+            self._on_discovery_selected()
+
+    def _on_discovery_selected(self, _event: tk.Event | None = None) -> None:
+        record = self._selected_discovery_record()
+        if record is None:
+            return
+        self.discovery_name.set(record.name)
+        self.discovery_name_entry.set(record.name)
+        media_kind, media_value, media_maximum = self._discovery_media_info(record)
+        self.discovery_still_slot.set("" if media_value is None else str(media_value))
+        self.discovery_media_label.configure(
+            text={"still": "DSTILL 번호:", "avi": "AVI 번호:", "animation": "DISCOVER 번호:"}.get(
+                media_kind, "미디어 없음:"
+            )
+        )
+        self.discovery_still_slot_entry.configure(to=max(media_maximum, 0))
+        self._limit_integer_input(self.discovery_still_slot_entry, 0, max(media_maximum, 0))
+        self.discovery_still_slot_entry.state(
+            ["!disabled"] if media_value is not None else ["disabled"]
+        )
+        self.discovery_category.set(DISCOVERY_CATEGORY_NAMES[record.category_id])
+        self.discovery_value.set(str(record.value))
+        self._show_discovery_image(record)
+        coordinate_values = (
+            (world_y_to_latitude(record.min_y), world_y_to_latitude(record.max_y),
+             world_x_to_longitude(record.min_x), world_x_to_longitude(record.max_x))
+            if record.min_x is not None else (None, None, None, None)
+        )
+        for direction, variable, value, positive, negative in zip(
+            (
+                self.discovery_min_y_direction, self.discovery_max_y_direction,
+                self.discovery_min_x_direction, self.discovery_max_x_direction,
+            ),
+            (self.discovery_min_y, self.discovery_max_y, self.discovery_min_x, self.discovery_max_x),
+            coordinate_values,
+            ("북위", "북위", "동경", "동경"),
+            ("남위", "남위", "서경", "서경"),
+        ):
+            direction.set("" if value is None else (positive if value >= 0 else negative))
+            variable.set("" if value is None else f"{abs(value):.3f}")
+        coordinate_state = ["!disabled"] if record.min_x is not None else ["disabled"]
+        for control in self._discovery_coordinate_controls:
+            control.state(coordinate_state)
+
+    def _discovery_media_info(self, record: DiscoveryRecord) -> tuple[str | None, int | None, int]:
+        """Return the actively selected discovery media field and its valid maximum.
+
+        AVI has playback priority when an exceptional record includes both a
+        DSTILL fallback and AVI.  The three source fields remain independent.
+        """
+        if record.avi_id is not None:
+            return "avi", record.avi_id, 69
+        if record.animation_part is not None:
+            return "animation", record.animation_part, 28
+        if record.still_slot is not None:
+            return "still", record.still_slot, max(0, self._discovery_still_slot_count - 1)
+        return None, None, 0
+
+    def _on_discovery_media_changed(self, *_args: str) -> None:
+        """Preview the selected media after its active field is edited."""
+        record = self._selected_discovery_record()
+        if record is None:
+            return
+        media_kind, _media_value, maximum = self._discovery_media_info(record)
+        if media_kind is None:
+            return
+        try:
+            media_value = int(self.discovery_still_slot.get())
+            if not 0 <= media_value <= maximum:
+                raise ValueError
+            preview_record = DiscoveryRecord(
+                record.identifier, record.name, record.category_id, record.game_id, record.value,
+                record.min_x, record.min_y, record.max_x, record.max_y,
+                media_value if media_kind == "still" else record.still_slot,
+                media_value if media_kind == "avi" else record.avi_id,
+                media_value if media_kind == "animation" else record.animation_part,
+            )
+            self._show_discovery_image(preview_record)
+        except (ValueError, tk.TclError):
+            self._stop_discovery_motion_previews()
+            self._discovery_image_photo = None
+            self.discovery_image_preview.configure(image="", text="이미지 없음")
+
+    def _show_discovery_image(self, record: DiscoveryRecord) -> None:
+        """Show a discovery movie first, then fall back to its still/item image."""
+        movie_path = self._game_discovery_avi_path(record.avi_id)
+        if self._discovery_avi_preview is not None and movie_path is not None:
+            if self._discover_animation_preview is not None:
+                self._discover_animation_preview.stop()
+            if self._discovery_avi_preview.show(movie_path):
+                self._discovery_image_photo = None
+                return
+        if self._discovery_avi_preview is not None:
+            self._discovery_avi_preview.stop()
+        if (
+            self._discover_animation_preview is not None
+            and record.animation_part is not None
+            and self.path.get()
+            and self._discover_animation_preview.show(
+                self.path.get(), record.animation_part,
+            )
+        ):
+            self._discovery_image_photo = None
+            return
+        try:
+            if 203 <= record.identifier <= 229:
+                trade_item = self._item_by_identifier.get(record.identifier - 17)
+                if trade_item is None or trade_item.image_id is None:
+                    raise ItemImageReadError("교역품 이미지를 찾지 못했습니다.")
+                image = self._read_game_item_image(trade_item.image_id)
+            elif record.still_slot not in (None, 0):
+                image = self._read_game_discovery_still(record.still_slot)
+            else:
+                self._discovery_image_photo = None
+                self.discovery_image_preview.configure(image="", text="이미지 없음")
+                return
+            self._discovery_image_photo = ImageTk.PhotoImage(image.convert("RGBA"))
+            self.discovery_image_preview.configure(image=self._discovery_image_photo, text="")
+        except (DiscoveryImageReadError, ItemImageReadError, tk.TclError):
+            self._discovery_image_photo = None
+            self.discovery_image_preview.configure(image="", text="이미지 없음")
+
+    def _read_game_discovery_still(self, image_slot: int) -> Image.Image:
+        if not self.path.get():
+            raise DiscoveryImageReadError("대상 실행 파일을 먼저 선택해 주세요.")
+        return read_discovery_still(
+            self.path.get(), image_slot=image_slot,
+            palette_path=bundled_resource_path("Resources", "face_palette.png"),
+        )
+
+    def _game_discovery_avi_path(self, avi_id: int | None) -> Path | None:
+        """Locate a discovery AVI beside the selected game's executable."""
+        if avi_id is None or not self.path.get():
+            return None
+        avi_path = Path(self.path.get()).resolve().parent / "AVI" / f"I{avi_id:02d}_0000.AVI"
+        return avi_path if avi_path.is_file() else None
+
+    def _stop_discovery_motion_previews(self) -> None:
+        """Stop AVI and DISCOVER frame playback before showing a still image."""
+        if self._discovery_avi_preview is not None:
+            self._discovery_avi_preview.stop()
+        if self._discover_animation_preview is not None:
+            self._discover_animation_preview.stop()
+
+    @staticmethod
+    def _discovery_directional_degree(
+        magnitude: str, direction: str, positive: str, negative: str, label: str,
+    ) -> str:
+        """Turn a game-style compass component into a signed degree string."""
+        if direction not in (positive, negative):
+            raise ValueError(f"{label} 방향을 선택해 주세요.")
+        try:
+            value = float(magnitude)
+        except ValueError as error:
+            raise ValueError(f"{label} 값은 숫자로 입력해 주세요.") from error
+        maximum = 90 if label == "위도" else 180
+        if not 0 <= value <= maximum:
+            raise ValueError(f"{label} 값은 0~{maximum}도 사이여야 합니다.")
+        return magnitude if direction == positive else f"-{magnitude}"
+
+    def _current_discovery_edit(self) -> DiscoveryEdit | None:
+        record = self._selected_discovery_record()
+        if record is None:
+            return None
+        try:
+            still_slot, avi_id, animation_part = (
+                record.still_slot, record.avi_id, record.animation_part,
+            )
+            media_kind, _media_value, maximum = self._discovery_media_info(record)
+            if media_kind is not None:
+                media_value = int(self.discovery_still_slot.get())
+                if not 0 <= media_value <= maximum:
+                    raise ValueError("발견물 미디어 번호가 범위를 벗어났습니다.")
+                if media_kind == "still":
+                    still_slot = media_value
+                elif media_kind == "avi":
+                    avi_id = media_value
+                else:
+                    animation_part = media_value
+            raw_coordinates = (
+                self.discovery_min_y.get(), self.discovery_max_y.get(),
+                self.discovery_min_x.get(), self.discovery_max_x.get(),
+            )
+            coordinates = (
+                (None, None, None, None) if not any(raw_coordinates)
+                else (
+                    longitude_to_world_x(self._discovery_directional_degree(
+                        self.discovery_min_x.get(), self.discovery_min_x_direction.get(),
+                        "동경", "서경", "경도",
+                    )),
+                    latitude_to_world_y(self._discovery_directional_degree(
+                        self.discovery_min_y.get(), self.discovery_min_y_direction.get(),
+                        "북위", "남위", "위도",
+                    )),
+                    longitude_to_world_x(self._discovery_directional_degree(
+                        self.discovery_max_x.get(), self.discovery_max_x_direction.get(),
+                        "동경", "서경", "경도",
+                    )),
+                    latitude_to_world_y(self._discovery_directional_degree(
+                        self.discovery_max_y.get(), self.discovery_max_y_direction.get(),
+                        "북위", "남위", "위도",
+                    )),
+                )
+            )
+            return DiscoveryEdit(
+                record.identifier,
+                self.discovery_name_entry.get().strip(),
+                DISCOVERY_CATEGORY_NAMES.index(self.discovery_category.get()),
+                int(self.discovery_value.get()),
+                *coordinates,
+                still_slot,
+                avi_id,
+                animation_part,
+            )
+        except (ValueError, IndexError) as error:
+            raise ValueError("발견물 입력값을 확인해 주세요.") from error
+
+    def _remember_discovery_edit(self, edit: DiscoveryEdit | None) -> None:
+        if edit is None:
+            return
+        self._discovery_records = tuple(
+            DiscoveryRecord(
+                record.identifier, edit.name, edit.category_id, record.game_id, edit.value,
+                edit.min_x, edit.min_y, edit.max_x, edit.max_y,
+                edit.still_slot, edit.avi_id, edit.animation_part,
+            ) if record.identifier == edit.identifier else record
+            for record in self._discovery_records
+        )
+        self._discovery_by_identifier = {record.identifier: record for record in self._discovery_records}
+        self._refresh_discovery_list()
 
     def _refresh_barmaid_child_aptitudes(self, face_code: int) -> None:
         if not 0 <= face_code < len(self._barmaid_child_aptitudes):
@@ -1314,9 +3344,11 @@ class CDSExecutablePatcher(tk.Tk):
         try:
             face_code = int(self.barmaid_face_code.get())
         except ValueError as error:
-            raise ValueError("여급 얼굴 코드는 0~143 사이의 정수여야 합니다.") from error
-        if not 0 <= face_code <= 143:
-            raise ValueError("여급 얼굴 코드는 0~143 사이의 정수여야 합니다.")
+            maximum_face_code = self._portrait_max_code(female=True)
+            raise ValueError(f"여급 얼굴 코드는 0~{maximum_face_code} 사이의 정수여야 합니다.") from error
+        maximum_face_code = self._portrait_max_code(female=True)
+        if not 0 <= face_code <= maximum_face_code:
+            raise ValueError(f"여급 얼굴 코드는 0~{maximum_face_code} 사이의 정수여야 합니다.")
         try:
             appearance_year = int(self.barmaid_appearance_year.get())
         except ValueError as error:
@@ -1479,6 +3511,11 @@ class CDSExecutablePatcher(tk.Tk):
         building_id = self.sponsor_building_selector.current()
         if gender not in range(len(SPONSOR_GENDER_NAMES)):
             raise ValueError("후원자 성별을 선택해 주세요.")
+        maximum_face_code = self._portrait_max_code(female=gender == 1)
+        if not 0 <= face_code <= maximum_face_code:
+            raise ValueError(
+                f"후원자 얼굴 코드는 0~{maximum_face_code} 사이의 정수여야 합니다."
+            )
         if nation_id not in range(len(SPONSOR_NATION_NAMES)):
             raise ValueError("후원자 국가를 선택해 주세요.")
         if job_index not in range(len(SPONSOR_JOB_NAMES)):
@@ -1651,12 +3688,42 @@ class CDSExecutablePatcher(tk.Tk):
                 barmaid_records = read_barmaid_records(target)
                 barmaid_child_aptitudes = read_barmaid_child_aptitudes(target)
                 sponsor_records = read_sponsor_records(target)
+                person_records = read_person_records(target)
+                ship_type_records = read_ship_type_records(target)
+                city_records = read_city_records(target)
+                trade_good_names = read_trade_good_names(target)
+                trade_region_goods = read_trade_region_goods(target)
+                item_records = read_item_records(target)
+                figurehead_effect_settings = read_figurehead_effect_settings(target)
+                discovery_records = read_discovery_records(target)
+                discovery_slot_count = discovery_still_count(target)
+                portrait_counts = {
+                    True: portrait_count(target, female=True),
+                    False: portrait_count(target, female=False),
+                }
             except Exception as exc:
                 messagebox.showerror("EXE 읽기 실패", str(exc), parent=self)
                 return
+            # 얼굴 미리보기도 아래 레코드 로드 중 바로 원본 게임 폴더에서 읽는다.
             self.path.set(selected)
+            self._discovery_still_slot_count = discovery_slot_count
+            discovery_slot_maximum = max(0, discovery_slot_count - 1)
+            self.discovery_still_slot_entry.configure(
+                to=discovery_slot_maximum,
+                validatecommand=(
+                    self._integer_validation_command, "%P", "0", str(discovery_slot_maximum),
+                ),
+            )
+            self._portrait_counts = portrait_counts
+            self._configure_portrait_code_ranges()
             self._load_barmaid_records(barmaid_records, barmaid_child_aptitudes)
             self._load_sponsor_records(sponsor_records)
+            self._load_person_records(person_records)
+            self._load_ship_type_records(ship_type_records)
+            self._load_item_records(item_records)
+            self._load_figurehead_effect_settings(figurehead_effect_settings)
+            self._load_city_records(city_records, trade_good_names, trade_region_goods)
+            self._load_discovery_records(discovery_records)
             self.coordinate.set(coordinate)
             for width, height, (current_width, current_height) in zip(self.widths, self.heights, presets):
                 width.set(str(current_width))
@@ -1924,6 +3991,13 @@ class CDSExecutablePatcher(tk.Tk):
                 pirate_settings = PirateVarietySettings()
             barmaid_edit = self._current_barmaid_edit()
             sponsor_edit = self._current_sponsor_edit()
+            person_edit = self._current_person_edit()
+            ship_type_edit = self._current_ship_type_edit()
+            city_edit = self._current_city_edit()
+            trade_region_goods_edit = self._current_trade_region_goods()
+            item_edit = self._current_item_edit()
+            figurehead_effect_settings = self._current_figurehead_effect_settings()
+            discovery_edit = self._current_discovery_edit()
             target = Path(self.path.get())
             backed_up_paths: set[Path] = set()
             backup = apply_all(
@@ -1942,8 +4016,15 @@ class CDSExecutablePatcher(tk.Tk):
                 self.eclipse_enabled.get(),
                 self.eclipse_latitude.get(),
                 self.mistranslation_fixes_enabled.get(),
+                figurehead_effect_settings,
                 barmaid_edit,
                 sponsor_edit,
+                person_edit,
+                ship_type_edit,
+                city_edit,
+                trade_region_goods_edit,
+                item_edit,
+                discovery_edit,
             )
             if backup is not None:
                 backed_up_paths.add(target.resolve())
@@ -1985,6 +4066,10 @@ class CDSExecutablePatcher(tk.Tk):
             messagebox.showinfo("완료", f"선택한 설정을 적용했습니다.\n\n원본 백업:\n{backup_text}", parent=self)
         self._remember_barmaid_edit(barmaid_edit)
         self._remember_sponsor_edit(sponsor_edit)
+        self._remember_ship_type_edit(ship_type_edit)
+        self._remember_city_edit(city_edit)
+        self._remember_item_edit(item_edit)
+        self._remember_discovery_edit(discovery_edit)
         self._slave_was_enabled = self.slave_enabled.get()
         self._mughal_was_enabled = self.mughal_enabled.get()
 

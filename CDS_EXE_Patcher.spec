@@ -3,10 +3,10 @@
 
 a = Analysis(
     ['CDSExecutablePatcher.pyw'],
-    pathex=[],
+    pathex=['Resources/py'],
     binaries=[],
     datas=[('Resources', 'Resources')],
-    hiddenimports=[],
+    hiddenimports=['vlc'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
