@@ -80,6 +80,7 @@ from patch_cds_integrated import (
     read_trade_good_names,
     read_trade_region_goods,
     read_item_records,
+    read_item_discovery_media_links,
     read_fake_item_records,
     read_discovery_records,
     read_hint_records,
@@ -95,7 +96,6 @@ APP_UPDATE_CONFIG = load_update_config()
 APP_VERSION = APP_UPDATE_CONFIG.version
 UPDATE_HISTORY_MIN_VERSION = (1, 0, 0)
 UPDATE_HISTORY_SEPARATOR = "\n\n" + "─" * 56 + "\n\n"
-
 
 MISTRANSLATION_DETAILS = """by kseokjung, 오쌍, ladyous
 
@@ -673,6 +673,7 @@ class CDSExecutablePatcher(tk.Tk):
         self._figurehead_loaded = False
         self._item_records: tuple[ItemRecord, ...] = ()
         self._item_by_identifier: dict[int, ItemRecord] = {}
+        self._item_discovery_media_links: dict[int, int] = {}
         self._item_controls: list[tk.Widget] = []
         self._fake_item_records: tuple[FakeItemRecord, ...] = ()
         self._fake_item_by_identifier: dict[int, FakeItemRecord] = {}
@@ -733,6 +734,8 @@ class CDSExecutablePatcher(tk.Tk):
         self._city_image_photo: ImageTk.PhotoImage | None = None
         self._discovery_image_photo: ImageTk.PhotoImage | None = None
         self._ship_avi_preview: AviPreview | None = None
+        self._item_avi_preview: AviPreview | None = None
+        self._item_discover_animation_preview: DiscoverAnimationPreview | None = None
         self._discovery_avi_preview: AviPreview | None = None
         self._discover_animation_preview: DiscoverAnimationPreview | None = None
         self._integer_validation_command = self.register(self._validate_integer_text)
@@ -758,6 +761,10 @@ class CDSExecutablePatcher(tk.Tk):
         """Release the native AVI decoder before Tk tears down its widgets."""
         if self._ship_avi_preview is not None:
             self._ship_avi_preview.stop()
+        if self._item_avi_preview is not None:
+            self._item_avi_preview.stop()
+        if self._item_discover_animation_preview is not None:
+            self._item_discover_animation_preview.stop()
         if self._discovery_avi_preview is not None:
             self._discovery_avi_preview.stop()
         if self._discover_animation_preview is not None:
@@ -1652,11 +1659,21 @@ class CDSExecutablePatcher(tk.Tk):
         )
         self.item_effect_entry.grid(row=4, column=1, padx=(6, 0), pady=(8, 0), sticky="w")
         self._limit_integer_input(self.item_effect_entry, 0, 255)
-        item_preview_box = tk.Frame(item_tab, width=124, height=124, bg="#222222", relief="ridge", bd=2)
+        # ITEM.CDS pictures remain at their original 120x120 size.  Items
+        # Items without ITEM.CDS art can use 240x176 DISCOVER media or a
+        # 320x240 discovery AVI, so keep a large enough canvas and center the
+        # smaller still images unchanged.
+        item_preview_box = tk.Frame(item_tab, width=324, height=244, bg="#222222", relief="ridge", bd=2)
         item_preview_box.grid(row=1, column=1, padx=(10, 0), pady=(10, 0), sticky="nw")
         item_preview_box.grid_propagate(False)
         self.item_image_preview = tk.Label(item_preview_box, bg="#222222", fg="#DDDDDD", text="이미지 없음")
         self.item_image_preview.pack(expand=True)
+        self._item_avi_preview = AviPreview(
+            self, self.item_image_preview, width=320, height=240,
+        )
+        self._item_discover_animation_preview = DiscoverAnimationPreview(
+            self, self.item_image_preview,
+        )
         self._item_controls.extend((
             self.item_search_entry, self.item_list, self.item_name_entry,
             self.item_category_selector, self.item_buy_price_entry,
@@ -3230,9 +3247,14 @@ class CDSExecutablePatcher(tk.Tk):
         selection = self.item_list.selection()
         return self._item_by_identifier.get(int(selection[0])) if selection else None
 
-    def _load_item_records(self, records: tuple[ItemRecord, ...]) -> None:
+    def _load_item_records(
+        self,
+        records: tuple[ItemRecord, ...],
+        discovery_media_links: dict[int, int],
+    ) -> None:
         self._item_records = records
         self._item_by_identifier = {record.identifier: record for record in records}
+        self._item_discovery_media_links = dict(discovery_media_links)
         self.item_search_entry.set("")
         self._refresh_item_list()
         self._set_item_controls_enabled(bool(records))
@@ -3249,24 +3271,79 @@ class CDSExecutablePatcher(tk.Tk):
         self.item_name.set(record.name)
         self.item_name_entry.set(record.name)
         self.item_category.set(item_category_name(record.category_id))
-        self._show_item_image(record.image_id)
+        self._show_item_image(record)
         self.item_buy_price.set(str(record.buy_price))
         self.item_sell_price.set(str(record.sell_price))
         self.item_effect_value.set(str(record.effect_value))
 
-    def _show_item_image(self, image_slot: int | None) -> None:
-        """Display the original 120×120 ITEM.CDS image assigned by the EXE."""
-        if image_slot is None:
-            self._item_image_photo = None
-            self.item_image_preview.configure(image="", text="이미지 없음")
+    def _show_item_image(self, record: ItemRecord) -> None:
+        """Display ITEM.CDS art or the item's linked discovery media."""
+        self._stop_item_motion_previews()
+        if record.image_id is None:
+            if self._show_linked_item_discovery_media(record.identifier):
+                return
+            self._set_missing_item_image()
             return
         try:
-            image = self._read_game_item_image(image_slot)
+            image = self._read_game_item_image(record.image_id)
             self._item_image_photo = ImageTk.PhotoImage(image.convert("RGBA"))
             self.item_image_preview.configure(image=self._item_image_photo, text="")
         except (ItemImageReadError, tk.TclError):
+            self._set_missing_item_image()
+
+    def _show_linked_item_discovery_media(self, item_id: int) -> bool:
+        """Show the discovery asset linked to an item without ITEM.CDS art."""
+        discovery_id = self._item_discovery_media_links.get(item_id)
+        if discovery_id is None:
+            return False
+        discovery = self._discovery_by_identifier.get(discovery_id)
+        if discovery is None:
+            return False
+
+        video_path = self._game_discovery_avi_path(discovery.avi_id)
+        if video_path is None and discovery.avi_id is not None:
+            bundled_video = bundled_resource_path(
+                "Resources", "avi", f"I{discovery.avi_id:02d}_0000.AVI",
+            )
+            video_path = bundled_video if bundled_video.is_file() else None
+        if (
+            self._item_avi_preview is not None
+            and video_path is not None
+            and self._item_avi_preview.show(video_path)
+        ):
             self._item_image_photo = None
-            self.item_image_preview.configure(image="", text="이미지 없음")
+            return True
+
+        if (
+            self._item_discover_animation_preview is not None
+            and discovery.animation_part is not None
+            and self.path.get()
+            and self._item_discover_animation_preview.show(
+                self.path.get(), discovery.animation_part,
+            )
+        ):
+            self._item_image_photo = None
+            return True
+
+        if discovery.still_slot is not None:
+            try:
+                image = self._read_game_discovery_still(discovery.still_slot)
+                self._item_image_photo = ImageTk.PhotoImage(image.convert("RGBA"))
+                self.item_image_preview.configure(image=self._item_image_photo, text="")
+                return True
+            except (DiscoveryImageReadError, tk.TclError):
+                pass
+        return False
+
+    def _stop_item_motion_previews(self) -> None:
+        if self._item_avi_preview is not None:
+            self._item_avi_preview.stop()
+        if self._item_discover_animation_preview is not None:
+            self._item_discover_animation_preview.stop()
+
+    def _set_missing_item_image(self) -> None:
+        self._item_image_photo = None
+        self.item_image_preview.configure(image="", text="이미지 없음")
 
     def _read_game_item_image(self, image_slot: int) -> Image.Image:
         if not self.path.get():
@@ -3510,6 +3587,10 @@ class CDSExecutablePatcher(tk.Tk):
             self.discovery_list.selection_set(first_identifier)
             self.discovery_list.focus(first_identifier)
             self._on_discovery_selected()
+        # Some item previews are backed by discovery media rather than
+        # ITEM.CDS. Refresh a selected item after the EXE media rows reload.
+        if self.item_list.selection():
+            self._on_item_selected()
 
     def _on_discovery_selected(self, _event: tk.Event | None = None) -> None:
         record = self._selected_discovery_record()
@@ -3619,7 +3700,7 @@ class CDSExecutablePatcher(tk.Tk):
                 if trade_item is None or trade_item.image_id is None:
                     raise ItemImageReadError("교역품 이미지를 찾지 못했습니다.")
                 image = self._read_game_item_image(trade_item.image_id)
-            elif record.still_slot not in (None, 0):
+            elif record.still_slot is not None:
                 image = self._read_game_discovery_still(record.still_slot)
             else:
                 self._discovery_image_photo = None
@@ -4287,6 +4368,7 @@ class CDSExecutablePatcher(tk.Tk):
                 trade_good_names = read_trade_good_names(target)
                 trade_region_goods = read_trade_region_goods(target)
                 item_records = read_item_records(target)
+                item_discovery_media_links = read_item_discovery_media_links(target)
                 fake_item_records = read_fake_item_records(target)
                 figurehead_effect_settings = read_figurehead_effect_settings(target)
                 discovery_records = read_discovery_records(target)
@@ -4315,10 +4397,10 @@ class CDSExecutablePatcher(tk.Tk):
             self._load_sponsor_records(sponsor_records)
             self._load_person_records(person_records)
             self._load_ship_type_records(ship_type_records)
-            self._load_item_records(item_records)
+            self._load_discovery_records(discovery_records)
+            self._load_item_records(item_records, item_discovery_media_links)
             self._load_figurehead_effect_settings(figurehead_effect_settings)
             self._load_city_records(city_records, trade_good_names, trade_region_goods)
-            self._load_discovery_records(discovery_records)
             self._load_fake_item_records(fake_item_records)
             self._load_hint_records(hint_records)
             self.coordinate.set(coordinate)
@@ -4783,6 +4865,7 @@ class CDSExecutablePatcher(tk.Tk):
         selected_discovery = self.discovery_list.selection()
         self._load_fake_item_records(read_fake_item_records(target))
         self._load_hint_records(read_hint_records(target))
+        self._item_discovery_media_links = read_item_discovery_media_links(target)
         self._load_discovery_records(read_discovery_records(target))
         if selected_fake and self.fake_item_list.exists(selected_fake[0]):
             self.fake_item_list.selection_set(selected_fake[0])

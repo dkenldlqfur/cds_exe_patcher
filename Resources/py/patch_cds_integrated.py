@@ -899,6 +899,9 @@ DISCOVERY_MEDIA_RECORD_RELATIVE_OFFSET = DISCOVERY_NAME_POINTER_OFFSET
 DISCOVERY_MEDIA_STILL_OFFSET = 0x0C
 DISCOVERY_MEDIA_AVI_OFFSET = 0x10
 DISCOVERY_MEDIA_ANIMATION_OFFSET = 0x14
+# The reward/item-image association is stored in the same physical master
+# record, not in the overlapping coordinate view.
+DISCOVERY_REWARD_ITEM_OFFSET = 0x30
 NO_DISCOVERY_MEDIA = 0xFFFFFFFF
 DISCOVER_ANIMATION_PART_COUNT = 29
 # Discovery records 103~131 use every DISCOVER.CDS part exactly once, in
@@ -3636,6 +3639,49 @@ def _read_discovery_records_from_data(data: bytes) -> tuple[DiscoveryRecord, ...
 def read_discovery_records(target: Path) -> tuple[DiscoveryRecord, ...]:
     """Read EXE discovery definitions; no SAVEDATA.CDS is opened or changed."""
     return _read_discovery_records_from_data(target.resolve(strict=True).read_bytes())
+
+
+def read_item_discovery_media_links(target: Path) -> dict[int, int]:
+    """Return item ID -> discovery number links used for editor previews.
+
+    Normal reward items point back to a discovery through ``record + 0x30``.
+    Fake market items store a discovery target code instead, so resolve those
+    codes while preferring the verified treasure-media range 103~131 when a
+    game code is shared by more than one discovery.
+    """
+    data = target.resolve(strict=True).read_bytes()
+    discoveries = _read_discovery_records_from_data(data)
+    pe = pefile.PE(data=data, fast_load=True)
+    try:
+        links: dict[int, int] = {}
+        for discovery in discoveries:
+            record_offset = (
+                _discovery_metadata_offset(pe, discovery.identifier)
+                + DISCOVERY_MEDIA_RECORD_RELATIVE_OFFSET
+            )
+            reward_item_id = struct.unpack_from(
+                "<i", data, record_offset + DISCOVERY_REWARD_ITEM_OFFSET,
+            )[0]
+            if 0 <= reward_item_id < ITEM_RECORD_COUNT:
+                # Preserve the game's later-row precedence for repeated
+                # reward item IDs, matching the extracted master mapping.
+                links[reward_item_id] = discovery.identifier
+    finally:
+        pe.close()
+
+    discoveries_by_code: dict[int, DiscoveryRecord] = {}
+    for discovery in discoveries:
+        current = discoveries_by_code.get(discovery.game_id)
+        if current is None or (
+            103 <= discovery.identifier <= 131
+            and not 103 <= current.identifier <= 131
+        ):
+            discoveries_by_code[discovery.game_id] = discovery
+    for fake_item in _read_fake_item_records_from_data(data):
+        discovery = discoveries_by_code.get(fake_item.target_code)
+        if discovery is not None:
+            links[fake_item.item_id] = discovery.identifier
+    return dict(sorted(links.items()))
 
 
 def apply_discovery_edit(data: bytearray, edit: DiscoveryEdit | None) -> bool:
