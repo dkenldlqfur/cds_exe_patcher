@@ -71,12 +71,18 @@ HINT_TEXT_SLOT_SIZE = HINT_TEXT_SLOT_STRIDE * 191
 # verbatim when the option is disabled.
 NPC_DAILY_DEPARTURE_SLOT_OFFSET = 0x14000
 NPC_DAILY_DEPARTURE_SLOT_SIZE = 0x100
+# Wrapper used by the Judgment command after its per-target death cleanup.
+# It occupies the next independent executable slot and restores the missing
+# front-rank normalization without changing the surrounding battle routine.
+JUDGMENT_FIX_SLOT_OFFSET = 0x14100
+JUDGMENT_FIX_SLOT_SIZE = 0x100
 PATCH_SECTION_DISCOVERY_NAMES_SIZE = 0x4000
 PATCH_SECTION_MASTER_NAMES_SIZE = 0x4000
 PATCH_SECTION_ITEM_NAMES_SIZE = 0x6000
 PATCH_SECTION_CITY_NAMES_SIZE = 0x8000
 PATCH_SECTION_HINT_TEXTS_SIZE = 0x14000
 PATCH_SECTION_NPC_DAILY_DEPARTURE_SIZE = 0x15000
+PATCH_SECTION_JUDGMENT_FIX_SIZE = 0x14200
 
 
 @dataclass(frozen=True)

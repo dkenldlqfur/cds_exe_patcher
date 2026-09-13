@@ -43,9 +43,12 @@ from pe_patch_section import (
     PATCH_SECTION_ITEM_NAMES_SIZE,
     PATCH_SECTION_MASTER_NAMES_SIZE,
     PATCH_SECTION_HINT_TEXTS_SIZE,
+    PATCH_SECTION_JUDGMENT_FIX_SIZE,
     PATCH_SECTION_NPC_DAILY_DEPARTURE_SIZE,
     ITEM_NAME_SLOT_OFFSET,
     ITEM_NAME_SLOT_STRIDE,
+    JUDGMENT_FIX_SLOT_OFFSET,
+    JUDGMENT_FIX_SLOT_SIZE,
     PIRATE_SLOT_OFFSET,
     PIRATE_SLOT_SIZE,
     SHIP_TYPE_NAME_SLOT_OFFSET,
@@ -85,6 +88,27 @@ NPC_DAILY_DEPARTURE_MAGIC = b"CDSNPD1\0"
 NPC_DAILY_DEPARTURE_VERSION = 1
 NPC_DAILY_DEPARTURE_WRAPPER_OFFSET = 0x20
 NPC_DAILY_DEPARTURE_MONTHLY_GATE_OFFSET = 0x80
+
+# The Judgment command removes a dead target but, unlike ordinary attacks and
+# Assassinate, never normalizes a side whose entire front rank was eliminated.
+# Redirect the existing death-cleanup call through a wrapper that performs the
+# omitted side lookup and formation normalization before returning.
+JUDGMENT_CLEANUP_HOOK_VA = 0x449046
+JUDGMENT_DEAD_UNIT_CLEANUP_VA = 0x448510
+JUDGMENT_UNIT_SIDE_VA = 0x446200
+JUDGMENT_FORMATION_NORMALIZE_VA = 0x4484F0
+JUDGMENT_ORIGINAL_HOOK = bytes.fromhex("E8 C5 F4 FF FF")
+JUDGMENT_FIX_MAGIC = b"CDSJDG1\0"
+JUDGMENT_FIX_VERSION = 1
+JUDGMENT_FIX_WRAPPER_OFFSET = 0x20
+
+# The cannon hit-rate formula can become negative with low gunnery and very
+# few cannons.  The original uses unsigned JB for its minimum-one clamp, so a
+# negative percentage reaches the unsigned random comparison as a huge value
+# and succeeds 100% of the time.  Signed JL correctly clamps it to 1%.
+CANNON_ACCURACY_CLAMP_BRANCH_VA = 0x436E59
+CANNON_ACCURACY_ORIGINAL_BRANCH = bytes.fromhex("72 30")  # JB +30h
+CANNON_ACCURACY_FIXED_BRANCH = bytes.fromhex("7C 30")     # JL +30h
 
 # Random naval-combat encounter denominators.  The western region produces
 # pirate or pursuit-fleet encounters; the eastern region produces Islamic
@@ -397,6 +421,31 @@ class ItemEdit:
     sell_price: int
     effect_value: int
     category_id: int
+
+
+@dataclass(frozen=True)
+class FakeItemRecord:
+    """One of the 28 market fake-item records in the discovery master table."""
+
+    identifier: int
+    name: str
+    category_id: int
+    target_code: int
+    value: int
+    item_id: int
+    city_id: int
+
+
+@dataclass(frozen=True)
+class FakeItemEdit:
+    """Editable fields used when a fake item is offered by a city market."""
+
+    identifier: int
+    category_id: int
+    target_code: int
+    value: int
+    item_id: int
+    city_id: int
 
 
 @dataclass(frozen=True)
@@ -825,6 +874,11 @@ DISCOVERY_METADATA_TABLE_VA = 0x51C528
 DISCOVERY_RECORD_COUNT = 231
 DISCOVERY_METADATA_TABLE_RECORD_COUNT = 230
 DISCOVERY_RECORD_SIZE = 0x5C
+FAKE_ITEM_FIRST_RECORD_ID = 230
+FAKE_ITEM_RECORD_COUNT = 28
+FAKE_ITEM_LAST_RECORD_ID = FAKE_ITEM_FIRST_RECORD_ID + FAKE_ITEM_RECORD_COUNT - 1
+FAKE_ITEM_ITEM_ID_OFFSET = 0x48
+FAKE_ITEM_CITY_ID_OFFSET = 0x4C
 # The final metadata entry (game ID 527) is outside the main 230-row table.
 DISCOVERY_FINAL_METADATA_RECORD_VA = 0x522744
 DISCOVERY_COORDINATE_TABLE_VA = 0x51C584
@@ -1074,7 +1128,6 @@ MISTRANSLATION_REPLACEMENTS = (
     (0x15E0DC, "웅변", "변론"),
     (0x1655C0, "궩갂궩귪궶갂긫긇궶갏  딲뾩궩귢귩묿궔귞빓궋궫갏갎", "그런 말도 안되는…이 자식 그거 누구한테 들었어！"),
     *((offset, "규칙", "규율") for offset in (0x166610, 0x169618, 0x1697B0, 0x16D000)),
-    (0x17A214, "항주", "남경"),
     (0x17A7F9, "남안", "서안"),
     (0x17B930, "개미지옥", "파리지옥"),
     (0x17C8FA, "시에라리온", "베르데　곶"),
@@ -1085,6 +1138,7 @@ MISTRANSLATION_REPLACEMENTS = (
 # the original bytes on the next apply.
 MISTRANSLATION_RETIRED_REPLACEMENTS = (
     (0x1664A5, "중단", "계속"),
+    (0x17A214, "항주", "남경"),
 )
 MISTRANSLATION_SWORD_TEXT_OFFSET = 0x156080
 MISTRANSLATION_SWORD_TEXT_CAPACITY = 16
@@ -1094,6 +1148,26 @@ MISTRANSLATION_SWORD_ORIGINAL = "아이베는 안강"
 MISTRANSLATION_SWORD_INTEGRATED = "도지기리 안강"
 MISTRANSLATION_SWORD_CORRECTED = "도지기리 야스츠나"
 MISTRANSLATION_MAGIC = b"CDSTRN1\0"
+
+# The failed-pottery market appearance is a coordinated patch.  The tavern
+# sentence, hint target, and fake-item sale city must agree or the hint can
+# point the player to a city where the item is never offered.
+FAILED_POTTERY_TEXT_OFFSET = 0x17A214
+FAILED_POTTERY_TEXT_ORIGINAL = "항주"
+FAILED_POTTERY_TEXT_PATCHED = "남경"
+FAILED_POTTERY_HINT_ID = 182
+FAILED_POTTERY_HINT_TARGET_ORIGINAL = 218
+FAILED_POTTERY_HINT_TARGET_PATCHED = 122
+FAILED_POTTERY_FAKE_RECORD_ID = 247
+FAILED_POTTERY_CITY_ORIGINAL = 177
+FAILED_POTTERY_CITY_PATCHED = 178
+
+# Hint 88 describes Knossos, but the original target code points at 302
+# instead of the Knossos discovery (112). Keep this correction in the
+# combined bug-fix option while allowing normal direct edits when disabled.
+KNOSSOS_HINT_ID = 88
+KNOSSOS_HINT_TARGET_ORIGINAL = 302
+KNOSSOS_HINT_TARGET_PATCHED = 112
 
 
 def _translation_bytes(text: str) -> bytes:
@@ -1210,6 +1284,111 @@ def apply_mistranslation_fixes(data: bytearray, enabled: bool) -> bool:
             clear_slot(data, section, MISTRANSLATION_SLOT_OFFSET, MISTRANSLATION_SLOT_SIZE)
             changed = True
     return changed
+
+
+def _failed_pottery_offsets(data: bytes | bytearray) -> tuple[int, int]:
+    """Return the hint-target and fake-item-city offsets for this EXE."""
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        if pe.FILE_HEADER.Machine != 0x14C or pe.OPTIONAL_HEADER.ImageBase != 0x400000:
+            raise ValueError("지원하는 32비트 CDS III 실행 파일이 아닙니다.")
+        hint_offset = pe.get_offset_from_rva(HINT_TABLE_VA - pe.OPTIONAL_HEADER.ImageBase)
+        fake_table_offset = pe.get_offset_from_rva(
+            DISCOVERY_METADATA_TABLE_VA - pe.OPTIONAL_HEADER.ImageBase
+        )
+        return (
+            hint_offset + FAILED_POTTERY_HINT_ID * HINT_RECORD_SIZE + HINT_TARGET_CODE_OFFSET,
+            fake_table_offset
+            + FAILED_POTTERY_FAKE_RECORD_ID * DISCOVERY_RECORD_SIZE
+            + FAKE_ITEM_CITY_ID_OFFSET,
+        )
+    finally:
+        pe.close()
+
+
+def _validate_failed_pottery_layout(data: bytes | bytearray) -> tuple[int, int]:
+    original_text = _translation_bytes(FAILED_POTTERY_TEXT_ORIGINAL)
+    patched_text = _translation_bytes(FAILED_POTTERY_TEXT_PATCHED)
+    current_text = bytes(data[
+        FAILED_POTTERY_TEXT_OFFSET:FAILED_POTTERY_TEXT_OFFSET + len(original_text)
+    ])
+    if current_text not in (original_text, patched_text):
+        raise ValueError("실패작 도자기 주점 힌트 문자열을 검증하지 못했습니다.")
+    hint_offset, city_offset = _failed_pottery_offsets(data)
+    return hint_offset, city_offset
+
+
+def read_failed_pottery_patch_state(data: bytes) -> bool:
+    """Return True only when all three failed-pottery changes are present."""
+    hint_offset, city_offset = _validate_failed_pottery_layout(data)
+    patched_text = _translation_bytes(FAILED_POTTERY_TEXT_PATCHED)
+    return (
+        data[FAILED_POTTERY_TEXT_OFFSET:FAILED_POTTERY_TEXT_OFFSET + len(patched_text)]
+        == patched_text
+        and struct.unpack_from("<I", data, hint_offset)[0]
+        == FAILED_POTTERY_HINT_TARGET_PATCHED
+        and struct.unpack_from("<I", data, city_offset)[0] == FAILED_POTTERY_CITY_PATCHED
+    )
+
+
+def apply_failed_pottery_patch(data: bytearray, enabled: bool) -> bool:
+    """Apply or restore the coordinated failed-pottery market appearance."""
+    hint_offset, city_offset = _validate_failed_pottery_layout(data)
+    text = _translation_bytes(
+        FAILED_POTTERY_TEXT_PATCHED if enabled else FAILED_POTTERY_TEXT_ORIGINAL
+    )
+    target = (
+        FAILED_POTTERY_HINT_TARGET_PATCHED
+        if enabled else FAILED_POTTERY_HINT_TARGET_ORIGINAL
+    )
+    city = FAILED_POTTERY_CITY_PATCHED if enabled else FAILED_POTTERY_CITY_ORIGINAL
+    changed = False
+    if data[FAILED_POTTERY_TEXT_OFFSET:FAILED_POTTERY_TEXT_OFFSET + len(text)] != text:
+        data[FAILED_POTTERY_TEXT_OFFSET:FAILED_POTTERY_TEXT_OFFSET + len(text)] = text
+        changed = True
+    if struct.unpack_from("<I", data, hint_offset)[0] != target:
+        struct.pack_into("<I", data, hint_offset, target)
+        changed = True
+    if struct.unpack_from("<I", data, city_offset)[0] != city:
+        struct.pack_into("<I", data, city_offset, city)
+        changed = True
+    return changed
+
+
+def _knossos_hint_target_offset(data: bytes | bytearray) -> int:
+    """Return the target-code field of the Knossos tavern hint."""
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        if pe.FILE_HEADER.Machine != 0x14C or pe.OPTIONAL_HEADER.ImageBase != 0x400000:
+            raise ValueError("지원하는 32비트 CDS III 실행 파일이 아닙니다.")
+        table_offset = pe.get_offset_from_rva(
+            HINT_TABLE_VA - pe.OPTIONAL_HEADER.ImageBase
+        )
+        return (
+            table_offset
+            + KNOSSOS_HINT_ID * HINT_RECORD_SIZE
+            + HINT_TARGET_CODE_OFFSET
+        )
+    finally:
+        pe.close()
+
+
+def read_knossos_hint_fix_state(data: bytes) -> bool:
+    """Return whether hint 88 currently points at the Knossos discovery."""
+    offset = _knossos_hint_target_offset(data)
+    return struct.unpack_from("<I", data, offset)[0] == KNOSSOS_HINT_TARGET_PATCHED
+
+
+def apply_knossos_hint_fix(data: bytearray, enabled: bool) -> bool:
+    """Apply or restore the corrected target of the Knossos tavern hint."""
+    offset = _knossos_hint_target_offset(data)
+    target = (
+        KNOSSOS_HINT_TARGET_PATCHED if enabled else KNOSSOS_HINT_TARGET_ORIGINAL
+    )
+    if struct.unpack_from("<I", data, offset)[0] == target:
+        return False
+    struct.pack_into("<I", data, offset, target)
+    return True
 
 
 def cold_limit_to_latitude(cold_limit: int) -> Decimal:
@@ -1513,6 +1692,173 @@ def apply_npc_daily_departure(data: bytearray, enabled: bool) -> bool:
             data, section, NPC_DAILY_DEPARTURE_SLOT_OFFSET,
             NPC_DAILY_DEPARTURE_SLOT_SIZE,
         )
+    return True
+
+
+def _build_judgment_fix_payload(slot_va: int) -> bytes:
+    """Build the verified wrapper called in place of Judgment's cleanup call."""
+    wrapper_va = slot_va + JUDGMENT_FIX_WRAPPER_OFFSET
+    wrapper = bytearray(bytes.fromhex(
+        "56 "                 # push esi
+        "8B F1 "              # mov esi, ecx (battle object)
+        "8B 44 24 08 "        # mov eax, [esp+8] (original target index)
+        "50 "                 # push eax
+        "E8 00 00 00 00 "     # call dead-unit cleanup (callee pops duplicate arg)
+        "8B 44 24 08 "        # mov eax, [esp+8] (original target index)
+        "50 "                 # push eax
+        "E8 00 00 00 00 "     # call unit-index-to-side
+        "83 C4 04 "           # add esp, 4
+        "50 "                 # push eax (side)
+        "8B CE "              # mov ecx, esi
+        "E8 00 00 00 00 "     # call formation normalization (callee pops side)
+        "5E "                 # pop esi
+        "C2 04 00"            # ret 4 (pop original target index)
+    ))
+    cleanup_call_offset = 8
+    side_call_offset = 18
+    normalize_call_offset = 29
+
+    def patch_rel32(call_offset: int, target_va: int) -> None:
+        if wrapper[call_offset] != 0xE8:
+            raise AssertionError("심판 버그 수정 래퍼의 CALL 위치가 올바르지 않습니다.")
+        struct.pack_into(
+            "<i", wrapper, call_offset + 1,
+            target_va - (wrapper_va + call_offset + 5),
+        )
+
+    patch_rel32(cleanup_call_offset, JUDGMENT_DEAD_UNIT_CLEANUP_VA)
+    patch_rel32(side_call_offset, JUDGMENT_UNIT_SIDE_VA)
+    patch_rel32(normalize_call_offset, JUDGMENT_FORMATION_NORMALIZE_VA)
+    if JUDGMENT_FIX_WRAPPER_OFFSET + len(wrapper) > JUDGMENT_FIX_SLOT_SIZE:
+        raise AssertionError("심판 버그 수정 래퍼가 예약 공간을 초과했습니다.")
+
+    payload = bytearray(JUDGMENT_FIX_SLOT_SIZE)
+    payload[:len(JUDGMENT_FIX_MAGIC)] = JUDGMENT_FIX_MAGIC
+    struct.pack_into("<I", payload, len(JUDGMENT_FIX_MAGIC), JUDGMENT_FIX_VERSION)
+    payload[
+        JUDGMENT_FIX_WRAPPER_OFFSET:
+        JUDGMENT_FIX_WRAPPER_OFFSET + len(wrapper)
+    ] = wrapper
+    return bytes(payload)
+
+
+def _judgment_fix_hook(wrapper_va: int) -> bytes:
+    return b"\xE8" + struct.pack(
+        "<i", wrapper_va - (JUDGMENT_CLEANUP_HOOK_VA + 5),
+    )
+
+
+def _judgment_fix_patch_info(data: bytes | bytearray) -> bool:
+    """Return whether the verified Judgment front-rank fix is active."""
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        if pe.FILE_HEADER.Machine != 0x14C or pe.OPTIONAL_HEADER.ImageBase != 0x400000:
+            raise ValueError("지원하는 32비트 CDS III 실행 파일이 아닙니다.")
+        hook_offset = pe.get_offset_from_rva(
+            JUDGMENT_CLEANUP_HOOK_VA - pe.OPTIONAL_HEADER.ImageBase
+        )
+    finally:
+        pe.close()
+    current_hook = bytes(data[hook_offset:hook_offset + len(JUDGMENT_ORIGINAL_HOOK)])
+    section = find_patch_section(data)
+    if current_hook == JUDGMENT_ORIGINAL_HOOK:
+        if (
+            section is not None
+            and section.raw_size >= JUDGMENT_FIX_SLOT_OFFSET + JUDGMENT_FIX_SLOT_SIZE
+            and bytes(data[
+                section.raw_offset + JUDGMENT_FIX_SLOT_OFFSET:
+                section.raw_offset + JUDGMENT_FIX_SLOT_OFFSET + len(JUDGMENT_FIX_MAGIC)
+            ]) == JUDGMENT_FIX_MAGIC
+        ):
+            raise ValueError("심판 버그 수정 코드가 남아 있지만 호출부가 원본 상태입니다.")
+        return False
+    if (
+        section is None
+        or section.raw_size < JUDGMENT_FIX_SLOT_OFFSET + JUDGMENT_FIX_SLOT_SIZE
+        or section.virtual_size < JUDGMENT_FIX_SLOT_OFFSET + JUDGMENT_FIX_SLOT_SIZE
+    ):
+        raise ValueError("심판 버그 수정 호출이 있으나 .patch 데이터를 찾지 못했습니다.")
+    slot_offset, slot_va = section.slot(JUDGMENT_FIX_SLOT_OFFSET, JUDGMENT_FIX_SLOT_SIZE)
+    expected_payload = _build_judgment_fix_payload(slot_va)
+    expected_hook = _judgment_fix_hook(slot_va + JUDGMENT_FIX_WRAPPER_OFFSET)
+    if (
+        current_hook != expected_hook
+        or bytes(data[slot_offset:slot_offset + JUDGMENT_FIX_SLOT_SIZE]) != expected_payload
+    ):
+        raise ValueError("심판 버그 수정 패치 상태를 검증하지 못했습니다.")
+    return True
+
+
+def apply_judgment_fix(data: bytearray, enabled: bool) -> bool:
+    """Fix Judgment freezing after it eliminates every unit in a front rank."""
+    current_enabled = _judgment_fix_patch_info(data)
+    if current_enabled == enabled:
+        return False
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        hook_offset = pe.get_offset_from_rva(
+            JUDGMENT_CLEANUP_HOOK_VA - pe.OPTIONAL_HEADER.ImageBase
+        )
+    finally:
+        pe.close()
+    if enabled:
+        section, _created = ensure_patch_section(data, PATCH_SECTION_JUDGMENT_FIX_SIZE)
+        slot_offset, slot_va = section.slot(JUDGMENT_FIX_SLOT_OFFSET, JUDGMENT_FIX_SLOT_SIZE)
+        payload = _build_judgment_fix_payload(slot_va)
+        current_payload = bytes(data[slot_offset:slot_offset + JUDGMENT_FIX_SLOT_SIZE])
+        if any(current_payload) and current_payload != payload:
+            raise ValueError("심판 버그 수정용 .patch 슬롯이 다른 데이터로 사용 중입니다.")
+        data[slot_offset:slot_offset + JUDGMENT_FIX_SLOT_SIZE] = payload
+        data[hook_offset:hook_offset + len(JUDGMENT_ORIGINAL_HOOK)] = _judgment_fix_hook(
+            slot_va + JUDGMENT_FIX_WRAPPER_OFFSET
+        )
+    else:
+        section = find_patch_section(data)
+        if section is None:
+            raise ValueError("심판 버그 수정의 복원 데이터를 찾지 못했습니다.")
+        data[hook_offset:hook_offset + len(JUDGMENT_ORIGINAL_HOOK)] = JUDGMENT_ORIGINAL_HOOK
+        clear_slot(data, section, JUDGMENT_FIX_SLOT_OFFSET, JUDGMENT_FIX_SLOT_SIZE)
+    return True
+
+
+def _cannon_accuracy_fix_patch_info(data: bytes | bytearray) -> bool:
+    """Return whether the signed cannon-accuracy minimum clamp is active."""
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        if pe.FILE_HEADER.Machine != 0x14C or pe.OPTIONAL_HEADER.ImageBase != 0x400000:
+            raise ValueError("지원하는 32비트 CDS III 실행 파일이 아닙니다.")
+        branch_offset = pe.get_offset_from_rva(
+            CANNON_ACCURACY_CLAMP_BRANCH_VA - pe.OPTIONAL_HEADER.ImageBase
+        )
+    finally:
+        pe.close()
+    branch = bytes(data[
+        branch_offset:branch_offset + len(CANNON_ACCURACY_ORIGINAL_BRANCH)
+    ])
+    if branch == CANNON_ACCURACY_ORIGINAL_BRANCH:
+        return False
+    if branch == CANNON_ACCURACY_FIXED_BRANCH:
+        return True
+    raise ValueError("포격 명중률 최솟값 판정 코드를 검증하지 못했습니다.")
+
+
+def apply_cannon_accuracy_fix(data: bytearray, enabled: bool) -> bool:
+    """Clamp negative cannon hit rates to 1% instead of treating them as 100%."""
+    current_enabled = _cannon_accuracy_fix_patch_info(data)
+    if current_enabled == enabled:
+        return False
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        branch_offset = pe.get_offset_from_rva(
+            CANNON_ACCURACY_CLAMP_BRANCH_VA - pe.OPTIONAL_HEADER.ImageBase
+        )
+    finally:
+        pe.close()
+    target = (
+        CANNON_ACCURACY_FIXED_BRANCH
+        if enabled else CANNON_ACCURACY_ORIGINAL_BRANCH
+    )
+    data[branch_offset:branch_offset + len(target)] = target
     return True
 
 
@@ -3075,6 +3421,98 @@ def apply_item_edit(data: bytearray, edit: ItemEdit | None) -> bool:
     return True
 
 
+def _fake_item_record_offset(pe: pefile.PE, identifier: int) -> int:
+    if not FAKE_ITEM_FIRST_RECORD_ID <= identifier <= FAKE_ITEM_LAST_RECORD_ID:
+        raise ValueError("모조품 레코드 번호가 올바르지 않습니다.")
+    return (
+        pe.get_offset_from_rva(DISCOVERY_METADATA_TABLE_VA - pe.OPTIONAL_HEADER.ImageBase)
+        + identifier * DISCOVERY_RECORD_SIZE
+    )
+
+
+def _read_fake_item_records_from_data(data: bytes) -> tuple[FakeItemRecord, ...]:
+    """Read the 28 fake-item market rows embedded after normal discoveries."""
+    pe = pefile.PE(data=data, fast_load=True)
+    try:
+        if pe.FILE_HEADER.Machine != 0x14C or pe.OPTIONAL_HEADER.ImageBase != 0x400000:
+            raise ValueError("지원하는 32비트 CDS III 실행 파일이 아닙니다.")
+        item_records = _read_item_records_from_data(data)
+        records: list[FakeItemRecord] = []
+        for identifier in range(FAKE_ITEM_FIRST_RECORD_ID, FAKE_ITEM_LAST_RECORD_ID + 1):
+            offset = _fake_item_record_offset(pe, identifier)
+            category_id = struct.unpack_from("<I", data, offset + DISCOVERY_CATEGORY_OFFSET)[0]
+            target_code = struct.unpack_from("<I", data, offset + DISCOVERY_GAME_ID_OFFSET)[0]
+            value = struct.unpack_from("<I", data, offset + DISCOVERY_VALUE_OFFSET)[0]
+            item_id = struct.unpack_from("<I", data, offset + FAKE_ITEM_ITEM_ID_OFFSET)[0]
+            city_id = struct.unpack_from("<I", data, offset + FAKE_ITEM_CITY_ID_OFFSET)[0]
+            if (
+                not 0 <= category_id <= DISCOVERY_CATEGORY_MAX
+                or not 0 <= target_code <= 0xFFFF
+                or not 0 <= value <= DISCOVERY_VALUE_MAX
+                or not 0 <= item_id < ITEM_RECORD_COUNT
+                or not 0 <= city_id < CITY_RECORD_COUNT
+            ):
+                raise ValueError(f"모조품 {identifier}번 레코드를 검증하지 못했습니다.")
+            records.append(FakeItemRecord(
+                identifier, item_records[item_id].name, category_id,
+                target_code, value, item_id, city_id,
+            ))
+        return tuple(records)
+    finally:
+        pe.close()
+
+
+def read_fake_item_records(target: Path) -> tuple[FakeItemRecord, ...]:
+    """Read the EXE-side fake-item market definitions."""
+    return _read_fake_item_records_from_data(target.resolve(strict=True).read_bytes())
+
+
+def apply_fake_item_edit(data: bytearray, edit: FakeItemEdit | None) -> bool:
+    """Update one fake-item row without changing hint text or save data."""
+    if edit is None:
+        return False
+    if (
+        not FAKE_ITEM_FIRST_RECORD_ID <= edit.identifier <= FAKE_ITEM_LAST_RECORD_ID
+        or not 0 <= edit.category_id <= DISCOVERY_CATEGORY_MAX
+        or not 0 <= edit.target_code <= 0xFFFF
+        or not 0 <= edit.value <= DISCOVERY_VALUE_MAX
+        or not 0 <= edit.item_id < ITEM_RECORD_COUNT
+        or not 0 <= edit.city_id < CITY_RECORD_COUNT
+    ):
+        raise ValueError("모조품 입력값을 확인해 주세요.")
+    current = next(
+        record for record in _read_fake_item_records_from_data(bytes(data))
+        if record.identifier == edit.identifier
+    )
+    if (
+        current.category_id, current.target_code, current.value,
+        current.item_id, current.city_id,
+    ) == (
+        edit.category_id, edit.target_code, edit.value, edit.item_id, edit.city_id,
+    ):
+        return False
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        offset = _fake_item_record_offset(pe, edit.identifier)
+        item_offset = (
+            pe.get_offset_from_rva(ITEM_TABLE_VA - pe.OPTIONAL_HEADER.ImageBase)
+            + edit.item_id * ITEM_RECORD_SIZE
+        )
+        item_name_pointer = struct.unpack_from(
+            "<I", data, item_offset + ITEM_NAME_POINTER_OFFSET
+        )[0]
+    finally:
+        pe.close()
+    # Keep the market label synchronized with the item actually sold.
+    struct.pack_into("<I", data, offset + DISCOVERY_NAME_POINTER_OFFSET, item_name_pointer)
+    struct.pack_into("<I", data, offset + DISCOVERY_CATEGORY_OFFSET, edit.category_id)
+    struct.pack_into("<I", data, offset + DISCOVERY_GAME_ID_OFFSET, edit.target_code)
+    struct.pack_into("<I", data, offset + DISCOVERY_VALUE_OFFSET, edit.value)
+    struct.pack_into("<I", data, offset + FAKE_ITEM_ITEM_ID_OFFSET, edit.item_id)
+    struct.pack_into("<I", data, offset + FAKE_ITEM_CITY_ID_OFFSET, edit.city_id)
+    return True
+
+
 def _discovery_metadata_offset(pe: pefile.PE, identifier: int) -> int:
     """Return the metadata row offset for an editor discovery number."""
     if not 0 <= identifier < DISCOVERY_RECORD_COUNT:
@@ -3747,6 +4185,7 @@ def read_settings(
 ) -> tuple[
     str, tuple[tuple[int, int], ...], int, int, bool, int, int, int, int, int,
     int, int, int, int, int, int, bool, PirateVarietySettings, bool, Decimal, bool,
+    bool, bool, bool, bool,
 ]:
     """Read the settings currently encoded in a selected executable."""
     target = target.resolve(strict=True)
@@ -3787,6 +4226,10 @@ def read_settings(
             *gameplay, *activity_ages, *encounters, pirate_variety, pirate_settings,
             eclipse_enabled, eclipse_latitude,
             read_mistranslation_patch_state(data),
+            read_failed_pottery_patch_state(data),
+            _judgment_fix_patch_info(data),
+            _cannon_accuracy_fix_patch_info(data),
+            read_knossos_hint_fix_state(data),
         )
     finally:
         pe.close()
@@ -3835,6 +4278,10 @@ def apply_all(
     eclipse_enabled: bool = False,
     eclipse_latitude: str | int | float | Decimal = Decimal("67"),
     mistranslation_fixes_enabled: bool = False,
+    failed_pottery_enabled: bool = False,
+    judgment_fix_enabled: bool = False,
+    cannon_accuracy_fix_enabled: bool = False,
+    knossos_hint_fix_enabled: bool = False,
     figurehead_effect_settings: FigureheadEffectSettings = DEFAULT_FIGUREHEAD_EFFECT_SETTINGS,
     barmaid_edit: BarmaidEdit | None = None,
     sponsor_edit: SponsorEdit | None = None,
@@ -3843,6 +4290,7 @@ def apply_all(
     city_edit: CityEdit | None = None,
     trade_region_goods: tuple[tuple[int, ...], ...] | None = None,
     item_edit: ItemEdit | None = None,
+    fake_item_edit: FakeItemEdit | None = None,
     discovery_edit: DiscoveryEdit | None = None,
     hint_edit: HintEdit | None = None,
 ) -> Path | None:
@@ -3850,6 +4298,9 @@ def apply_all(
     target = target.resolve(strict=True)
     original = target.read_bytes()
     before_coordinate = bytearray(original)
+    failed_pottery_was_enabled = read_failed_pottery_patch_state(original)
+    judgment_fix_was_enabled = _judgment_fix_patch_info(original)
+    knossos_hint_fix_was_enabled = read_knossos_hint_fix_state(original)
     # Coordinate-style restoration may clear extensions after its own payload.
     # Temporarily remove relocatable patches, apply the requested coordinate
     # style, then recreate all selected payloads in their reserved slots.
@@ -3857,6 +4308,12 @@ def apply_all(
         apply_pirate_variety(before_coordinate, False)
     if read_mistranslation_patch_state(bytes(before_coordinate)):
         apply_mistranslation_fixes(before_coordinate, False)
+    if failed_pottery_was_enabled:
+        apply_failed_pottery_patch(before_coordinate, False)
+    if judgment_fix_was_enabled:
+        apply_judgment_fix(before_coordinate, False)
+    if knossos_hint_fix_was_enabled:
+        apply_knossos_hint_fix(before_coordinate, False)
     if _eclipse_patch_info(bytes(before_coordinate))[0]:
         apply_eclipse_polar_caps(before_coordinate, False)
     if _npc_daily_departure_patch_info(before_coordinate):
@@ -3866,6 +4323,8 @@ def apply_all(
         apply_resolution(updated, presets)
     apply_npc_travel(updated, departure_denominator, arrival_wait_days)
     apply_npc_daily_departure(updated, npc_daily_departure_enabled)
+    apply_judgment_fix(updated, judgment_fix_enabled)
+    apply_cannon_accuracy_fix(updated, cannon_accuracy_fix_enabled)
     apply_gameplay_options(
         updated,
         long_rest_max,
@@ -3895,8 +4354,15 @@ def apply_all(
     apply_city_edit(updated, city_edit)
     apply_trade_region_goods(updated, trade_region_goods)
     apply_item_edit(updated, item_edit)
+    apply_fake_item_edit(updated, fake_item_edit)
     apply_discovery_edit(updated, discovery_edit)
     apply_hint_edit(updated, hint_edit)
+    # Coordinated bug fixes intentionally win over direct edits to their rows
+    # so a checked feature can never be saved half-applied.
+    if failed_pottery_enabled or failed_pottery_was_enabled:
+        apply_failed_pottery_patch(updated, failed_pottery_enabled)
+    if knossos_hint_fix_enabled or knossos_hint_fix_was_enabled:
+        apply_knossos_hint_fix(updated, knossos_hint_fix_enabled)
     if bytes(updated) == original:
         return None
 

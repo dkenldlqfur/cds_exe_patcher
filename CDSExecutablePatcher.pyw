@@ -54,6 +54,8 @@ from patch_cds_integrated import (
     CityRecord,
     ItemEdit,
     ItemRecord,
+    FakeItemEdit,
+    FakeItemRecord,
     DiscoveryEdit,
     DiscoveryRecord,
     HintEdit,
@@ -76,6 +78,7 @@ from patch_cds_integrated import (
     read_trade_good_names,
     read_trade_region_goods,
     read_item_records,
+    read_fake_item_records,
     read_discovery_records,
     read_hint_records,
     read_figurehead_effect_settings,
@@ -116,13 +119,34 @@ MISTRANSLATION_DETAILS = """by kseokjung, 오쌍, ladyous
 라이스 → 레이스
 
 [발견물 힌트]
-중국의 항주 → 중국의 남경
 아프리카 남안 → 아프리카 서안
 군관조 → 군함조
 개미지옥 → 파리지옥
 시에라리온의 동쪽 → 베르데 곶의 동쪽
 타브리즈 기준 북동쪽 → 북서쪽
 산속 도시 방향 북동쪽 → 북서쪽
+"""
+
+BUG_FIX_DETAILS = """버그 수정
+
+[실패작 도자기 등장]
+- 주점 힌트의 중국 항주 표기를 중국 남경으로 수정합니다.
+- 주점 힌트 ID 182의 대상 코드를 218에서 122로 수정합니다.
+- 실패작 도자기 모조품 레코드의 판매 도시를 항주(177)에서 남경(178)으로 수정합니다.
+
+[심판 버그 수정]
+- 육상전에서 심판으로 한쪽 전열이 전멸하고 후열이 남았을 때 전투 애니메이션이 멈추는 문제를 수정합니다.
+- 심판의 사망 처리 직후 해당 진영의 전열을 검사하고, 전열이 비었으면 후열을 정상적으로 전진시킵니다.
+- 심판의 피해량·명중 판정과 다른 육상전 규칙은 변경하지 않습니다.
+
+[포격 명중률 버그 수정]
+- 포술 레벨과 현재 함포 수가 낮을 때 포격 명중률이 비정상적으로 100%가 되는 문제를 수정합니다.
+- 음수로 계산된 포격 명중률을 정상적인 최솟값 1%로 보정합니다.
+
+[크노소스 주점 힌트 수정]
+- 주점 힌트 ID 88의 잘못된 대상 코드 302를 크노소스 발견물 코드 112로 수정합니다.
+
+체크 해제 시 위 수정 사항을 모두 원본 상태로 복원합니다.
 """
 
 KAABA_DETAILS = """by 히소카
@@ -492,6 +516,7 @@ class CDSExecutablePatcher(tk.Tk):
         self.islamic_encounter_denominator = tk.StringVar(value="0")
         self.pirate_variety_enabled = tk.BooleanVar(value=False)
         self.mistranslation_fixes_enabled = tk.BooleanVar(value=False)
+        self.bug_fixes_enabled = tk.BooleanVar(value=False)
         self.pirate_fame_middle = tk.StringVar(value="0")
         self.pirate_fame_high = tk.StringVar(value="0")
         self.pirate_western_stage2_first_probability = tk.StringVar(value="0")
@@ -605,6 +630,12 @@ class CDSExecutablePatcher(tk.Tk):
         self.item_buy_price = tk.StringVar()
         self.item_sell_price = tk.StringVar()
         self.item_effect_value = tk.StringVar()
+        self.fake_item_category = tk.StringVar()
+        self.fake_item_target_code = tk.StringVar()
+        self.fake_item_value = tk.StringVar()
+        self.fake_item_name = tk.StringVar()
+        self.fake_item_item = tk.StringVar()
+        self.fake_item_city = tk.StringVar()
         self.figurehead_disaster_chances = [tk.StringVar(value=value) for value in ("11", "41", "71")]
         self.figurehead_cannon_damage_reduction = tk.StringVar(value="20")
         self.figurehead_shooting_damage_reduction = tk.StringVar(value="50")
@@ -629,6 +660,11 @@ class CDSExecutablePatcher(tk.Tk):
         self._item_records: tuple[ItemRecord, ...] = ()
         self._item_by_identifier: dict[int, ItemRecord] = {}
         self._item_controls: list[tk.Widget] = []
+        self._fake_item_records: tuple[FakeItemRecord, ...] = ()
+        self._fake_item_by_identifier: dict[int, FakeItemRecord] = {}
+        self._fake_item_controls: list[tk.Widget] = []
+        self._fake_item_target_names_by_code: dict[int, str] = {}
+        self._fake_item_target_codes_by_name: dict[str, int] = {}
         self.discovery_name = tk.StringVar()
         self.discovery_category = tk.StringVar()
         self.discovery_still_slot = tk.StringVar()
@@ -835,6 +871,7 @@ class CDSExecutablePatcher(tk.Tk):
         city_tab = ttk.Frame(settings_notebook, padding=10)
         trade_region_tab = ttk.Frame(settings_notebook, padding=10)
         item_tab = ttk.Frame(settings_notebook, padding=10)
+        fake_item_tab = ttk.Frame(settings_notebook, padding=10)
         figurehead_tab = ttk.Frame(settings_notebook, padding=10)
         discovery_tab = ttk.Frame(settings_notebook, padding=10)
         hint_tab = ttk.Frame(settings_notebook, padding=10)
@@ -847,6 +884,7 @@ class CDSExecutablePatcher(tk.Tk):
         settings_notebook.add(city_tab, text="도시")
         settings_notebook.add(trade_region_tab, text="교역권")
         settings_notebook.add(item_tab, text="아이템")
+        settings_notebook.add(fake_item_tab, text="모조품")
         settings_notebook.add(figurehead_tab, text="선수상 효과")
         settings_notebook.add(discovery_tab, text="발견물")
         settings_notebook.add(hint_tab, text="주점 힌트")
@@ -1081,11 +1119,11 @@ class CDSExecutablePatcher(tk.Tk):
         ).grid(row=2, column=3, padx=(10, 0), pady=(6, 2), sticky="w")
         self._update_cold_limit_entry_states()
 
-        translation_box = ttk.LabelFrame(basic_right_column, text="오역 수정", padding=10)
+        translation_box = ttk.LabelFrame(basic_right_column, text="기타 수정", padding=10)
         translation_box.grid(row=3, column=0, pady=(10, 0), sticky="ew")
         ttk.Checkbutton(
             translation_box,
-            text="용어·지명·아이템명·인명·힌트 오역 수정 적용",
+            text="용어 등의 오역 수정 적용",
             variable=self.mistranslation_fixes_enabled,
         ).grid(row=0, column=0, sticky="w")
         ttk.Button(
@@ -1093,6 +1131,18 @@ class CDSExecutablePatcher(tk.Tk):
             text="내용…",
             command=self.show_mistranslation_details,
         ).grid(row=0, column=1, padx=(10, 0), sticky="e")
+        ttk.Checkbutton(
+            translation_box,
+            text="버그 수정",
+            variable=self.bug_fixes_enabled,
+        ).grid(row=1, column=0, pady=(6, 0), sticky="w")
+        ttk.Button(
+            translation_box,
+            text="내용…",
+            command=lambda: self.show_patch_details(
+                "버그 수정 내역", BUG_FIX_DETAILS,
+            ),
+        ).grid(row=1, column=1, padx=(10, 0), pady=(6, 0), sticky="e")
 
         discovery_box = ttk.LabelFrame(additional_left_column, text="발견물", padding=10)
         discovery_box.grid(row=0, column=0, sticky="ew")
@@ -1587,6 +1637,88 @@ class CDSExecutablePatcher(tk.Tk):
             self.item_sell_price_entry, self.item_effect_entry,
         ))
         self._set_item_controls_enabled(False)
+
+        fake_item_list_box = ttk.LabelFrame(fake_item_tab, text="모조품 목록", padding=10)
+        fake_item_list_box.grid(row=0, column=0, sticky="nsew")
+        fake_item_tab.grid_rowconfigure(0, weight=1)
+        fake_item_list_box.columnconfigure(0, weight=1)
+        fake_item_list_box.rowconfigure(1, weight=1)
+        ttk.Label(fake_item_list_box, text="검색:").grid(row=0, column=0, sticky="w")
+        fake_item_search_host = tk.Frame(fake_item_list_box, width=180, height=23)
+        fake_item_search_host.grid(row=0, column=1, padx=(6, 0), sticky="w")
+        self.fake_item_search_entry = NativeWinEdit(
+            fake_item_search_host, self._schedule_fake_item_list_refresh, width=180, height=23,
+        )
+        fake_item_list_frame = ttk.Frame(fake_item_list_box)
+        fake_item_list_frame.grid(row=1, column=0, columnspan=2, pady=(8, 0), sticky="nsew")
+        self.fake_item_list = ttk.Treeview(
+            fake_item_list_frame, columns=("id", "name", "city"), show="headings",
+            height=17, selectmode="browse",
+        )
+        self.fake_item_list.heading("id", text="번호")
+        self.fake_item_list.heading("name", text="이름")
+        self.fake_item_list.heading("city", text="판매 도시")
+        self.fake_item_list.column("id", width=48, anchor="center", stretch=False)
+        self.fake_item_list.column("name", width=180, anchor="w", stretch=False)
+        self.fake_item_list.column("city", width=105, anchor="w", stretch=False)
+        fake_item_scroll = ttk.Scrollbar(
+            fake_item_list_frame, orient="vertical", command=self.fake_item_list.yview,
+        )
+        self.fake_item_list.configure(yscrollcommand=fake_item_scroll.set)
+        self.fake_item_list.grid(row=0, column=0, sticky="nsew")
+        fake_item_scroll.grid(row=0, column=1, sticky="ns")
+        self.fake_item_list.bind("<<TreeviewSelect>>", self._on_fake_item_selected)
+        fake_item_list_frame.columnconfigure(0, weight=1)
+        fake_item_list_frame.rowconfigure(0, weight=1)
+
+        fake_item_box = ttk.LabelFrame(fake_item_tab, text="모조품 정보", padding=10)
+        fake_item_box.grid(row=0, column=1, padx=(10, 0), sticky="nw")
+        ttk.Label(fake_item_box, text="이름:").grid(row=0, column=0, sticky="w")
+        ttk.Label(fake_item_box, textvariable=self.fake_item_name).grid(
+            row=0, column=1, padx=(8, 0), sticky="w",
+        )
+        ttk.Label(fake_item_box, text="대상 발견물:").grid(row=1, column=0, pady=(8, 0), sticky="w")
+        self.fake_item_target_entry = ttk.Combobox(
+            fake_item_box, textvariable=self.fake_item_target_code,
+            width=27, state="disabled",
+        )
+        self.fake_item_target_entry.grid(row=1, column=1, padx=(8, 0), pady=(8, 0), sticky="w")
+        self._bind_combobox_arrow_selection(self.fake_item_target_entry)
+        ttk.Label(fake_item_box, text="판매 아이템:").grid(row=2, column=0, pady=(8, 0), sticky="w")
+        self.fake_item_item_selector = ttk.Combobox(
+            fake_item_box, textvariable=self.fake_item_item, width=27, state="disabled",
+        )
+        self.fake_item_item_selector.grid(row=2, column=1, padx=(8, 0), pady=(8, 0), sticky="w")
+        self._bind_combobox_arrow_selection(self.fake_item_item_selector)
+        self.fake_item_item_selector.bind(
+            "<<ComboboxSelected>>", self._on_fake_item_link_changed, add="+",
+        )
+        ttk.Label(fake_item_box, text="판매 도시:").grid(row=3, column=0, pady=(8, 0), sticky="w")
+        self.fake_item_city_selector = ttk.Combobox(
+            fake_item_box, textvariable=self.fake_item_city, width=20, state="disabled",
+        )
+        self.fake_item_city_selector.grid(row=3, column=1, padx=(8, 0), pady=(8, 0), sticky="w")
+        self._bind_combobox_arrow_selection(self.fake_item_city_selector)
+        ttk.Label(fake_item_box, text="분류:").grid(row=4, column=0, pady=(8, 0), sticky="w")
+        self.fake_item_category_selector = ttk.Combobox(
+            fake_item_box, textvariable=self.fake_item_category,
+            values=DISCOVERY_CATEGORY_NAMES, width=12, state="disabled",
+        )
+        self.fake_item_category_selector.grid(row=4, column=1, padx=(8, 0), pady=(8, 0), sticky="w")
+        self._bind_combobox_arrow_selection(self.fake_item_category_selector)
+        ttk.Label(fake_item_box, text="가치:").grid(row=5, column=0, pady=(8, 0), sticky="w")
+        self.fake_item_value_entry = ttk.Spinbox(
+            fake_item_box, from_=0, to=99_999_999, textvariable=self.fake_item_value,
+            width=11, state="disabled",
+        )
+        self.fake_item_value_entry.grid(row=5, column=1, padx=(8, 0), pady=(8, 0), sticky="w")
+        self._limit_integer_input(self.fake_item_value_entry, 0, 99_999_999)
+        self._fake_item_controls.extend((
+            self.fake_item_search_entry, self.fake_item_list, self.fake_item_target_entry,
+            self.fake_item_item_selector, self.fake_item_city_selector,
+            self.fake_item_category_selector, self.fake_item_value_entry,
+        ))
+        self._set_fake_item_controls_enabled(False)
 
         figurehead_tab.columnconfigure(0, weight=1)
         figurehead_tab.columnconfigure(1, weight=1)
@@ -2163,7 +2295,7 @@ class CDSExecutablePatcher(tk.Tk):
         self._set_sponsor_controls_enabled(False)
 
     def show_mistranslation_details(self) -> None:
-        self.show_patch_details("오역 수정 내역", MISTRANSLATION_DETAILS, "#1A73E8")
+        self.show_patch_details("용어 등의 오역 수정 내역", MISTRANSLATION_DETAILS, "#1A73E8")
 
     def _bind_combobox_arrow_selection(self, combobox: ttk.Combobox) -> None:
         """Make arrow keys change the selection without opening the drop-down."""
@@ -3152,6 +3284,152 @@ class CDSExecutablePatcher(tk.Tk):
             values=(f"{edit.identifier:03d}", item_category_name(edit.category_id), edit.name),
         )
 
+    def _set_fake_item_controls_enabled(self, enabled: bool) -> None:
+        for control in self._fake_item_controls:
+            if isinstance(control, NativeWinEdit):
+                control.set_enabled(enabled)
+            elif isinstance(control, ttk.Treeview):
+                control.configure(selectmode="browse" if enabled else "none")
+            elif isinstance(control, ttk.Combobox):
+                control.configure(state="readonly" if enabled else "disabled")
+            else:
+                control.state(["!disabled"] if enabled else ["disabled"])
+
+    def _schedule_fake_item_list_refresh(self) -> None:
+        job = getattr(self, "_fake_item_search_job", None)
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+        self._fake_item_search_job = self.after(120, self._refresh_fake_item_list)
+
+    def _refresh_fake_item_list(self) -> None:
+        tree = self.fake_item_list
+        selected = tree.selection()
+        selected_identifier = selected[0] if selected else ""
+        tree.delete(*tree.get_children())
+        query = self.fake_item_search_entry.get().strip().casefold()
+        for record in self._fake_item_records:
+            city_name = BARMAID_CITY_NAMES[record.city_id]
+            if (
+                query
+                and query not in record.name.casefold()
+                and query not in city_name.casefold()
+            ):
+                continue
+            tree.insert(
+                "", "end", iid=str(record.identifier),
+                values=(f"{record.identifier:03d}", record.name, city_name),
+            )
+        if selected_identifier and tree.exists(selected_identifier):
+            tree.selection_set(selected_identifier)
+            tree.focus(selected_identifier)
+            tree.see(selected_identifier)
+
+    def _selected_fake_item_record(self) -> FakeItemRecord | None:
+        selection = self.fake_item_list.selection()
+        return self._fake_item_by_identifier.get(int(selection[0])) if selection else None
+
+    def _load_fake_item_records(self, records: tuple[FakeItemRecord, ...]) -> None:
+        self._fake_item_records = records
+        self._fake_item_by_identifier = {record.identifier: record for record in records}
+        self.fake_item_search_entry.set("")
+        # Several map/location discoveries share a game ID with the tangible
+        # discovery that a fake imitates.  Prefer the verified 103~131 item
+        # discovery range so code 122, for example, is shown as 땅의 여신상.
+        target_records: dict[int, DiscoveryRecord] = {}
+        for discovery in self._discovery_records:
+            current = target_records.get(discovery.game_id)
+            if current is None or (
+                103 <= discovery.identifier <= 131
+                and not 103 <= current.identifier <= 131
+            ):
+                target_records[discovery.game_id] = discovery
+        self._fake_item_target_names_by_code = {
+            code: discovery.name for code, discovery in target_records.items()
+        }
+        self._fake_item_target_codes_by_name = {
+            name: code for code, name in self._fake_item_target_names_by_code.items()
+        }
+        self.fake_item_target_entry.configure(
+            values=tuple(self._fake_item_target_codes_by_name),
+        )
+        self.fake_item_item_selector.configure(
+            values=tuple(record.name for record in self._item_records),
+        )
+        self.fake_item_city_selector.configure(
+            values=BARMAID_CITY_NAMES,
+        )
+        self._refresh_fake_item_list()
+        self._set_fake_item_controls_enabled(bool(records))
+        if records:
+            first_identifier = str(records[0].identifier)
+            self.fake_item_list.selection_set(first_identifier)
+            self.fake_item_list.focus(first_identifier)
+            self._on_fake_item_selected()
+
+    def _on_fake_item_selected(self, _event: tk.Event | None = None) -> None:
+        record = self._selected_fake_item_record()
+        if record is None:
+            return
+        self.fake_item_name.set(record.name)
+        self.fake_item_target_code.set(
+            self._fake_item_target_names_by_code.get(record.target_code, f"알 수 없음 ({record.target_code})")
+        )
+        self.fake_item_item_selector.current(record.item_id)
+        self.fake_item_city_selector.current(record.city_id)
+        self.fake_item_category.set(DISCOVERY_CATEGORY_NAMES[record.category_id])
+        self.fake_item_value.set(str(record.value))
+
+    def _on_fake_item_link_changed(self, _event: tk.Event | None = None) -> None:
+        item_id = self.fake_item_item_selector.current()
+        try:
+            self.fake_item_name.set(self._item_by_identifier[item_id].name)
+        except KeyError:
+            self.fake_item_name.set("")
+
+    def _current_fake_item_edit(self) -> FakeItemEdit | None:
+        record = self._selected_fake_item_record()
+        if record is None:
+            return None
+        try:
+            item_id = self.fake_item_item_selector.current()
+            city_id = self.fake_item_city_selector.current()
+            if item_id < 0 or city_id < 0:
+                raise ValueError
+            return FakeItemEdit(
+                record.identifier,
+                DISCOVERY_CATEGORY_NAMES.index(self.fake_item_category.get()),
+                self._fake_item_target_codes_by_name[self.fake_item_target_code.get()],
+                int(self.fake_item_value.get()),
+                item_id,
+                city_id,
+            )
+        except (ValueError, IndexError, KeyError) as error:
+            raise ValueError("모조품 입력값을 확인해 주세요.") from error
+
+    def _remember_fake_item_edit(self, edit: FakeItemEdit | None) -> None:
+        if edit is None:
+            return
+        name = self._item_by_identifier[edit.item_id].name
+        self._fake_item_records = tuple(
+            FakeItemRecord(
+                record.identifier,
+                name if record.identifier == edit.identifier else record.name,
+                edit.category_id if record.identifier == edit.identifier else record.category_id,
+                edit.target_code if record.identifier == edit.identifier else record.target_code,
+                edit.value if record.identifier == edit.identifier else record.value,
+                edit.item_id if record.identifier == edit.identifier else record.item_id,
+                edit.city_id if record.identifier == edit.identifier else record.city_id,
+            )
+            for record in self._fake_item_records
+        )
+        self._fake_item_by_identifier = {
+            record.identifier: record for record in self._fake_item_records
+        }
+        self._refresh_fake_item_list()
+
     def _set_discovery_controls_enabled(self, enabled: bool) -> None:
         for control in self._discovery_controls:
             if isinstance(control, NativeWinEdit):
@@ -3968,6 +4246,10 @@ class CDSExecutablePatcher(tk.Tk):
                     eclipse_enabled,
                     eclipse_latitude,
                     mistranslation_fixes_enabled,
+                    failed_pottery_enabled,
+                    judgment_fix_enabled,
+                    cannon_accuracy_fix_enabled,
+                    knossos_hint_fix_enabled,
                 ) = read_settings(target)
                 barmaid_records = read_barmaid_records(target)
                 barmaid_child_aptitudes = read_barmaid_child_aptitudes(target)
@@ -3978,6 +4260,7 @@ class CDSExecutablePatcher(tk.Tk):
                 trade_good_names = read_trade_good_names(target)
                 trade_region_goods = read_trade_region_goods(target)
                 item_records = read_item_records(target)
+                fake_item_records = read_fake_item_records(target)
                 figurehead_effect_settings = read_figurehead_effect_settings(target)
                 discovery_records = read_discovery_records(target)
                 hint_records = read_hint_records(target)
@@ -4009,6 +4292,7 @@ class CDSExecutablePatcher(tk.Tk):
             self._load_figurehead_effect_settings(figurehead_effect_settings)
             self._load_city_records(city_records, trade_good_names, trade_region_goods)
             self._load_discovery_records(discovery_records)
+            self._load_fake_item_records(fake_item_records)
             self._load_hint_records(hint_records)
             self.coordinate.set(coordinate)
             for width, height, (current_width, current_height) in zip(self.widths, self.heights, presets):
@@ -4025,6 +4309,15 @@ class CDSExecutablePatcher(tk.Tk):
             self.eclipse_enabled.set(eclipse_enabled)
             self.eclipse_latitude.set(f"{eclipse_latitude:.3f}" if eclipse_enabled else "0")
             self.mistranslation_fixes_enabled.set(mistranslation_fixes_enabled)
+            # Older releases exposed these as separate options.  Treat any
+            # active component as the combined option so the next save applies
+            # the complete bug-fix set instead of disabling a partial patch.
+            self.bug_fixes_enabled.set(
+                failed_pottery_enabled
+                or judgment_fix_enabled
+                or cannon_accuracy_fix_enabled
+                or knossos_hint_fix_enabled
+            )
             discovery_errors: list[str] = []
             try:
                 self.kaaba_enabled.set(is_kaaba_enabled(target))
@@ -4355,6 +4648,7 @@ class CDSExecutablePatcher(tk.Tk):
             city_edit = self._current_city_edit()
             trade_region_goods_edit = self._current_trade_region_goods()
             item_edit = self._current_item_edit()
+            fake_item_edit = self._current_fake_item_edit()
             figurehead_effect_settings = self._current_figurehead_effect_settings()
             discovery_edit = self._current_discovery_edit()
             hint_edit = self._current_hint_edit()
@@ -4377,6 +4671,10 @@ class CDSExecutablePatcher(tk.Tk):
                 self.eclipse_enabled.get(),
                 self.eclipse_latitude.get(),
                 self.mistranslation_fixes_enabled.get(),
+                self.bug_fixes_enabled.get(),
+                self.bug_fixes_enabled.get(),
+                self.bug_fixes_enabled.get(),
+                self.bug_fixes_enabled.get(),
                 figurehead_effect_settings,
                 barmaid_edit,
                 sponsor_edit,
@@ -4385,6 +4683,7 @@ class CDSExecutablePatcher(tk.Tk):
                 city_edit,
                 trade_region_goods_edit,
                 item_edit,
+                fake_item_edit,
                 discovery_edit,
                 hint_edit,
             )
@@ -4431,8 +4730,24 @@ class CDSExecutablePatcher(tk.Tk):
         self._remember_ship_type_edit(ship_type_edit)
         self._remember_city_edit(city_edit)
         self._remember_item_edit(item_edit)
+        self._remember_fake_item_edit(fake_item_edit)
         self._remember_discovery_edit(discovery_edit)
         self._remember_hint_edit(hint_edit)
+        # Coordinated bug fixes can update fake record 247 and hints 182/88
+        # after their direct editors have run. Reload both views so the UI
+        # immediately shows the values that were actually written.
+        selected_fake = self.fake_item_list.selection()
+        selected_hint = self.hint_list.selection()
+        self._load_fake_item_records(read_fake_item_records(target))
+        self._load_hint_records(read_hint_records(target))
+        if selected_fake and self.fake_item_list.exists(selected_fake[0]):
+            self.fake_item_list.selection_set(selected_fake[0])
+            self.fake_item_list.focus(selected_fake[0])
+            self._on_fake_item_selected()
+        if selected_hint and self.hint_list.exists(selected_hint[0]):
+            self.hint_list.selection_set(selected_hint[0])
+            self.hint_list.focus(selected_hint[0])
+            self._on_hint_selected()
         self._slave_was_enabled = self.slave_enabled.get()
         self._mughal_was_enabled = self.mughal_enabled.get()
 
