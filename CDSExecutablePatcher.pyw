@@ -16,7 +16,13 @@ from PIL import Image, ImageTk
 # 배포본 모두에서 동일한 리소스 위치를 사용한다.
 _runtime_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 sys.path.insert(0, str(_runtime_root / "Resources" / "py"))
-from app_update import GitHubReleaseUpdater, UpdateError, bundled_resource_path, load_update_config
+from app_update import (
+    GitHubReleaseUpdater,
+    UpdateError,
+    bundled_resource_path,
+    load_update_config,
+    parse_release_version,
+)
 from kaaba_patch import KaabaPatchError, apply as apply_kaaba_patch, is_enabled as is_kaaba_enabled
 from kaaba_save_patch import KaabaSavePatchError, promote_game_savedata
 from slave_patch import (
@@ -50,6 +56,8 @@ from patch_cds_integrated import (
     ItemRecord,
     DiscoveryEdit,
     DiscoveryRecord,
+    HintEdit,
+    HintRecord,
     FigureheadEffectSettings,
     COLD_LIMIT_DISABLED_VALUE,
     PirateVarietySettings,
@@ -69,6 +77,7 @@ from patch_cds_integrated import (
     read_trade_region_goods,
     read_item_records,
     read_discovery_records,
+    read_hint_records,
     read_figurehead_effect_settings,
     read_settings,
     world_x_to_longitude,
@@ -79,6 +88,8 @@ from patch_cds_integrated import (
 # GitHub Releases 저장소를 설정하면 시작 시 비동기로 업데이트를 확인한다.
 APP_UPDATE_CONFIG = load_update_config()
 APP_VERSION = APP_UPDATE_CONFIG.version
+UPDATE_HISTORY_MIN_VERSION = (1, 0, 0)
+UPDATE_HISTORY_SEPARATOR = "\n\n" + "─" * 56 + "\n\n"
 
 
 MISTRANSLATION_DETAILS = """by kseokjung, 오쌍, ladyous
@@ -473,6 +484,8 @@ class CDSExecutablePatcher(tk.Tk):
         self.heights = [tk.StringVar(value="0") for _ in range(3)]
         self.departure = tk.StringVar(value="0")
         self.arrival_wait = tk.StringVar(value="0")
+        self.npc_daily_departure_enabled = tk.BooleanVar(value=False)
+        self.npc_departure_probability_label = tk.StringVar(value="월간 출발 확률: 1 /")
         self.npc_activity_min_age = tk.StringVar(value="0")
         self.npc_activity_max_age = tk.StringVar(value="0")
         self.western_encounter_denominator = tk.StringVar(value="0")
@@ -633,6 +646,14 @@ class CDSExecutablePatcher(tk.Tk):
         self._discovery_controls: list[tk.Widget] = []
         self._discovery_coordinate_controls: list[tk.Widget] = []
         self._discovery_still_slot_count = 85
+        self.hint_target_code = tk.StringVar()
+        self.hint_target_name = tk.StringVar()
+        self.hint_city_names = [tk.StringVar(value="없음") for _ in range(4)]
+        self.hint_text_byte_count = tk.StringVar(value="0 / 255바이트")
+        self._hint_records: tuple[HintRecord, ...] = ()
+        self._hint_by_identifier: dict[int, HintRecord] = {}
+        self._hint_target_labels_by_code: dict[int, str] = {}
+        self._hint_controls: list[tk.Widget | NativeWinEdit] = []
         # Standard archives contain 144 female and 414 male portraits.  The
         # values are replaced with the selected installation's actual counts.
         self._portrait_counts = {True: 144, False: 414}
@@ -672,6 +693,10 @@ class CDSExecutablePatcher(tk.Tk):
         self.person_face_code.trace_add("write", self._on_person_face_code_changed)
         self.person_gender.trace_add("write", self._on_person_face_code_changed)
         self.discovery_still_slot.trace_add("write", self._on_discovery_media_changed)
+        self.hint_target_code.trace_add("write", self._on_hint_target_code_changed)
+        self.npc_daily_departure_enabled.trace_add(
+            "write", self._update_npc_departure_probability_label,
+        )
         self.city_trade_region.trace_add("write", lambda *_args: self._refresh_city_common_goods())
         for variable in self.barmaid_child_aptitudes:
             variable.trace_add("write", self._update_barmaid_child_aptitude_total)
@@ -780,6 +805,10 @@ class CDSExecutablePatcher(tk.Tk):
             validatecommand=(self._decimal_validation_command, "%P", str(minimum), str(maximum)),
         )
 
+    def _update_npc_departure_probability_label(self, *_args: str) -> None:
+        period = "일일" if self.npc_daily_departure_enabled.get() else "월간"
+        self.npc_departure_probability_label.set(f"{period} 출발 확률: 1 /")
+
     def _build(self) -> None:
         ttk.Style(self).configure("Credit.TLabel", foreground="#1A73E8")
         frame = ttk.Frame(self, padding=14)
@@ -808,6 +837,7 @@ class CDSExecutablePatcher(tk.Tk):
         item_tab = ttk.Frame(settings_notebook, padding=10)
         figurehead_tab = ttk.Frame(settings_notebook, padding=10)
         discovery_tab = ttk.Frame(settings_notebook, padding=10)
+        hint_tab = ttk.Frame(settings_notebook, padding=10)
         settings_notebook.add(basic_tab, text="기본 정보")
         settings_notebook.add(additional_tab, text="추가 패치")
         settings_notebook.add(barmaid_tab, text="여급")
@@ -819,9 +849,11 @@ class CDSExecutablePatcher(tk.Tk):
         settings_notebook.add(item_tab, text="아이템")
         settings_notebook.add(figurehead_tab, text="선수상 효과")
         settings_notebook.add(discovery_tab, text="발견물")
+        settings_notebook.add(hint_tab, text="힌트")
         # The discovery page is shorter than the largest notebook page.  Keep
         # its grid at the upper-left instead of centering it in the spare area.
         discovery_tab.grid_anchor("nw")
+        hint_tab.grid_anchor("nw")
 
         basic_left_column = ttk.Frame(basic_tab)
         basic_left_column.grid(row=0, column=0, padx=(0, 5), sticky="new")
@@ -862,7 +894,9 @@ class CDSExecutablePatcher(tk.Tk):
 
         npc_box = ttk.LabelFrame(basic_left_column, text="일반 NPC 이동", padding=10)
         npc_box.grid(row=2, column=0, pady=(10, 0), sticky="ew")
-        ttk.Label(npc_box, text="월간 출발 확률: 1 /").grid(row=0, column=0, sticky="w")
+        ttk.Label(npc_box, textvariable=self.npc_departure_probability_label).grid(
+            row=0, column=0, sticky="w",
+        )
         departure_entry = ttk.Entry(npc_box, textvariable=self.departure, width=6)
         departure_entry.grid(row=0, column=1, padx=(4, 0))
         self._limit_integer_input(departure_entry, 1, 127)
@@ -872,6 +906,9 @@ class CDSExecutablePatcher(tk.Tk):
         arrival_wait_entry.grid(row=1, column=1, padx=(4, 0), pady=(5, 0), sticky="w")
         self._limit_integer_input(arrival_wait_entry, 0, 127)
         ttk.Label(npc_box, text="일 (0~127, 기본값 60)").grid(row=1, column=2, padx=(5, 0), pady=(5, 0), sticky="w")
+        ttk.Checkbutton(
+            npc_box, text="매일 출발 판정", variable=self.npc_daily_departure_enabled,
+        ).grid(row=2, column=0, columnspan=3, pady=(7, 0), sticky="w")
         gameplay_box = ttk.LabelFrame(basic_left_column, text="게임 진행 설정", padding=10)
         gameplay_box.grid(row=0, column=0, sticky="ew")
         gameplay_rows = (
@@ -1784,6 +1821,97 @@ class CDSExecutablePatcher(tk.Tk):
             self.discovery_still_slot_entry,
         ))
         self._set_discovery_controls_enabled(False)
+
+        hint_list_box = ttk.LabelFrame(hint_tab, text="힌트 목록", padding=10)
+        hint_list_box.grid(row=0, column=0, sticky="nsew")
+        hint_tab.grid_rowconfigure(0, weight=1)
+        hint_tab.grid_columnconfigure(0, weight=1)
+        hint_list_box.columnconfigure(0, weight=1)
+        hint_list_box.rowconfigure(1, weight=1)
+        ttk.Label(hint_list_box, text="검색:").grid(row=0, column=0, sticky="w")
+        hint_search_host = tk.Frame(hint_list_box, width=220, height=23)
+        hint_search_host.grid(row=0, column=1, padx=(6, 0), sticky="w")
+        self.hint_search_entry = NativeWinEdit(
+            hint_search_host, self._schedule_hint_list_refresh, width=220, height=23,
+        )
+        hint_list_frame = ttk.Frame(hint_list_box)
+        hint_list_frame.grid(row=1, column=0, columnspan=2, pady=(8, 0), sticky="nsew")
+        hint_list_frame.columnconfigure(0, weight=1)
+        hint_list_frame.rowconfigure(0, weight=1)
+        self.hint_list = ttk.Treeview(
+            hint_list_frame, columns=("id", "target", "text"), show="headings",
+            height=19, selectmode="browse",
+        )
+        self.hint_list.heading("id", text="ID")
+        self.hint_list.heading("target", text="대상 발견물")
+        self.hint_list.heading("text", text="힌트 내용")
+        self.hint_list.column("id", width=48, anchor="center", stretch=False)
+        self.hint_list.column("target", width=150, anchor="w", stretch=False)
+        self.hint_list.column("text", width=142, anchor="w", stretch=True)
+        hint_scroll = ttk.Scrollbar(hint_list_frame, orient="vertical", command=self.hint_list.yview)
+        self.hint_list.configure(yscrollcommand=hint_scroll.set)
+        self.hint_list.grid(row=0, column=0, sticky="nsew")
+        hint_scroll.grid(row=0, column=1, sticky="ns")
+        self.hint_list.bind("<<TreeviewSelect>>", self._on_hint_selected)
+
+        hint_box = ttk.LabelFrame(hint_tab, text="힌트 정보", padding=10)
+        hint_box.grid(row=0, column=1, padx=(10, 0), sticky="new")
+        hint_box.columnconfigure(1, weight=1)
+        ttk.Label(hint_box, text="대상 발견물:").grid(row=0, column=0, sticky="w")
+        hint_target_frame = ttk.Frame(hint_box)
+        hint_target_frame.grid(row=0, column=1, padx=(8, 0), sticky="ew")
+        hint_target_frame.columnconfigure(1, weight=1)
+        self.hint_target_code_entry = ttk.Spinbox(
+            hint_target_frame, from_=0, to=65535, textvariable=self.hint_target_code,
+            width=8, state="disabled",
+        )
+        self.hint_target_code_entry.grid(row=0, column=0, sticky="w")
+        self._limit_integer_input(self.hint_target_code_entry, 0, 65535)
+        ttk.Label(hint_target_frame, textvariable=self.hint_target_name).grid(
+            row=0, column=1, padx=(10, 0), sticky="w",
+        )
+
+        ttk.Label(hint_box, text="획득 도시:").grid(row=1, column=0, pady=(10, 0), sticky="nw")
+        hint_city_frame = ttk.Frame(hint_box)
+        hint_city_frame.grid(row=1, column=1, padx=(8, 0), pady=(10, 0), sticky="w")
+        self.hint_city_selectors: list[ttk.Combobox] = []
+        hint_city_values = ("없음", *BARMAID_CITY_NAMES)
+        for index, variable in enumerate(self.hint_city_names):
+            selector = ttk.Combobox(
+                hint_city_frame, textvariable=variable, values=hint_city_values,
+                width=14, state="disabled",
+            )
+            selector.grid(row=index // 2, column=index % 2, padx=(0 if index % 2 == 0 else 8, 0),
+                          pady=(0 if index < 2 else 6, 0), sticky="w")
+            self._bind_combobox_arrow_selection(selector)
+            self.hint_city_selectors.append(selector)
+
+        hint_text_header = ttk.Frame(hint_box)
+        hint_text_header.grid(row=2, column=0, columnspan=2, pady=(12, 4), sticky="ew")
+        hint_text_header.columnconfigure(1, weight=1)
+        ttk.Label(hint_text_header, text="힌트 본문:").grid(row=0, column=0, sticky="w")
+        ttk.Label(hint_text_header, textvariable=self.hint_text_byte_count).grid(
+            row=0, column=1, sticky="e",
+        )
+        hint_text_frame = ttk.Frame(hint_box)
+        hint_text_frame.grid(row=3, column=0, columnspan=2, sticky="nsew")
+        hint_text_frame.columnconfigure(0, weight=1)
+        hint_text_frame.rowconfigure(0, weight=1)
+        self.hint_text_editor = tk.Text(
+            hint_text_frame, width=55, height=15, wrap="word", undo=True, state="disabled",
+        )
+        hint_text_scroll = ttk.Scrollbar(
+            hint_text_frame, orient="vertical", command=self.hint_text_editor.yview,
+        )
+        self.hint_text_editor.configure(yscrollcommand=hint_text_scroll.set)
+        self.hint_text_editor.grid(row=0, column=0, sticky="nsew")
+        hint_text_scroll.grid(row=0, column=1, sticky="ns")
+        self.hint_text_editor.bind("<<Modified>>", self._on_hint_text_modified)
+        self._hint_controls.extend((
+            self.hint_search_entry, self.hint_list, self.hint_target_code_entry,
+            *self.hint_city_selectors, self.hint_text_editor,
+        ))
+        self._set_hint_controls_enabled(False)
 
         barmaid_list_box = ttk.LabelFrame(barmaid_tab, text="여급 목록", padding=10)
         barmaid_list_box.grid(row=0, column=0, rowspan=3, sticky="nsew")
@@ -3307,6 +3435,161 @@ class CDSExecutablePatcher(tk.Tk):
         )
         self._discovery_by_identifier = {record.identifier: record for record in self._discovery_records}
         self._refresh_discovery_list()
+        self._configure_hint_target_values()
+        self._refresh_hint_list()
+
+    def _set_hint_controls_enabled(self, enabled: bool) -> None:
+        for control in self._hint_controls:
+            if isinstance(control, NativeWinEdit):
+                control.set_enabled(enabled)
+            elif isinstance(control, ttk.Treeview):
+                control.configure(selectmode="browse" if enabled else "none")
+            elif isinstance(control, ttk.Combobox):
+                control.configure(state="readonly" if enabled else "disabled")
+            elif isinstance(control, tk.Text):
+                control.configure(state="normal" if enabled else "disabled")
+            else:
+                control.state(["!disabled"] if enabled else ["disabled"])
+
+    def _schedule_hint_list_refresh(self) -> None:
+        job = getattr(self, "_hint_search_job", None)
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+        self._hint_search_job = self.after(120, self._refresh_hint_list)
+
+    def _refresh_hint_list(self) -> None:
+        tree = self.hint_list
+        selected = tree.selection()
+        selected_identifier = selected[0] if selected else ""
+        tree.delete(*tree.get_children())
+        query = self.hint_search_entry.get().strip().casefold()
+        for record in self._hint_records:
+            target_label = self._hint_target_labels_by_code.get(
+                record.target_code, f"미확인 발견물 (코드 {record.target_code})",
+            )
+            city_names = " ".join(
+                BARMAID_CITY_NAMES[city_id] for city_id in record.city_ids if city_id >= 0
+            )
+            if (
+                query
+                and query not in record.text.casefold()
+                and query not in str(record.target_code)
+                and query not in target_label.casefold()
+                and query not in city_names.casefold()
+            ):
+                continue
+            summary = " ".join(record.text.split())
+            tree.insert(
+                "", "end", iid=str(record.identifier),
+                values=(record.target_code, target_label, summary),
+            )
+        if selected_identifier and tree.exists(selected_identifier):
+            tree.selection_set(selected_identifier)
+            tree.focus(selected_identifier)
+            tree.see(selected_identifier)
+
+    def _selected_hint_record(self) -> HintRecord | None:
+        selection = self.hint_list.selection()
+        return self._hint_by_identifier.get(int(selection[0])) if selection else None
+
+    def _configure_hint_target_values(self) -> None:
+        """Map the shared internal target codes to their discovery names."""
+        names_by_code: dict[int, list[str]] = {}
+        for discovery in self._discovery_records:
+            names = names_by_code.setdefault(discovery.game_id, [])
+            if discovery.name not in names:
+                names.append(discovery.name)
+        all_codes = sorted(names_by_code.keys() | {record.target_code for record in self._hint_records})
+        labels_by_code: dict[int, str] = {}
+        for code in all_codes:
+            names = names_by_code.get(code, [])
+            label = " / ".join(names) if names else f"미확인 발견물 (코드 {code})"
+            labels_by_code[code] = label
+        self._hint_target_labels_by_code = labels_by_code
+        self._on_hint_target_code_changed()
+
+    def _on_hint_target_code_changed(self, *_args: str) -> None:
+        """Show the discovery names linked to the numeric target ID."""
+        try:
+            target_code = int(self.hint_target_code.get())
+        except ValueError:
+            self.hint_target_name.set("")
+            return
+        self.hint_target_name.set(
+            self._hint_target_labels_by_code.get(target_code, "연결된 발견물 없음")
+        )
+
+    def _load_hint_records(self, records: tuple[HintRecord, ...]) -> None:
+        self._hint_records = records
+        self._hint_by_identifier = {record.identifier: record for record in records}
+        self._configure_hint_target_values()
+        self.hint_search_entry.set("")
+        self._refresh_hint_list()
+        self._set_hint_controls_enabled(bool(records))
+        if records:
+            first_identifier = str(records[0].identifier)
+            self.hint_list.selection_set(first_identifier)
+            self.hint_list.focus(first_identifier)
+            self._on_hint_selected()
+
+    def _on_hint_selected(self, _event: tk.Event | None = None) -> None:
+        record = self._selected_hint_record()
+        if record is None:
+            return
+        self.hint_target_code.set(str(record.target_code))
+        for variable, city_id in zip(self.hint_city_names, record.city_ids):
+            variable.set("없음" if city_id < 0 else BARMAID_CITY_NAMES[city_id])
+        self.hint_text_editor.configure(state="normal")
+        self.hint_text_editor.delete("1.0", tk.END)
+        self.hint_text_editor.insert("1.0", record.text)
+        self.hint_text_editor.edit_modified(False)
+        self._update_hint_text_byte_count()
+
+    def _on_hint_text_modified(self, _event: tk.Event | None = None) -> None:
+        if not self.hint_text_editor.edit_modified():
+            return
+        self.hint_text_editor.edit_modified(False)
+        self._update_hint_text_byte_count()
+
+    def _update_hint_text_byte_count(self) -> None:
+        text = self.hint_text_editor.get("1.0", "end-1c")
+        try:
+            byte_count = len(text.encode("cp949"))
+            self.hint_text_byte_count.set(f"{byte_count} / 255바이트")
+        except UnicodeEncodeError:
+            self.hint_text_byte_count.set("CP949 사용 불가 문자 포함")
+
+    def _current_hint_edit(self) -> HintEdit | None:
+        record = self._selected_hint_record()
+        if record is None:
+            return None
+        try:
+            city_ids = tuple(
+                -1 if variable.get() == "없음" else BARMAID_CITY_NAMES.index(variable.get())
+                for variable in self.hint_city_names
+            )
+            return HintEdit(
+                record.identifier,
+                int(self.hint_target_code.get()),
+                city_ids,
+                self.hint_text_editor.get("1.0", "end-1c").strip(),
+            )
+        except (ValueError, IndexError) as error:
+            raise ValueError("힌트 입력값을 확인해 주세요.") from error
+
+    def _remember_hint_edit(self, edit: HintEdit | None) -> None:
+        if edit is None:
+            return
+        self._hint_records = tuple(
+            HintRecord(record.identifier, edit.target_code, edit.city_ids, edit.text)
+            if record.identifier == edit.identifier else record
+            for record in self._hint_records
+        )
+        self._hint_by_identifier = {record.identifier: record for record in self._hint_records}
+        self._refresh_hint_list()
 
     def _refresh_barmaid_child_aptitudes(self, face_code: int) -> None:
         if not 0 <= face_code < len(self._barmaid_child_aptitudes):
@@ -3673,6 +3956,7 @@ class CDSExecutablePatcher(tk.Tk):
             try:
                 (
                     coordinate, presets, departure, arrival_wait,
+                    npc_daily_departure_enabled,
                     long_rest_max, exploration_days, succession_age,
                     cold_north_limit, cold_south_limit,
                     cash_limit, deposit_limit,
@@ -3696,6 +3980,7 @@ class CDSExecutablePatcher(tk.Tk):
                 item_records = read_item_records(target)
                 figurehead_effect_settings = read_figurehead_effect_settings(target)
                 discovery_records = read_discovery_records(target)
+                hint_records = read_hint_records(target)
                 discovery_slot_count = discovery_still_count(target)
                 portrait_counts = {
                     True: portrait_count(target, female=True),
@@ -3724,12 +4009,14 @@ class CDSExecutablePatcher(tk.Tk):
             self._load_figurehead_effect_settings(figurehead_effect_settings)
             self._load_city_records(city_records, trade_good_names, trade_region_goods)
             self._load_discovery_records(discovery_records)
+            self._load_hint_records(hint_records)
             self.coordinate.set(coordinate)
             for width, height, (current_width, current_height) in zip(self.widths, self.heights, presets):
                 width.set(str(current_width))
                 height.set(str(current_height))
             self.departure.set(str(departure))
             self.arrival_wait.set(str(arrival_wait))
+            self.npc_daily_departure_enabled.set(npc_daily_departure_enabled)
             self.npc_activity_min_age.set(str(npc_activity_min_age))
             self.npc_activity_max_age.set(str(npc_activity_max_age))
             self.western_encounter_denominator.set(str(western_encounter_denominator))
@@ -3827,7 +4114,7 @@ class CDSExecutablePatcher(tk.Tk):
         self.heights[2].set(str(game_area[1]))
 
     def _show_update_notice(self) -> None:
-        """Show the release note left by the replacement process, if present."""
+        """Show every stable release note since v1.0.0 after an update."""
         try:
             notice_index = sys.argv.index("--update-notice") + 1
             notice_path = Path(sys.argv[notice_index])
@@ -3837,10 +4124,82 @@ class CDSExecutablePatcher(tk.Tk):
             return
         version = str(notice.get("version", "")).strip()
         notes = str(notice.get("notes", "")).strip()
-        message = f"v{version} 업데이트를 완료했습니다." if version else "업데이트를 완료했습니다."
-        if notes:
-            message += f"\n\n{notes}"
-        messagebox.showinfo("업데이트 완료", message, parent=self)
+        if parse_release_version(version) != parse_release_version(APP_VERSION):
+            return
+
+        def worker() -> None:
+            try:
+                releases = GitHubReleaseUpdater(APP_UPDATE_CONFIG).fetch_release_history()
+                history_text = self._format_update_history(releases)
+            except UpdateError:
+                history_text = self._format_single_release_note(version, notes)
+            try:
+                self.after(0, lambda: self._show_update_history_dialog(version, history_text))
+            except tk.TclError:
+                pass
+
+        threading.Thread(target=worker, name="update-history", daemon=True).start()
+
+    @staticmethod
+    def _format_single_release_note(version: str, notes: str) -> str:
+        body = notes.strip() or "등록된 업데이트 내역이 없습니다."
+        return f"v{version}\n{body}" if version else body
+
+    @classmethod
+    def _format_update_history(cls, releases: list[dict]) -> str:
+        """Format stable v1.0.0+ releases in the save editor's newest-first order."""
+        history: list[tuple[tuple[int, int, int], str, str]] = []
+        for release in releases:
+            if release.get("draft") or release.get("prerelease"):
+                continue
+            tag = str(release.get("tag_name", "")).strip().lstrip("vV")
+            parsed = parse_release_version(tag)
+            if parsed is None or parsed < UPDATE_HISTORY_MIN_VERSION:
+                continue
+            notes = str(release.get("body", "")).strip() or "등록된 업데이트 내역이 없습니다."
+            history.append((parsed, tag, notes))
+        history.sort(key=lambda entry: entry[0], reverse=True)
+        return UPDATE_HISTORY_SEPARATOR.join(
+            cls._format_single_release_note(tag, notes)
+            for _parsed, tag, notes in history
+        )
+
+    def _show_update_history_dialog(self, updated_version: str, history_text: str) -> None:
+        """Display the complete release history in a centered, scrollable dialog."""
+        dialog = tk.Toplevel(self)
+        dialog.title("업데이트 내역")
+        dialog.transient(self)
+        dialog.resizable(True, True)
+        dialog.geometry("620x460")
+        dialog.minsize(440, 260)
+
+        ttk.Label(
+            dialog,
+            text=f"v{updated_version} 업데이트를 완료했습니다.",
+            font=("맑은 고딕", 10, "bold"),
+        ).pack(anchor="w", padx=12, pady=(12, 6))
+        body = ttk.Frame(dialog)
+        body.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 8))
+        scrollbar = ttk.Scrollbar(body, orient=tk.VERTICAL)
+        text = tk.Text(
+            body,
+            wrap=tk.WORD,
+            font=("맑은 고딕", 9),
+            yscrollcommand=scrollbar.set,
+            padx=8,
+            pady=7,
+            relief=tk.SOLID,
+            borderwidth=1,
+        )
+        scrollbar.configure(command=text.yview)
+        text.insert("1.0", history_text or "등록된 업데이트 내역이 없습니다.")
+        text.configure(state=tk.DISABLED)
+        text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        ttk.Button(dialog, text="확인", width=9, command=dialog.destroy).pack(pady=(0, 12))
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        self._center_dialog(dialog)
+        dialog.focus_set()
 
     def _set_update_checking(self, checking: bool) -> None:
         self._update_checking = checking
@@ -3998,11 +4357,13 @@ class CDSExecutablePatcher(tk.Tk):
             item_edit = self._current_item_edit()
             figurehead_effect_settings = self._current_figurehead_effect_settings()
             discovery_edit = self._current_discovery_edit()
+            hint_edit = self._current_hint_edit()
             target = Path(self.path.get())
             backed_up_paths: set[Path] = set()
             backup = apply_all(
                 target, self.coordinate.get(), True, presets,
                 int(self.departure.get()), int(self.arrival_wait.get()),
+                self.npc_daily_departure_enabled.get(),
                 int(self.long_rest_max.get()), int(self.exploration_days.get()),
                 int(self.succession_age.get()), cold_north_limit,
                 cold_south_limit,
@@ -4025,6 +4386,7 @@ class CDSExecutablePatcher(tk.Tk):
                 trade_region_goods_edit,
                 item_edit,
                 discovery_edit,
+                hint_edit,
             )
             if backup is not None:
                 backed_up_paths.add(target.resolve())
@@ -4070,6 +4432,7 @@ class CDSExecutablePatcher(tk.Tk):
         self._remember_city_edit(city_edit)
         self._remember_item_edit(item_edit)
         self._remember_discovery_edit(discovery_edit)
+        self._remember_hint_edit(hint_edit)
         self._slave_was_enabled = self.slave_enabled.get()
         self._mughal_was_enabled = self.mughal_enabled.get()
 

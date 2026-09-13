@@ -40,6 +40,10 @@ class UpdateConfig:
     def latest_url(self) -> str:
         return f"https://api.github.com/repos/{self.repository}/releases/latest" if self.enabled else ""
 
+    @property
+    def releases_url(self) -> str:
+        return f"https://api.github.com/repos/{self.repository}/releases?per_page=100" if self.enabled else ""
+
 
 def bundled_resource_path(*parts: str) -> Path:
     """Return a resource path in both source and PyInstaller builds."""
@@ -117,6 +121,23 @@ class GitHubReleaseUpdater:
         if not isinstance(release, dict):
             raise UpdateError("업데이트 서버 응답 형식이 올바르지 않습니다.")
         return release
+
+    def fetch_release_history(self, timeout: int = 8) -> list[dict[str, Any]]:
+        """Fetch up to 100 GitHub Releases for the post-update history dialog."""
+        if not self.enabled:
+            return []
+        request = Request(self.config.releases_url, headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": f"CDS-EXE-Patcher/{self.config.version}",
+        })
+        try:
+            with urlopen(request, timeout=timeout) as response:
+                releases = json.loads(response.read().decode("utf-8"))
+        except (HTTPError, URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError) as exc:
+            raise UpdateError(f"업데이트 내역을 가져오지 못했습니다: {exc}") from exc
+        if not isinstance(releases, list):
+            raise UpdateError("업데이트 내역의 서버 응답 형식이 올바르지 않습니다.")
+        return [release for release in releases if isinstance(release, dict)]
 
     def is_newer_release(self, release: dict[str, Any]) -> bool:
         remote = parse_release_version(release.get("tag_name", ""))

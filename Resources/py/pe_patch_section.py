@@ -60,10 +60,23 @@ CITY_NAME_SLOT_SIZE = CITY_NAME_SLOT_STRIDE * 226
 # modified values back without guessing at individual instruction operands.
 FIGUREHEAD_EFFECT_SLOT_OFFSET = 0x7700
 FIGUREHEAD_EFFECT_SLOT_SIZE = 0x900
+# Library hints are pointer strings.  The longest original Korean hint is 244
+# CP949 bytes, so independent 256-byte rows preserve the original capacity and
+# let one edited hint move without overwriting the neighbouring source text.
+HINT_TEXT_SLOT_OFFSET = 0x8000
+HINT_TEXT_SLOT_STRIDE = 0x100
+HINT_TEXT_SLOT_SIZE = HINT_TEXT_SLOT_STRIDE * 191
+# Wrapper used to move ordinary-NPC departure checks from the monthly callback
+# to the elapsed-day callback.  The original callback pointers are restored
+# verbatim when the option is disabled.
+NPC_DAILY_DEPARTURE_SLOT_OFFSET = 0x14000
+NPC_DAILY_DEPARTURE_SLOT_SIZE = 0x100
 PATCH_SECTION_DISCOVERY_NAMES_SIZE = 0x4000
 PATCH_SECTION_MASTER_NAMES_SIZE = 0x4000
 PATCH_SECTION_ITEM_NAMES_SIZE = 0x6000
 PATCH_SECTION_CITY_NAMES_SIZE = 0x8000
+PATCH_SECTION_HINT_TEXTS_SIZE = 0x14000
+PATCH_SECTION_NPC_DAILY_DEPARTURE_SIZE = 0x15000
 
 
 @dataclass(frozen=True)

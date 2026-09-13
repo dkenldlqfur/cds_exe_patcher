@@ -31,13 +31,19 @@ from pe_patch_section import (
     ECLIPSE_SLOT_SIZE,
     FIGUREHEAD_EFFECT_SLOT_OFFSET,
     FIGUREHEAD_EFFECT_SLOT_SIZE,
+    HINT_TEXT_SLOT_OFFSET,
+    HINT_TEXT_SLOT_STRIDE,
     MISTRANSLATION_SLOT_OFFSET,
     MISTRANSLATION_SLOT_SIZE,
+    NPC_DAILY_DEPARTURE_SLOT_OFFSET,
+    NPC_DAILY_DEPARTURE_SLOT_SIZE,
     PATCH_SECTION_EXPANDED_SIZE,
     PATCH_SECTION_DISCOVERY_NAMES_SIZE,
     PATCH_SECTION_CITY_NAMES_SIZE,
     PATCH_SECTION_ITEM_NAMES_SIZE,
     PATCH_SECTION_MASTER_NAMES_SIZE,
+    PATCH_SECTION_HINT_TEXTS_SIZE,
+    PATCH_SECTION_NPC_DAILY_DEPARTURE_SIZE,
     ITEM_NAME_SLOT_OFFSET,
     ITEM_NAME_SLOT_STRIDE,
     PIRATE_SLOT_OFFSET,
@@ -70,6 +76,15 @@ NPC_COMPARE_PREFIX = bytes.fromhex("83 be 10 01 00 00")
 MAX_NPC_ARRIVAL_WAIT_DAYS = 127
 NPC_ACTIVITY_MIN_AGE_VA = 0x4322C8
 NPC_ACTIVITY_MAX_AGE_VA = 0x4322D1
+NPC_DAILY_UPDATE_VA = 0x432740
+NPC_MONTHLY_DEPARTURE_VA = 0x4327F0
+NPC_CHARACTER_ID_VA = 0x432080
+NPC_DAILY_UPDATE_VTABLE_VA = 0x4FB40C
+NPC_MONTHLY_DEPARTURE_VTABLE_VA = 0x4FB410
+NPC_DAILY_DEPARTURE_MAGIC = b"CDSNPD1\0"
+NPC_DAILY_DEPARTURE_VERSION = 1
+NPC_DAILY_DEPARTURE_WRAPPER_OFFSET = 0x20
+NPC_DAILY_DEPARTURE_MONTHLY_GATE_OFFSET = 0x80
 
 # Random naval-combat encounter denominators.  The western region produces
 # pirate or pursuit-fleet encounters; the eastern region produces Islamic
@@ -423,6 +438,26 @@ class DiscoveryEdit:
     still_slot: int | None
     avi_id: int | None
     animation_part: int | None
+
+
+@dataclass(frozen=True)
+class HintRecord:
+    """One EXE-side library hint and the cities where it can be obtained."""
+
+    identifier: int
+    target_code: int
+    city_ids: tuple[int, int, int, int]
+    text: str
+
+
+@dataclass(frozen=True)
+class HintEdit:
+    """Editable fields of one library-hint table row."""
+
+    identifier: int
+    target_code: int
+    city_ids: tuple[int, int, int, int]
+    text: str
 
 
 DEFAULT_PIRATE_VARIETY_SETTINGS = PirateVarietySettings()
@@ -819,6 +854,14 @@ DISCOVERY_X_MAX = 2500
 DISCOVERY_Y_MIN = -1
 DISCOVERY_Y_MAX = 1250
 DISCOVERY_NAME_MAX_BYTES = DISCOVERY_NAME_SLOT_STRIDE - 1
+HINT_TABLE_VA = 0x525078
+HINT_RECORD_COUNT = 191
+HINT_RECORD_SIZE = 0x18
+HINT_TARGET_CODE_OFFSET = 0x00
+HINT_CITY_IDS_OFFSET = 0x04
+HINT_CITY_COUNT = 4
+HINT_TEXT_POINTER_OFFSET = 0x14
+HINT_TEXT_MAX_BYTES = HINT_TEXT_SLOT_STRIDE - 1
 WORLD_WIDTH = Decimal("2500")
 WORLD_HEIGHT = Decimal("1250")
 WORLD_LONGITUDE_SPAN = Decimal("360")
@@ -1279,6 +1322,198 @@ def apply_npc_travel(data: bytearray, departure_denominator: int, arrival_wait_d
         return changed
     finally:
         pe.close()
+
+
+def _build_npc_daily_departure_payload(slot_va: int) -> bytes:
+    """Build callbacks that check ordinary NPCs daily and keep special NPCs monthly."""
+    wrapper_va = slot_va + NPC_DAILY_DEPARTURE_WRAPPER_OFFSET
+    wrapper = bytearray(bytes.fromhex(
+        "56 "                 # push esi
+        "53 "                 # push ebx
+        "8B F1 "              # mov esi, ecx
+        "8B 5C 24 0C "        # mov ebx, [esp+0Ch] (elapsed days)
+        "85 DB "              # test ebx, ebx
+        "7E 00 "              # jle fallback
+    ))
+    fallback_jump_byte = len(wrapper) - 1
+    loop_offset = len(wrapper)
+    wrapper.extend(bytes.fromhex("6A 01 8B CE E8 00 00 00 00"))
+    daily_call_offset = loop_offset + 4
+    wrapper.extend(bytes.fromhex("8B CE E8 00 00 00 00"))
+    character_id_call_offset = loop_offset + 11
+    wrapper.extend(bytes.fromhex("83 F8 0E 7C 00"))  # ID < 14: special NPC
+    special_npc_jump_byte = len(wrapper) - 1
+    wrapper.extend(bytes.fromhex("3D BF 00 00 00 7D 00"))  # ID >= 191: non-NPC
+    non_npc_jump_byte = len(wrapper) - 1
+    wrapper.extend(bytes.fromhex("8B CE E8 00 00 00 00"))
+    monthly_call_offset = len(wrapper) - 5
+    skip_departure_offset = len(wrapper)
+    wrapper.extend(bytes.fromhex("4B 75 00 EB 00"))
+    loop_jump_byte = len(wrapper) - 3
+    done_jump_byte = len(wrapper) - 1
+    fallback_offset = len(wrapper)
+    wrapper.extend(bytes.fromhex("53 8B CE E8 00 00 00 00"))
+    fallback_daily_call_offset = fallback_offset + 3
+    done_offset = len(wrapper)
+    wrapper.extend(bytes.fromhex("5B 5E C2 04 00"))
+
+    def patch_rel32(call_offset: int, target_va: int) -> None:
+        struct.pack_into(
+            "<i", wrapper, call_offset + 1,
+            target_va - (wrapper_va + call_offset + 5),
+        )
+
+    wrapper[fallback_jump_byte] = fallback_offset - (fallback_jump_byte + 1)
+    wrapper[special_npc_jump_byte] = skip_departure_offset - (special_npc_jump_byte + 1)
+    wrapper[non_npc_jump_byte] = skip_departure_offset - (non_npc_jump_byte + 1)
+    wrapper[loop_jump_byte] = (loop_offset - (loop_jump_byte + 1)) & 0xFF
+    wrapper[done_jump_byte] = done_offset - (done_jump_byte + 1)
+    patch_rel32(daily_call_offset, NPC_DAILY_UPDATE_VA)
+    patch_rel32(character_id_call_offset, NPC_CHARACTER_ID_VA)
+    patch_rel32(monthly_call_offset, NPC_MONTHLY_DEPARTURE_VA)
+    patch_rel32(fallback_daily_call_offset, NPC_DAILY_UPDATE_VA)
+
+    if len(wrapper) >= (
+        NPC_DAILY_DEPARTURE_MONTHLY_GATE_OFFSET - NPC_DAILY_DEPARTURE_WRAPPER_OFFSET
+    ):
+        raise AssertionError("NPC 일일 이동 래퍼가 예약 공간을 초과했습니다.")
+
+    # The original monthly callback also handles special/history NPCs (IDs 0-13).
+    # Keep that path monthly while suppressing the duplicated ordinary-NPC check.
+    monthly_gate_va = slot_va + NPC_DAILY_DEPARTURE_MONTHLY_GATE_OFFSET
+    monthly_gate = bytearray(bytes.fromhex(
+        "56 "                 # push esi
+        "8B F1 "              # mov esi, ecx
+        "E8 00 00 00 00 "     # call character ID getter
+        "83 F8 0E "           # cmp eax, 14
+        "7D 00 "              # jge done
+        "8B CE "              # mov ecx, esi
+        "E8 00 00 00 00 "     # call original monthly callback
+        "5E "                 # pop esi
+        "C3"                  # ret
+    ))
+    gate_id_call_offset = 3
+    gate_skip_jump_byte = 12
+    gate_monthly_call_offset = 15
+    gate_done_offset = 20
+
+    def patch_gate_rel32(call_offset: int, target_va: int) -> None:
+        struct.pack_into(
+            "<i", monthly_gate, call_offset + 1,
+            target_va - (monthly_gate_va + call_offset + 5),
+        )
+
+    monthly_gate[gate_skip_jump_byte] = gate_done_offset - (gate_skip_jump_byte + 1)
+    patch_gate_rel32(gate_id_call_offset, NPC_CHARACTER_ID_VA)
+    patch_gate_rel32(gate_monthly_call_offset, NPC_MONTHLY_DEPARTURE_VA)
+
+    payload = bytearray(NPC_DAILY_DEPARTURE_SLOT_SIZE)
+    payload[:8] = NPC_DAILY_DEPARTURE_MAGIC
+    struct.pack_into(
+        "<III", payload, 8, NPC_DAILY_DEPARTURE_VERSION,
+        NPC_DAILY_UPDATE_VA, NPC_MONTHLY_DEPARTURE_VA,
+    )
+    payload[
+        NPC_DAILY_DEPARTURE_WRAPPER_OFFSET:
+        NPC_DAILY_DEPARTURE_WRAPPER_OFFSET + len(wrapper)
+    ] = wrapper
+    payload[
+        NPC_DAILY_DEPARTURE_MONTHLY_GATE_OFFSET:
+        NPC_DAILY_DEPARTURE_MONTHLY_GATE_OFFSET + len(monthly_gate)
+    ] = monthly_gate
+    return bytes(payload)
+
+
+def _npc_daily_departure_patch_info(data: bytes | bytearray) -> bool:
+    """Return whether the verified daily-departure callback patch is active."""
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        if pe.FILE_HEADER.Machine != 0x14C or pe.OPTIONAL_HEADER.ImageBase != 0x400000:
+            raise ValueError("지원하는 32비트 CDS III 실행 파일이 아닙니다.")
+        daily_pointer_offset = pe.get_offset_from_rva(
+            NPC_DAILY_UPDATE_VTABLE_VA - pe.OPTIONAL_HEADER.ImageBase
+        )
+        monthly_pointer_offset = pe.get_offset_from_rva(
+            NPC_MONTHLY_DEPARTURE_VTABLE_VA - pe.OPTIONAL_HEADER.ImageBase
+        )
+    finally:
+        pe.close()
+    pointers = struct.unpack_from("<II", data, daily_pointer_offset)
+    if pointers == (NPC_DAILY_UPDATE_VA, NPC_MONTHLY_DEPARTURE_VA):
+        return False
+    section = find_patch_section(data)
+    if (
+        section is None
+        or section.raw_size < NPC_DAILY_DEPARTURE_SLOT_OFFSET + NPC_DAILY_DEPARTURE_SLOT_SIZE
+        or section.virtual_size < NPC_DAILY_DEPARTURE_SLOT_OFFSET + NPC_DAILY_DEPARTURE_SLOT_SIZE
+    ):
+        raise ValueError("NPC 일일 이동 패치 포인터가 있으나 .patch 데이터를 찾지 못했습니다.")
+    slot_offset, slot_va = section.slot(
+        NPC_DAILY_DEPARTURE_SLOT_OFFSET, NPC_DAILY_DEPARTURE_SLOT_SIZE,
+    )
+    expected_pointers = (
+        slot_va + NPC_DAILY_DEPARTURE_WRAPPER_OFFSET,
+        slot_va + NPC_DAILY_DEPARTURE_MONTHLY_GATE_OFFSET,
+    )
+    expected_payload = _build_npc_daily_departure_payload(slot_va)
+    if (
+        pointers != expected_pointers
+        or bytes(data[slot_offset:slot_offset + NPC_DAILY_DEPARTURE_SLOT_SIZE]) != expected_payload
+    ):
+        raise ValueError("NPC 일일 이동 패치 상태를 검증하지 못했습니다.")
+    return True
+
+
+def read_npc_daily_departure_enabled(target: Path) -> bool:
+    """Read whether ordinary NPC departure is checked for every elapsed day."""
+    return _npc_daily_departure_patch_info(target.resolve(strict=True).read_bytes())
+
+
+def apply_npc_daily_departure(data: bytearray, enabled: bool) -> bool:
+    """Move ordinary-NPC departure checks between monthly and daily callbacks."""
+    current_enabled = _npc_daily_departure_patch_info(data)
+    if current_enabled == enabled:
+        return False
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        daily_pointer_offset = pe.get_offset_from_rva(
+            NPC_DAILY_UPDATE_VTABLE_VA - pe.OPTIONAL_HEADER.ImageBase
+        )
+        monthly_pointer_offset = pe.get_offset_from_rva(
+            NPC_MONTHLY_DEPARTURE_VTABLE_VA - pe.OPTIONAL_HEADER.ImageBase
+        )
+    finally:
+        pe.close()
+    if enabled:
+        section, _created = ensure_patch_section(
+            data, PATCH_SECTION_NPC_DAILY_DEPARTURE_SIZE,
+        )
+        slot_offset, slot_va = section.slot(
+            NPC_DAILY_DEPARTURE_SLOT_OFFSET, NPC_DAILY_DEPARTURE_SLOT_SIZE,
+        )
+        payload = _build_npc_daily_departure_payload(slot_va)
+        current_payload = bytes(data[slot_offset:slot_offset + NPC_DAILY_DEPARTURE_SLOT_SIZE])
+        if any(current_payload) and current_payload != payload:
+            raise ValueError("NPC 일일 이동용 .patch 슬롯이 다른 데이터로 사용 중입니다.")
+        data[slot_offset:slot_offset + NPC_DAILY_DEPARTURE_SLOT_SIZE] = payload
+        struct.pack_into(
+            "<II", data, daily_pointer_offset,
+            slot_va + NPC_DAILY_DEPARTURE_WRAPPER_OFFSET,
+            slot_va + NPC_DAILY_DEPARTURE_MONTHLY_GATE_OFFSET,
+        )
+    else:
+        section = find_patch_section(data)
+        if section is None:
+            raise ValueError("NPC 일일 이동 패치의 복원 데이터를 찾지 못했습니다.")
+        struct.pack_into(
+            "<II", data, daily_pointer_offset,
+            NPC_DAILY_UPDATE_VA, NPC_MONTHLY_DEPARTURE_VA,
+        )
+        clear_slot(
+            data, section, NPC_DAILY_DEPARTURE_SLOT_OFFSET,
+            NPC_DAILY_DEPARTURE_SLOT_SIZE,
+        )
+    return True
 
 
 def _read_npc_activity_ages_from_data(data: bytes) -> tuple[int, int]:
@@ -3042,6 +3277,105 @@ def apply_discovery_edit(data: bytearray, edit: DiscoveryEdit | None) -> bool:
     return True
 
 
+def _read_hint_records_from_data(data: bytes) -> tuple[HintRecord, ...]:
+    """Read the 191-row EXE library-hint table.
+
+    Each row stores a discovery/event target code, four signed city IDs and a
+    pointer to a CP949 string.  ``-1`` marks an unused city slot.
+    """
+    pe = pefile.PE(data=data, fast_load=True)
+    try:
+        if pe.FILE_HEADER.Machine != 0x14C or pe.OPTIONAL_HEADER.ImageBase != 0x400000:
+            raise ValueError("지원하는 32비트 CDS III 실행 파일이 아닙니다.")
+        table_offset = pe.get_offset_from_rva(HINT_TABLE_VA - pe.OPTIONAL_HEADER.ImageBase)
+        table_size = HINT_RECORD_COUNT * HINT_RECORD_SIZE
+        if table_offset < 0 or table_offset + table_size > len(data):
+            raise ValueError("힌트 마스터 테이블의 범위를 검증하지 못했습니다.")
+        records: list[HintRecord] = []
+        for identifier in range(HINT_RECORD_COUNT):
+            offset = table_offset + identifier * HINT_RECORD_SIZE
+            target_code = struct.unpack_from("<I", data, offset + HINT_TARGET_CODE_OFFSET)[0]
+            city_ids = struct.unpack_from(
+                f"<{HINT_CITY_COUNT}i", data, offset + HINT_CITY_IDS_OFFSET,
+            )
+            text_va = struct.unpack_from("<I", data, offset + HINT_TEXT_POINTER_OFFSET)[0]
+            try:
+                text_offset = pe.get_offset_from_rva(text_va - pe.OPTIONAL_HEADER.ImageBase)
+            except pefile.PEFormatError as error:
+                raise ValueError(f"힌트 {identifier}번 본문 주소를 검증하지 못했습니다.") from error
+            text_end = data.find(
+                b"\0", text_offset, min(text_offset + HINT_TEXT_SLOT_STRIDE, len(data)),
+            )
+            if not 0 <= text_offset < len(data) or text_end < 0:
+                raise ValueError(f"힌트 {identifier}번 본문 주소를 검증하지 못했습니다.")
+            try:
+                text = data[text_offset:text_end].decode("cp949")
+            except UnicodeDecodeError as error:
+                raise ValueError(f"힌트 {identifier}번 본문을 읽지 못했습니다.") from error
+            if (
+                not text
+                or any(not -1 <= city_id < CITY_RECORD_COUNT for city_id in city_ids)
+            ):
+                raise ValueError(f"힌트 {identifier}번 마스터 값을 검증하지 못했습니다.")
+            records.append(HintRecord(identifier, target_code, city_ids, text))
+        return tuple(records)
+    finally:
+        pe.close()
+
+
+def read_hint_records(target: Path) -> tuple[HintRecord, ...]:
+    """Read EXE-side library hints without touching SAVEDATA.CDS."""
+    return _read_hint_records_from_data(target.resolve(strict=True).read_bytes())
+
+
+def apply_hint_edit(data: bytearray, edit: HintEdit | None) -> bool:
+    """Update one library hint and redirect changed text into ``.patch``."""
+    if edit is None:
+        return False
+    text = edit.text.strip()
+    if not text:
+        raise ValueError("힌트 본문을 입력해 주세요.")
+    try:
+        text_bytes = text.encode("cp949")
+    except UnicodeEncodeError as error:
+        raise ValueError("힌트 본문은 CP949에서 사용할 수 있는 문자만 입력할 수 있습니다.") from error
+    if len(text_bytes) > HINT_TEXT_MAX_BYTES:
+        raise ValueError(f"힌트 본문은 최대 {HINT_TEXT_MAX_BYTES}바이트까지 입력할 수 있습니다.")
+    if (
+        not 0 <= edit.identifier < HINT_RECORD_COUNT
+        or not 0 <= edit.target_code <= 0xFFFFFFFF
+        or len(edit.city_ids) != HINT_CITY_COUNT
+        or any(not -1 <= city_id < CITY_RECORD_COUNT for city_id in edit.city_ids)
+    ):
+        raise ValueError("힌트 입력값을 확인해 주세요.")
+    current = _read_hint_records_from_data(bytes(data))[edit.identifier]
+    expected = HintRecord(edit.identifier, edit.target_code, edit.city_ids, text)
+    if current == expected:
+        return False
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        offset = (
+            pe.get_offset_from_rva(HINT_TABLE_VA - pe.OPTIONAL_HEADER.ImageBase)
+            + edit.identifier * HINT_RECORD_SIZE
+        )
+    finally:
+        pe.close()
+    struct.pack_into("<I", data, offset + HINT_TARGET_CODE_OFFSET, edit.target_code)
+    struct.pack_into(
+        f"<{HINT_CITY_COUNT}i", data, offset + HINT_CITY_IDS_OFFSET, *edit.city_ids,
+    )
+    if current.text != text:
+        section, _created = ensure_patch_section(data, PATCH_SECTION_HINT_TEXTS_SIZE)
+        slot_offset, slot_va = section.slot(
+            HINT_TEXT_SLOT_OFFSET + edit.identifier * HINT_TEXT_SLOT_STRIDE,
+            HINT_TEXT_SLOT_STRIDE,
+        )
+        data[slot_offset:slot_offset + HINT_TEXT_SLOT_STRIDE] = b"\0" * HINT_TEXT_SLOT_STRIDE
+        data[slot_offset:slot_offset + len(text_bytes) + 1] = text_bytes + b"\0"
+        struct.pack_into("<I", data, offset + HINT_TEXT_POINTER_OFFSET, slot_va)
+    return True
+
+
 def _read_sponsor_records_from_data(data: bytes) -> tuple[SponsorRecord, ...]:
     """Read and validate the fixed-width static sponsor master table."""
     pe = pefile.PE(data=data, fast_load=True)
@@ -3411,7 +3745,7 @@ def apply_figurehead_effect_settings(
 def read_settings(
     target: Path,
 ) -> tuple[
-    str, tuple[tuple[int, int], ...], int, int, int, int, int, int, int,
+    str, tuple[tuple[int, int], ...], int, int, bool, int, int, int, int, int,
     int, int, int, int, int, int, bool, PirateVarietySettings, bool, Decimal, bool,
 ]:
     """Read the settings currently encoded in a selected executable."""
@@ -3449,6 +3783,7 @@ def read_settings(
         eclipse_enabled, eclipse_latitude, _ = _eclipse_patch_info(data)
         return (
             _read_coordinate_style(data), tuple(presets), roll_code[1], wait_days,
+            _npc_daily_departure_patch_info(data),
             *gameplay, *activity_ages, *encounters, pirate_variety, pirate_settings,
             eclipse_enabled, eclipse_latitude,
             read_mistranslation_patch_state(data),
@@ -3481,6 +3816,7 @@ def apply_all(
     presets: tuple[tuple[int, int], ...],
     departure_denominator: int,
     arrival_wait_days: int,
+    npc_daily_departure_enabled: bool,
     long_rest_max: int,
     exploration_preparation_days: int,
     succession_min_age: int,
@@ -3508,6 +3844,7 @@ def apply_all(
     trade_region_goods: tuple[tuple[int, ...], ...] | None = None,
     item_edit: ItemEdit | None = None,
     discovery_edit: DiscoveryEdit | None = None,
+    hint_edit: HintEdit | None = None,
 ) -> Path | None:
     """Apply all selected settings atomically and create one original backup."""
     target = target.resolve(strict=True)
@@ -3522,10 +3859,13 @@ def apply_all(
         apply_mistranslation_fixes(before_coordinate, False)
     if _eclipse_patch_info(bytes(before_coordinate))[0]:
         apply_eclipse_polar_caps(before_coordinate, False)
+    if _npc_daily_departure_patch_info(before_coordinate):
+        apply_npc_daily_departure(before_coordinate, False)
     updated = bytearray(_coordinate_bytes(bytes(before_coordinate), target, coordinate_style))
     if set_resolution:
         apply_resolution(updated, presets)
     apply_npc_travel(updated, departure_denominator, arrival_wait_days)
+    apply_npc_daily_departure(updated, npc_daily_departure_enabled)
     apply_gameplay_options(
         updated,
         long_rest_max,
@@ -3556,6 +3896,7 @@ def apply_all(
     apply_trade_region_goods(updated, trade_region_goods)
     apply_item_edit(updated, item_edit)
     apply_discovery_edit(updated, discovery_edit)
+    apply_hint_edit(updated, hint_edit)
     if bytes(updated) == original:
         return None
 
