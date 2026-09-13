@@ -849,7 +849,7 @@ class CDSExecutablePatcher(tk.Tk):
         settings_notebook.add(item_tab, text="아이템")
         settings_notebook.add(figurehead_tab, text="선수상 효과")
         settings_notebook.add(discovery_tab, text="발견물")
-        settings_notebook.add(hint_tab, text="힌트")
+        settings_notebook.add(hint_tab, text="주점 힌트")
         # The discovery page is shorter than the largest notebook page.  Keep
         # its grid at the upper-left instead of centering it in the spare area.
         discovery_tab.grid_anchor("nw")
@@ -1822,7 +1822,7 @@ class CDSExecutablePatcher(tk.Tk):
         ))
         self._set_discovery_controls_enabled(False)
 
-        hint_list_box = ttk.LabelFrame(hint_tab, text="힌트 목록", padding=10)
+        hint_list_box = ttk.LabelFrame(hint_tab, text="주점 힌트 목록", padding=10)
         hint_list_box.grid(row=0, column=0, sticky="nsew")
         hint_tab.grid_rowconfigure(0, weight=1)
         hint_tab.grid_columnconfigure(0, weight=1)
@@ -1854,7 +1854,7 @@ class CDSExecutablePatcher(tk.Tk):
         hint_scroll.grid(row=0, column=1, sticky="ns")
         self.hint_list.bind("<<TreeviewSelect>>", self._on_hint_selected)
 
-        hint_box = ttk.LabelFrame(hint_tab, text="힌트 정보", padding=10)
+        hint_box = ttk.LabelFrame(hint_tab, text="주점 힌트 정보", padding=10)
         hint_box.grid(row=0, column=1, padx=(10, 0), sticky="new")
         hint_box.columnconfigure(1, weight=1)
         ttk.Label(hint_box, text="대상 발견물:").grid(row=0, column=0, sticky="w")
@@ -1871,7 +1871,7 @@ class CDSExecutablePatcher(tk.Tk):
             row=0, column=1, padx=(10, 0), sticky="w",
         )
 
-        ttk.Label(hint_box, text="획득 도시:").grid(row=1, column=0, pady=(10, 0), sticky="nw")
+        ttk.Label(hint_box, text="힌트 제공 도시:").grid(row=1, column=0, pady=(10, 0), sticky="nw")
         hint_city_frame = ttk.Frame(hint_box)
         hint_city_frame.grid(row=1, column=1, padx=(8, 0), pady=(10, 0), sticky="w")
         self.hint_city_selectors: list[ttk.Combobox] = []
@@ -1889,7 +1889,7 @@ class CDSExecutablePatcher(tk.Tk):
         hint_text_header = ttk.Frame(hint_box)
         hint_text_header.grid(row=2, column=0, columnspan=2, pady=(12, 4), sticky="ew")
         hint_text_header.columnconfigure(1, weight=1)
-        ttk.Label(hint_text_header, text="힌트 본문:").grid(row=0, column=0, sticky="w")
+        ttk.Label(hint_text_header, text="주점 대사:").grid(row=0, column=0, sticky="w")
         ttk.Label(hint_text_header, textvariable=self.hint_text_byte_count).grid(
             row=0, column=1, sticky="e",
         )

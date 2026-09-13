@@ -1,6 +1,10 @@
 # 대항해시대 III EXE 패처
 
+[![최신 Release](https://img.shields.io/github/v/release/dkenldlqfur/cds_exe_patcher?label=Release)](https://github.com/dkenldlqfur/cds_exe_patcher/releases/latest)
+
 대항해시대 III 한국어판의 `CDS_95.EXE` 설정과 정적 마스터 데이터를 읽고 수정하는 Windows용 GUI 패처입니다. 지원하지 않는 실행 파일이나 예상과 다른 바이트 배열은 쓰기를 거부하며, 실제 변경이 있을 때 원본 파일의 백업을 한 번만 생성합니다.
+
+최신 배포본은 [GitHub Releases](https://github.com/dkenldlqfur/cds_exe_patcher/releases/latest)에서 받을 수 있습니다.
 
 ## 주요 기능
 
@@ -34,7 +38,7 @@
 - 교역권: 교역권별 공통 교역품 5종
 - 아이템: 이름, 분류, 매입가·매각가, 효과 코드
 - 발견물: 이름, 분류, 가치, 발견 좌표 범위와 미디어 연결
-- 힌트: 대상 발견물, 획득 가능 도시 4곳과 도서관 힌트 본문
+- 주점 힌트: 대상 발견물, 힌트 제공 도시 4곳과 주점 대사
 - 선수상 효과: 재해 방지 확률, 피해 감소율, 공격 배율, 내구 회복과 이동력
 
 ### 원본 미디어 미리보기
@@ -79,7 +83,7 @@ ZIP 이름의 버전은 `Resources/data/app_config.json`의 버전과 일치해�
 
 ```json
 {
-  "version": "1.5.0",
+  "version": "1.4.1",
   "update": {
     "repository": "dkenldlqfur/cds_exe_patcher",
     "asset_name": "CDS_EXE_Patcher_v{version}.zip",

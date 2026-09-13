@@ -60,7 +60,7 @@ CITY_NAME_SLOT_SIZE = CITY_NAME_SLOT_STRIDE * 226
 # modified values back without guessing at individual instruction operands.
 FIGUREHEAD_EFFECT_SLOT_OFFSET = 0x7700
 FIGUREHEAD_EFFECT_SLOT_SIZE = 0x900
-# Library hints are pointer strings.  The longest original Korean hint is 244
+# Tavern hints are pointer strings.  The longest original Korean hint is 244
 # CP949 bytes, so independent 256-byte rows preserve the original capacity and
 # let one edited hint move without overwriting the neighbouring source text.
 HINT_TEXT_SLOT_OFFSET = 0x8000

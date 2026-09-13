@@ -442,7 +442,7 @@ class DiscoveryEdit:
 
 @dataclass(frozen=True)
 class HintRecord:
-    """One EXE-side library hint and the cities where it can be obtained."""
+    """One EXE-side tavern hint and the cities where it can be heard."""
 
     identifier: int
     target_code: int
@@ -452,7 +452,7 @@ class HintRecord:
 
 @dataclass(frozen=True)
 class HintEdit:
-    """Editable fields of one library-hint table row."""
+    """Editable fields of one tavern-hint table row."""
 
     identifier: int
     target_code: int
@@ -3278,7 +3278,7 @@ def apply_discovery_edit(data: bytearray, edit: DiscoveryEdit | None) -> bool:
 
 
 def _read_hint_records_from_data(data: bytes) -> tuple[HintRecord, ...]:
-    """Read the 191-row EXE library-hint table.
+    """Read the 191-row EXE tavern-hint table.
 
     Each row stores a discovery/event target code, four signed city IDs and a
     pointer to a CP949 string.  ``-1`` marks an unused city slot.
@@ -3324,12 +3324,12 @@ def _read_hint_records_from_data(data: bytes) -> tuple[HintRecord, ...]:
 
 
 def read_hint_records(target: Path) -> tuple[HintRecord, ...]:
-    """Read EXE-side library hints without touching SAVEDATA.CDS."""
+    """Read EXE-side tavern hints without touching SAVEDATA.CDS."""
     return _read_hint_records_from_data(target.resolve(strict=True).read_bytes())
 
 
 def apply_hint_edit(data: bytearray, edit: HintEdit | None) -> bool:
-    """Update one library hint and redirect changed text into ``.patch``."""
+    """Update one tavern hint and redirect changed text into ``.patch``."""
     if edit is None:
         return False
     text = edit.text.strip()
