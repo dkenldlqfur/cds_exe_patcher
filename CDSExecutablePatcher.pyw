@@ -36,6 +36,7 @@ from mughal_patch import MughalPatchError, apply as apply_mughal_patch, is_enabl
 from avi_preview import AviPreview
 from city_reader import CityImageReadError, read_city_image
 from discover_animation_preview import DiscoverAnimationPreview
+from discover_avi_assets import DiscoverAviAssetError, install_discover_avi_assets
 from discovery_reader import DiscoveryImageReadError, discovery_still_count, read_discovery_still
 from item_reader import ItemImageReadError, read_item_image
 from portrait_reader import PortraitReadError, portrait_count, read_portrait
@@ -58,6 +59,7 @@ from patch_cds_integrated import (
     FakeItemRecord,
     DiscoveryEdit,
     DiscoveryRecord,
+    DISCOVERY_AVI_MAX,
     HintEdit,
     HintRecord,
     FigureheadEffectSettings,
@@ -147,6 +149,17 @@ BUG_FIX_DETAILS = """버그 수정
 - 주점 힌트 ID 88의 잘못된 대상 코드 302를 크노소스 발견물 코드 112로 수정합니다.
 
 체크 해제 시 위 수정 사항을 모두 원본 상태로 복원합니다.
+"""
+
+DISCOVER_AVI_DETAILS = """DISCOVER 대신 AVI 사용
+
+- DISCOVER.CDS의 29개 스프라이트 애니메이션을 Cinepak AVI로 재생합니다.
+- 내장된 I70_0000.AVI~I98_0000.AVI를 선택한 EXE의 AVI 폴더에 복사합니다.
+- 각 발견물은 원래 사용하던 DISCOVER 파트와 같은 내용의 AVI로 연결됩니다.
+- 영상은 원본 240×176 이미지를 확대하지 않고 320×240 화면 중앙에 배치한 15fps 영상입니다.
+
+체크 해제 시 EXE의 발견물 미디어 연결을 원래 DISCOVER 파트로 복원합니다.
+복사된 AVI 파일은 다시 적용할 수 있도록 게임의 AVI 폴더에 유지합니다.
 """
 
 KAABA_DETAILS = """by 히소카
@@ -517,6 +530,7 @@ class CDSExecutablePatcher(tk.Tk):
         self.pirate_variety_enabled = tk.BooleanVar(value=False)
         self.mistranslation_fixes_enabled = tk.BooleanVar(value=False)
         self.bug_fixes_enabled = tk.BooleanVar(value=False)
+        self.discover_avi_enabled = tk.BooleanVar(value=False)
         self.pirate_fame_middle = tk.StringVar(value="0")
         self.pirate_fame_high = tk.StringVar(value="0")
         self.pirate_western_stage2_first_probability = tk.StringVar(value="0")
@@ -1143,6 +1157,18 @@ class CDSExecutablePatcher(tk.Tk):
                 "버그 수정 내역", BUG_FIX_DETAILS,
             ),
         ).grid(row=1, column=1, padx=(10, 0), pady=(6, 0), sticky="e")
+        ttk.Checkbutton(
+            translation_box,
+            text="DISCOVER 대신 AVI 사용",
+            variable=self.discover_avi_enabled,
+        ).grid(row=2, column=0, pady=(6, 0), sticky="w")
+        ttk.Button(
+            translation_box,
+            text="내용…",
+            command=lambda: self.show_patch_details(
+                "DISCOVER 대신 AVI 사용", DISCOVER_AVI_DETAILS,
+            ),
+        ).grid(row=2, column=1, padx=(10, 0), pady=(6, 0), sticky="e")
 
         discovery_box = ttk.LabelFrame(additional_left_column, text="발견물", padding=10)
         discovery_box.grid(row=0, column=0, sticky="ew")
@@ -3534,7 +3560,7 @@ class CDSExecutablePatcher(tk.Tk):
         DSTILL fallback and AVI.  The three source fields remain independent.
         """
         if record.avi_id is not None:
-            return "avi", record.avi_id, 69
+            return "avi", record.avi_id, DISCOVERY_AVI_MAX
         if record.animation_part is not None:
             return "animation", record.animation_part, 28
         if record.still_slot is not None:
@@ -4250,6 +4276,7 @@ class CDSExecutablePatcher(tk.Tk):
                     judgment_fix_enabled,
                     cannon_accuracy_fix_enabled,
                     knossos_hint_fix_enabled,
+                    discover_avi_enabled,
                 ) = read_settings(target)
                 barmaid_records = read_barmaid_records(target)
                 barmaid_child_aptitudes = read_barmaid_child_aptitudes(target)
@@ -4318,6 +4345,7 @@ class CDSExecutablePatcher(tk.Tk):
                 or cannon_accuracy_fix_enabled
                 or knossos_hint_fix_enabled
             )
+            self.discover_avi_enabled.set(discover_avi_enabled)
             discovery_errors: list[str] = []
             try:
                 self.kaaba_enabled.set(is_kaaba_enabled(target))
@@ -4654,6 +4682,10 @@ class CDSExecutablePatcher(tk.Tk):
             hint_edit = self._current_hint_edit()
             target = Path(self.path.get())
             backed_up_paths: set[Path] = set()
+            discover_avi_installed = (
+                install_discover_avi_assets(target)
+                if self.discover_avi_enabled.get() else ()
+            )
             backup = apply_all(
                 target, self.coordinate.get(), True, presets,
                 int(self.departure.get()), int(self.arrival_wait.get()),
@@ -4675,6 +4707,7 @@ class CDSExecutablePatcher(tk.Tk):
                 self.bug_fixes_enabled.get(),
                 self.bug_fixes_enabled.get(),
                 self.bug_fixes_enabled.get(),
+                self.discover_avi_enabled.get(),
                 figurehead_effect_settings,
                 barmaid_edit,
                 sponsor_edit,
@@ -4709,14 +4742,18 @@ class CDSExecutablePatcher(tk.Tk):
                 )
             self.cold_north_latitude.set(f"{cold_limit_to_latitude(cold_north_limit):.3f}")
             self.cold_south_latitude.set(f"{cold_limit_to_latitude(cold_south_limit):.3f}")
-        except (ValueError, KaabaPatchError, KaabaSavePatchError, SlavePatchError, MughalPatchError) as exc:
+        except (
+            ValueError, DiscoverAviAssetError, KaabaPatchError, KaabaSavePatchError,
+            SlavePatchError, MughalPatchError,
+        ) as exc:
             messagebox.showerror("입력 또는 패치 오류", str(exc), parent=self)
             return
         except Exception as exc:
             messagebox.showerror("패치 실패", str(exc), parent=self)
             return
         if (backup is None and not kaaba_backups and kaaba_save_backup is None
-                and not slave_library_backups and not slave_dialogue_backups and not mughal_backups):
+                and not slave_library_backups and not slave_dialogue_backups and not mughal_backups
+                and not discover_avi_installed):
             messagebox.showinfo("완료", "선택한 설정이 이미 적용되어 있습니다.", parent=self)
         else:
             backups = [
@@ -4724,7 +4761,12 @@ class CDSExecutablePatcher(tk.Tk):
                 *slave_library_backups, *slave_dialogue_backups, *mughal_backups,
             ]
             backup_text = "\n".join(str(path) for path in backups if path is not None)
-            messagebox.showinfo("완료", f"선택한 설정을 적용했습니다.\n\n원본 백업:\n{backup_text}", parent=self)
+            details = ["선택한 설정을 적용했습니다."]
+            if discover_avi_installed:
+                details.append(f"발견물 AVI 복사: {len(discover_avi_installed)}개")
+            if backup_text:
+                details.append(f"원본 백업:\n{backup_text}")
+            messagebox.showinfo("완료", "\n\n".join(details), parent=self)
         self._remember_barmaid_edit(barmaid_edit)
         self._remember_sponsor_edit(sponsor_edit)
         self._remember_ship_type_edit(ship_type_edit)
@@ -4738,8 +4780,10 @@ class CDSExecutablePatcher(tk.Tk):
         # immediately shows the values that were actually written.
         selected_fake = self.fake_item_list.selection()
         selected_hint = self.hint_list.selection()
+        selected_discovery = self.discovery_list.selection()
         self._load_fake_item_records(read_fake_item_records(target))
         self._load_hint_records(read_hint_records(target))
+        self._load_discovery_records(read_discovery_records(target))
         if selected_fake and self.fake_item_list.exists(selected_fake[0]):
             self.fake_item_list.selection_set(selected_fake[0])
             self.fake_item_list.focus(selected_fake[0])
@@ -4748,6 +4792,10 @@ class CDSExecutablePatcher(tk.Tk):
             self.hint_list.selection_set(selected_hint[0])
             self.hint_list.focus(selected_hint[0])
             self._on_hint_selected()
+        if selected_discovery and self.discovery_list.exists(selected_discovery[0]):
+            self.discovery_list.selection_set(selected_discovery[0])
+            self.discovery_list.focus(selected_discovery[0])
+            self._on_discovery_selected()
         self._slave_was_enabled = self.slave_enabled.get()
         self._mughal_was_enabled = self.mughal_enabled.get()
 

@@ -13,7 +13,7 @@
 
 ```json
 {
-  "version": "1.5.0",
+  "version": "1.5.1",
   "update": {
     "repository": "dkenldlqfur/cds_exe_patcher",
     "asset_name": "CDS_EXE_Patcher_v{version}.zip",
@@ -56,7 +56,7 @@ py -3.14 -m PyInstaller --noconfirm .\CDS_EXE_Patcher.spec
 버전 변수 하나를 사용해 설정, 태그와 파일 이름이 어긋나는 실수를 줄인다.
 
 ```powershell
-$releaseVersion = '1.5.0'
+$releaseVersion = '1.5.1'
 $zipPath = ".\dist\CDS_EXE_Patcher_v$releaseVersion.zip"
 Compress-Archive -LiteralPath '.\dist\CDS_EXE_Patcher.exe' -DestinationPath $zipPath -CompressionLevel Optimal -Force
 Get-FileHash -Algorithm SHA256 -LiteralPath '.\dist\CDS_EXE_Patcher.exe', $zipPath
@@ -68,9 +68,9 @@ ZIP의 루트에는 `CDS_EXE_Patcher.exe`가 있어야 한다. 자동 업데이�
 
 1. 최종 `git diff`와 `git status`를 확인한다.
 2. 버전 변경과 문서를 포함해 커밋한다.
-3. 태그 이름은 `1.5.0` 또는 저장소에서 계속 사용한 동일한 형식으로 만든다.
+3. 태그 이름은 `1.5.1` 또는 저장소에서 계속 사용한 동일한 형식으로 만든다.
 4. 커밋과 태그를 원격 저장소에 푸시한다.
-5. 같은 태그로 정식 GitHub Release를 만들고 `CDS_EXE_Patcher_v1.5.0.zip`을 첨부한다.
+5. 같은 태그로 정식 GitHub Release를 만들고 `CDS_EXE_Patcher_v1.5.1.zip`을 첨부한다.
 6. Release 본문에는 [변경 이력](../CHANGELOG.md)의 해당 버전 내용을 사용한다.
 
 초안 Release와 사전 배포는 자동 업데이트 대상에서 제외될 수 있으므로 정식 Release로 게시한다.

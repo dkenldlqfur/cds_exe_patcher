@@ -901,6 +901,17 @@ DISCOVERY_MEDIA_AVI_OFFSET = 0x10
 DISCOVERY_MEDIA_ANIMATION_OFFSET = 0x14
 NO_DISCOVERY_MEDIA = 0xFFFFFFFF
 DISCOVER_ANIMATION_PART_COUNT = 29
+# Discovery records 103~131 use every DISCOVER.CDS part exactly once, in
+# this record order.  The AVI replacement keeps that original association
+# and reserves I70_0000.AVI through I98_0000.AVI.
+DISCOVER_AVI_FIRST_ID = 70
+DISCOVER_AVI_RECORD_PARTS = (
+    3, 4, 6, 0, 25, 7, 9, 8, 1, 10,
+    11, 28, 12, 13, 22, 21, 14, 15, 23, 26,
+    24, 2, 16, 17, 27, 5, 19, 20, 18,
+)
+DISCOVER_AVI_FIRST_RECORD_ID = 103
+DISCOVERY_AVI_MAX = 98
 DISCOVERY_CATEGORY_MAX = 7
 DISCOVERY_VALUE_MAX = 99_999_999
 DISCOVERY_X_MIN = -1
@@ -3671,8 +3682,10 @@ def apply_discovery_edit(data: bytearray, edit: DiscoveryEdit | None) -> bool:
         raise ValueError("발견물 이미지 번호는 비워 둘 수 없습니다.")
     if current.avi_id is None and edit.avi_id is not None:
         raise ValueError("이 발견물은 AVI 미디어를 사용하지 않습니다.")
-    if current.avi_id is not None and (edit.avi_id is None or not 0 <= edit.avi_id <= 69):
-        raise ValueError("발견물 AVI 번호는 0~69 사이여야 합니다.")
+    if current.avi_id is not None and (
+        edit.avi_id is None or not 0 <= edit.avi_id <= DISCOVERY_AVI_MAX
+    ):
+        raise ValueError(f"발견물 AVI 번호는 0~{DISCOVERY_AVI_MAX} 사이여야 합니다.")
     if current.animation_part is None and edit.animation_part is not None:
         raise ValueError("이 발견물은 DISCOVER 애니메이션을 사용하지 않습니다.")
     if current.animation_part is not None and (
@@ -3712,6 +3725,52 @@ def apply_discovery_edit(data: bytearray, edit: DiscoveryEdit | None) -> bool:
         struct.pack_into(
             "<I", data, media_record_offset + DISCOVERY_MEDIA_ANIMATION_OFFSET, edit.animation_part,
         )
+    return True
+
+
+def read_discover_avi_patch_state(data: bytes) -> bool:
+    """Return whether all 29 target discoveries point to their bundled AVIs.
+
+    Other per-discovery media edits are valid editor data, not a corrupt
+    partial patch, so they simply report the combined option as disabled.
+    """
+    records = _read_discovery_records_from_data(data)
+    states: list[bool] = []
+    for index, animation_part in enumerate(DISCOVER_AVI_RECORD_PARTS):
+        identifier = DISCOVER_AVI_FIRST_RECORD_ID + index
+        record = records[identifier]
+        avi_id = DISCOVER_AVI_FIRST_ID + animation_part
+        patched = (
+            record.still_slot is None
+            and record.avi_id == avi_id
+            and record.animation_part is None
+        )
+        states.append(patched)
+    return all(states)
+
+
+def apply_discover_avi_patch(data: bytearray, enabled: bool) -> bool:
+    """Switch the 29 original DISCOVER media links to I70~I98 or restore them."""
+    if read_discover_avi_patch_state(bytes(data)) == enabled:
+        return False
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        for index, animation_part in enumerate(DISCOVER_AVI_RECORD_PARTS):
+            identifier = DISCOVER_AVI_FIRST_RECORD_ID + index
+            metadata_offset = _discovery_metadata_offset(pe, identifier)
+            media_offset = metadata_offset + DISCOVERY_MEDIA_RECORD_RELATIVE_OFFSET
+            avi_value = DISCOVER_AVI_FIRST_ID + animation_part if enabled else NO_DISCOVERY_MEDIA
+            animation_value = NO_DISCOVERY_MEDIA if enabled else animation_part
+            struct.pack_into(
+                "<I", data, media_offset + DISCOVERY_MEDIA_AVI_OFFSET, avi_value,
+            )
+            struct.pack_into(
+                "<I", data, media_offset + DISCOVERY_MEDIA_ANIMATION_OFFSET, animation_value,
+            )
+    finally:
+        pe.close()
+    if read_discover_avi_patch_state(bytes(data)) != enabled:
+        raise ValueError("DISCOVER 대신 AVI 사용 패치의 저장 후 검증에 실패했습니다.")
     return True
 
 
@@ -4185,7 +4244,7 @@ def read_settings(
 ) -> tuple[
     str, tuple[tuple[int, int], ...], int, int, bool, int, int, int, int, int,
     int, int, int, int, int, int, bool, PirateVarietySettings, bool, Decimal, bool,
-    bool, bool, bool, bool,
+    bool, bool, bool, bool, bool,
 ]:
     """Read the settings currently encoded in a selected executable."""
     target = target.resolve(strict=True)
@@ -4230,6 +4289,7 @@ def read_settings(
             _judgment_fix_patch_info(data),
             _cannon_accuracy_fix_patch_info(data),
             read_knossos_hint_fix_state(data),
+            read_discover_avi_patch_state(data),
         )
     finally:
         pe.close()
@@ -4282,6 +4342,7 @@ def apply_all(
     judgment_fix_enabled: bool = False,
     cannon_accuracy_fix_enabled: bool = False,
     knossos_hint_fix_enabled: bool = False,
+    discover_avi_enabled: bool = False,
     figurehead_effect_settings: FigureheadEffectSettings = DEFAULT_FIGUREHEAD_EFFECT_SETTINGS,
     barmaid_edit: BarmaidEdit | None = None,
     sponsor_edit: SponsorEdit | None = None,
@@ -4301,6 +4362,7 @@ def apply_all(
     failed_pottery_was_enabled = read_failed_pottery_patch_state(original)
     judgment_fix_was_enabled = _judgment_fix_patch_info(original)
     knossos_hint_fix_was_enabled = read_knossos_hint_fix_state(original)
+    discover_avi_was_enabled = read_discover_avi_patch_state(original)
     # Coordinate-style restoration may clear extensions after its own payload.
     # Temporarily remove relocatable patches, apply the requested coordinate
     # style, then recreate all selected payloads in their reserved slots.
@@ -4363,6 +4425,8 @@ def apply_all(
         apply_failed_pottery_patch(updated, failed_pottery_enabled)
     if knossos_hint_fix_enabled or knossos_hint_fix_was_enabled:
         apply_knossos_hint_fix(updated, knossos_hint_fix_enabled)
+    if discover_avi_enabled or discover_avi_was_enabled:
+        apply_discover_avi_patch(updated, discover_avi_enabled)
     if bytes(updated) == original:
         return None
 

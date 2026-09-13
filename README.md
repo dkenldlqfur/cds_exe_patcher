@@ -22,6 +22,7 @@
 ### 추가 패치
 
 - 용어·지명·아이템·인명·힌트 오역 수정
+- `DISCOVER.CDS`의 발견 애니메이션 29종을 내장 Cinepak AVI로 전환
 - 카바신전 발견물, 정지 이미지와 이벤트 주입
 - 노예 도서관 힌트와 발견 대사 추가
 - 무제국 힌트 획득 후 발견 가능하도록 조건 수정
@@ -83,7 +84,7 @@ ZIP 이름의 버전은 `Resources/data/app_config.json`의 버전과 일치해�
 
 ```json
 {
-  "version": "1.5.0",
+  "version": "1.5.1",
   "update": {
     "repository": "dkenldlqfur/cds_exe_patcher",
     "asset_name": "CDS_EXE_Patcher_v{version}.zip",
