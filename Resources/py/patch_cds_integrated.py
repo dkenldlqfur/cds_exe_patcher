@@ -25,6 +25,8 @@ from pe_patch_section import (
     BARMAID_NAME_SLOT_STRIDE,
     CITY_NAME_SLOT_OFFSET,
     CITY_NAME_SLOT_STRIDE,
+    DISCOVERY_DESCRIPTION_SLOT_OFFSET,
+    DISCOVERY_DESCRIPTION_SLOT_STRIDE,
     DISCOVERY_NAME_SLOT_OFFSET,
     DISCOVERY_NAME_SLOT_STRIDE,
     ECLIPSE_SLOT_OFFSET,
@@ -39,20 +41,32 @@ from pe_patch_section import (
     NPC_DAILY_DEPARTURE_SLOT_SIZE,
     PATCH_SECTION_EXPANDED_SIZE,
     PATCH_SECTION_DISCOVERY_NAMES_SIZE,
+    PATCH_SECTION_DISCOVERY_DESCRIPTIONS_SIZE,
     PATCH_SECTION_CITY_NAMES_SIZE,
     PATCH_SECTION_ITEM_NAMES_SIZE,
     PATCH_SECTION_MASTER_NAMES_SIZE,
     PATCH_SECTION_HINT_TEXTS_SIZE,
     PATCH_SECTION_JUDGMENT_FIX_SIZE,
+    PATCH_SECTION_SHIP_REUSE_FIX_SIZE,
     PATCH_SECTION_NPC_DAILY_DEPARTURE_SIZE,
     ITEM_NAME_SLOT_OFFSET,
     ITEM_NAME_SLOT_STRIDE,
     JUDGMENT_FIX_SLOT_OFFSET,
     JUDGMENT_FIX_SLOT_SIZE,
+    LIBRARY_BOOK_AUTHOR_SLOT_OFFSET,
+    LIBRARY_BOOK_AUTHOR_SLOT_STRIDE,
+    LIBRARY_BOOK_TITLE_SLOT_OFFSET,
+    LIBRARY_BOOK_TITLE_SLOT_STRIDE,
+    LIBRARY_HINT_NAME_SLOT_OFFSET,
+    LIBRARY_HINT_NAME_SLOT_STRIDE,
+    PATCH_SECTION_LIBRARY_BOOKS_SIZE,
+    PATCH_SECTION_LIBRARY_HINT_NAMES_SIZE,
     PIRATE_SLOT_OFFSET,
     PIRATE_SLOT_SIZE,
     SHIP_TYPE_NAME_SLOT_OFFSET,
     SHIP_TYPE_NAME_SLOT_STRIDE,
+    SHIP_REUSE_FIX_SLOT_OFFSET,
+    SHIP_REUSE_FIX_SLOT_SIZE,
     clear_slot,
     ensure_patch_section,
     find_patch_section,
@@ -109,6 +123,19 @@ JUDGMENT_FIX_WRAPPER_OFFSET = 0x20
 CANNON_ACCURACY_CLAMP_BRANCH_VA = 0x436E59
 CANNON_ACCURACY_ORIGINAL_BRANCH = bytes.fromhex("72 30")  # JB +30h
 CANNON_ACCURACY_FIXED_BRANCH = bytes.fromhex("7C 30")     # JL +30h
+
+# Recycled ship slots retain their previous cannon type/count/capacity.  The
+# constructor calls the maximum-weight setter before clearing those fields,
+# and that setter adds the stale cannon weight to the new ship.  Redirect that
+# call through a wrapper which establishes the cannon-free constructor state
+# first.  Clearing +54 also prevents the adjacent capacity setter from using
+# the previous ship's maximum cannon count.
+SHIP_REUSE_WEIGHT_SETTER_CALL_VA = 0x423231
+SHIP_WEIGHT_SETTER_VA = 0x44C890
+SHIP_REUSE_ORIGINAL_CALL = bytes.fromhex("E8 5A 96 02 00")
+SHIP_REUSE_FIX_MAGIC = b"CDSSRF1\0"
+SHIP_REUSE_FIX_VERSION = 1
+SHIP_REUSE_FIX_WRAPPER_OFFSET = 0x20
 
 # Random naval-combat encounter denominators.  The western region produces
 # pirate or pursuit-fleet encounters; the eastern region produces Islamic
@@ -409,6 +436,7 @@ class ItemRecord:
     sell_price: int
     effect_value: int
     category_id: int
+    hint_id: int
 
 
 @dataclass(frozen=True)
@@ -421,6 +449,7 @@ class ItemEdit:
     sell_price: int
     effect_value: int
     category_id: int
+    hint_id: int
 
 
 @dataclass(frozen=True)
@@ -470,6 +499,7 @@ class DiscoveryRecord:
     still_slot: int | None = None
     avi_id: int | None = None
     animation_part: int | None = None
+    description: str = ""
 
 
 @dataclass(frozen=True)
@@ -487,6 +517,7 @@ class DiscoveryEdit:
     still_slot: int | None
     avi_id: int | None
     animation_part: int | None
+    description: str
 
 
 @dataclass(frozen=True)
@@ -507,6 +538,29 @@ class HintEdit:
     target_code: int
     city_ids: tuple[int, int, int, int]
     text: str
+
+
+@dataclass(frozen=True)
+class DiscoveryHintEdit:
+    """Editable name, target, and reading requirements of one library hint."""
+
+    hint_id: int
+    name: str
+    target_id: int
+    required_skill_id: int
+    required_language_id: int
+    required_level: int
+    prerequisite_discovery_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class LibraryBookEdit:
+    """Editable fields of one EXE library-book record."""
+
+    record_number: int
+    title: str
+    author: str
+    city_ids: tuple[int, ...]
 
 
 DEFAULT_PIRATE_VARIETY_SETTINGS = PirateVarietySettings()
@@ -855,8 +909,12 @@ ITEM_BUY_PRICE_OFFSET = 0x08
 ITEM_SELL_PRICE_OFFSET = 0x0C
 ITEM_EFFECT_VALUE_OFFSET = 0x10
 ITEM_CATEGORY_OFFSET = 0x14
+ITEM_HINT_ID_OFFSET = 0x18
 ITEM_NO_IMAGE_ID = 0xFFFFFFFF
 ITEM_CATEGORY_MAX = 8
+ITEM_BOOK_CATEGORY = 7
+ITEM_HINT_ID_MIN = -1
+ITEM_HINT_ID_MAX = 185
 ITEM_PRICE_MAX = 99_999_999
 ITEM_EFFECT_MAX = 255
 # The longest original item name is "갈라파고스 코끼리거북": 11 characters,
@@ -882,6 +940,7 @@ FAKE_ITEM_CITY_ID_OFFSET = 0x4C
 # The final metadata entry (game ID 527) is outside the main 230-row table.
 DISCOVERY_FINAL_METADATA_RECORD_VA = 0x522744
 DISCOVERY_COORDINATE_TABLE_VA = 0x51C584
+DISCOVERY_DESCRIPTION_POINTER_TABLE_VA = 0x57AA78
 DISCOVERY_MIN_X_OFFSET = 0x00
 DISCOVERY_MIN_Y_OFFSET = 0x04
 DISCOVERY_MAX_X_OFFSET = 0x08
@@ -916,7 +975,39 @@ DISCOVER_AVI_RECORD_PARTS = (
 DISCOVER_AVI_FIRST_RECORD_ID = 103
 DISCOVERY_AVI_MAX = 98
 DISCOVERY_CATEGORY_MAX = 7
+LIBRARY_HINT_TABLE_VA = 0x4D8E88
+LIBRARY_HINT_RECORD_COUNT = 186
+LIBRARY_HINT_RECORD_SIZE = 0x50
+LIBRARY_HINT_NAME_POINTER_OFFSET = -0x08
+LIBRARY_HINT_TARGET_ID_OFFSET = 0x00
+LIBRARY_HINT_REQUIRED_SKILL_OFFSET = 0x18
+LIBRARY_HINT_REQUIRED_LANGUAGE_OFFSET = 0x1C
+LIBRARY_HINT_REQUIRED_LEVEL_OFFSET = 0x20
+LIBRARY_HINT_PREREQUISITE_LIST_OFFSET = 0x28
+LIBRARY_HINT_PREREQUISITE_CAPACITY = 8
+LIBRARY_HINT_SKILL_MIN = -1
+LIBRARY_HINT_SKILL_MAX = 12
+LIBRARY_HINT_LANGUAGE_MIN = -1
+LIBRARY_HINT_LANGUAGE_MAX = 13
+LIBRARY_HINT_LEVEL_MIN = 0
+LIBRARY_HINT_LEVEL_MAX = 3
+LIBRARY_HINT_DISCOVERY_MIN = 0
+LIBRARY_HINT_DISCOVERY_MAX = 273
+LIBRARY_HINT_NAME_MAX_CHARACTERS = 18
+LIBRARY_HINT_NAME_MAX_BYTES = 36
+LIBRARY_BOOK_TABLE_VA = 0x4C4748
+LIBRARY_BOOK_RECORD_COUNT = 257
+LIBRARY_BOOK_RECORD_SIZE = 0x58
+LIBRARY_BOOK_TITLE_POINTER_OFFSET = 0x00
+LIBRARY_BOOK_AUTHOR_POINTER_OFFSET = 0x04
+LIBRARY_BOOK_CITY_LIST_OFFSET = 0x18
+LIBRARY_BOOK_CITY_CAPACITY = 8
+LIBRARY_BOOK_TITLE_MAX_CHARACTERS = 18
+LIBRARY_BOOK_TITLE_MAX_BYTES = 36
+LIBRARY_BOOK_AUTHOR_MAX_CHARACTERS = 18
+LIBRARY_BOOK_AUTHOR_MAX_BYTES = 36
 DISCOVERY_VALUE_MAX = 99_999_999
+DISCOVERY_DESCRIPTION_MAX_BYTES = DISCOVERY_DESCRIPTION_SLOT_STRIDE - 1
 DISCOVERY_X_MIN = -1
 DISCOVERY_X_MAX = 2500
 DISCOVERY_Y_MIN = -1
@@ -1873,6 +1964,121 @@ def apply_cannon_accuracy_fix(data: bytearray, enabled: bool) -> bool:
         if enabled else CANNON_ACCURACY_ORIGINAL_BRANCH
     )
     data[branch_offset:branch_offset + len(target)] = target
+    return True
+
+
+def _build_ship_reuse_fix_payload(slot_va: int) -> bytes:
+    """Build the wrapper which clears stale cannon fields before ship weight setup."""
+    wrapper_va = slot_va + SHIP_REUSE_FIX_WRAPPER_OFFSET
+    wrapper = bytearray(bytes.fromhex(
+        "31 C0 "                    # xor eax, eax
+        "89 41 50 "                 # mov [ecx+50h], eax (current cannon count)
+        "89 41 54 "                 # mov [ecx+54h], eax (maximum cannon count)
+        "C7 41 58 FF FF FF FF "     # mov dword ptr [ecx+58h], -1 (no cannon)
+        "E9 00 00 00 00"            # jmp original maximum-weight setter
+    ))
+    jump_offset = len(wrapper) - 5
+    struct.pack_into(
+        "<i", wrapper, jump_offset + 1,
+        SHIP_WEIGHT_SETTER_VA - (wrapper_va + jump_offset + 5),
+    )
+    if SHIP_REUSE_FIX_WRAPPER_OFFSET + len(wrapper) > SHIP_REUSE_FIX_SLOT_SIZE:
+        raise AssertionError("선박 슬롯 재사용 버그 수정 래퍼가 예약 공간을 초과했습니다.")
+
+    payload = bytearray(SHIP_REUSE_FIX_SLOT_SIZE)
+    payload[:len(SHIP_REUSE_FIX_MAGIC)] = SHIP_REUSE_FIX_MAGIC
+    struct.pack_into("<I", payload, len(SHIP_REUSE_FIX_MAGIC), SHIP_REUSE_FIX_VERSION)
+    payload[
+        SHIP_REUSE_FIX_WRAPPER_OFFSET:
+        SHIP_REUSE_FIX_WRAPPER_OFFSET + len(wrapper)
+    ] = wrapper
+    return bytes(payload)
+
+
+def _ship_reuse_fix_hook(wrapper_va: int) -> bytes:
+    return b"\xE8" + struct.pack(
+        "<i", wrapper_va - (SHIP_REUSE_WEIGHT_SETTER_CALL_VA + 5),
+    )
+
+
+def _ship_reuse_fix_patch_info(data: bytes | bytearray) -> bool:
+    """Return whether recycled ship slots are cleared before derived setup."""
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        if pe.FILE_HEADER.Machine != 0x14C or pe.OPTIONAL_HEADER.ImageBase != 0x400000:
+            raise ValueError("지원하는 32비트 CDS III 실행 파일이 아닙니다.")
+        hook_offset = pe.get_offset_from_rva(
+            SHIP_REUSE_WEIGHT_SETTER_CALL_VA - pe.OPTIONAL_HEADER.ImageBase
+        )
+    finally:
+        pe.close()
+
+    current_hook = bytes(data[
+        hook_offset:hook_offset + len(SHIP_REUSE_ORIGINAL_CALL)
+    ])
+    section = find_patch_section(data)
+    if current_hook == SHIP_REUSE_ORIGINAL_CALL:
+        if (
+            section is not None
+            and section.raw_size >= SHIP_REUSE_FIX_SLOT_OFFSET + SHIP_REUSE_FIX_SLOT_SIZE
+            and bytes(data[
+                section.raw_offset + SHIP_REUSE_FIX_SLOT_OFFSET:
+                section.raw_offset + SHIP_REUSE_FIX_SLOT_OFFSET + len(SHIP_REUSE_FIX_MAGIC)
+            ]) == SHIP_REUSE_FIX_MAGIC
+        ):
+            raise ValueError("선박 슬롯 재사용 버그 수정 코드가 남아 있지만 호출부가 원본 상태입니다.")
+        return False
+    if (
+        section is None
+        or section.raw_size < SHIP_REUSE_FIX_SLOT_OFFSET + SHIP_REUSE_FIX_SLOT_SIZE
+        or section.virtual_size < SHIP_REUSE_FIX_SLOT_OFFSET + SHIP_REUSE_FIX_SLOT_SIZE
+    ):
+        raise ValueError("선박 슬롯 재사용 버그 수정 호출이 있으나 .patch 데이터를 찾지 못했습니다.")
+    slot_offset, slot_va = section.slot(
+        SHIP_REUSE_FIX_SLOT_OFFSET, SHIP_REUSE_FIX_SLOT_SIZE,
+    )
+    expected_payload = _build_ship_reuse_fix_payload(slot_va)
+    expected_hook = _ship_reuse_fix_hook(slot_va + SHIP_REUSE_FIX_WRAPPER_OFFSET)
+    if (
+        current_hook != expected_hook
+        or bytes(data[slot_offset:slot_offset + SHIP_REUSE_FIX_SLOT_SIZE]) != expected_payload
+    ):
+        raise ValueError("선박 슬롯 재사용 버그 수정 상태를 검증하지 못했습니다.")
+    return True
+
+
+def apply_ship_reuse_fix(data: bytearray, enabled: bool) -> bool:
+    """Clear stale cannon fields before constructing a ship in a reused slot."""
+    current_enabled = _ship_reuse_fix_patch_info(data)
+    if current_enabled == enabled:
+        return False
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        hook_offset = pe.get_offset_from_rva(
+            SHIP_REUSE_WEIGHT_SETTER_CALL_VA - pe.OPTIONAL_HEADER.ImageBase
+        )
+    finally:
+        pe.close()
+
+    if enabled:
+        section, _created = ensure_patch_section(data, PATCH_SECTION_SHIP_REUSE_FIX_SIZE)
+        slot_offset, slot_va = section.slot(
+            SHIP_REUSE_FIX_SLOT_OFFSET, SHIP_REUSE_FIX_SLOT_SIZE,
+        )
+        payload = _build_ship_reuse_fix_payload(slot_va)
+        current_payload = bytes(data[slot_offset:slot_offset + SHIP_REUSE_FIX_SLOT_SIZE])
+        if any(current_payload) and current_payload != payload:
+            raise ValueError("선박 슬롯 재사용 버그 수정용 .patch 슬롯이 다른 데이터로 사용 중입니다.")
+        data[slot_offset:slot_offset + SHIP_REUSE_FIX_SLOT_SIZE] = payload
+        data[hook_offset:hook_offset + len(SHIP_REUSE_ORIGINAL_CALL)] = (
+            _ship_reuse_fix_hook(slot_va + SHIP_REUSE_FIX_WRAPPER_OFFSET)
+        )
+    else:
+        section = find_patch_section(data)
+        if section is None:
+            raise ValueError("선박 슬롯 재사용 버그 수정의 복원 데이터를 찾지 못했습니다.")
+        data[hook_offset:hook_offset + len(SHIP_REUSE_ORIGINAL_CALL)] = SHIP_REUSE_ORIGINAL_CALL
+        clear_slot(data, section, SHIP_REUSE_FIX_SLOT_OFFSET, SHIP_REUSE_FIX_SLOT_SIZE)
     return True
 
 
@@ -3358,8 +3564,8 @@ def _read_item_records_from_data(data: bytes) -> tuple[ItemRecord, ...]:
                 name = data[name_offset:name_end].decode("cp949")
             except UnicodeDecodeError as error:
                 raise ValueError(f"아이템 {identifier}번 이름을 읽지 못했습니다.") from error
-            image_raw, buy_price, sell_price, effect_value, category_id = struct.unpack_from(
-                "<IIIII", data, offset + ITEM_IMAGE_ID_OFFSET,
+            image_raw, buy_price, sell_price, effect_value, category_id, hint_id = struct.unpack_from(
+                "<IIIIIi", data, offset + ITEM_IMAGE_ID_OFFSET,
             )
             if (
                 not name
@@ -3367,12 +3573,13 @@ def _read_item_records_from_data(data: bytes) -> tuple[ItemRecord, ...]:
                 or not 0 <= sell_price <= ITEM_PRICE_MAX
                 or not 0 <= effect_value <= ITEM_EFFECT_MAX
                 or not 0 <= category_id <= ITEM_CATEGORY_MAX
+                or not ITEM_HINT_ID_MIN <= hint_id <= ITEM_HINT_ID_MAX
             ):
                 raise ValueError(f"아이템 {identifier}번 마스터 값을 검증하지 못했습니다.")
             records.append(ItemRecord(
                 identifier, name,
                 None if image_raw == ITEM_NO_IMAGE_ID else image_raw,
-                buy_price, sell_price, effect_value, category_id,
+                buy_price, sell_price, effect_value, category_id, hint_id,
             ))
         return tuple(records)
     finally:
@@ -3403,15 +3610,16 @@ def apply_item_edit(data: bytearray, edit: ItemEdit | None) -> bool:
         or not 0 <= edit.sell_price <= ITEM_PRICE_MAX
         or not 0 <= edit.effect_value <= ITEM_EFFECT_MAX
         or not 0 <= edit.category_id <= ITEM_CATEGORY_MAX
+        or not ITEM_HINT_ID_MIN <= edit.hint_id <= ITEM_HINT_ID_MAX
     ):
         raise ValueError("아이템 입력값을 확인해 주세요.")
     current = _read_item_records_from_data(bytes(data))[edit.identifier]
     if (
         current.name, current.buy_price, current.sell_price,
-        current.effect_value, current.category_id,
+        current.effect_value, current.category_id, current.hint_id,
     ) == (
         name, edit.buy_price, edit.sell_price,
-        edit.effect_value, edit.category_id,
+        edit.effect_value, edit.category_id, edit.hint_id,
     ):
         return False
     pe = pefile.PE(data=bytes(data), fast_load=True)
@@ -3432,6 +3640,7 @@ def apply_item_edit(data: bytearray, edit: ItemEdit | None) -> bool:
     struct.pack_into("<I", data, offset + ITEM_SELL_PRICE_OFFSET, edit.sell_price)
     struct.pack_into("<I", data, offset + ITEM_EFFECT_VALUE_OFFSET, edit.effect_value)
     struct.pack_into("<I", data, offset + ITEM_CATEGORY_OFFSET, edit.category_id)
+    struct.pack_into("<i", data, offset + ITEM_HINT_ID_OFFSET, edit.hint_id)
     return True
 
 
@@ -3577,6 +3786,15 @@ def _read_discovery_records_from_data(data: bytes) -> tuple[DiscoveryRecord, ...
         coordinate_table_size = DISCOVERY_RECORD_COUNT * DISCOVERY_RECORD_SIZE
         if coordinate_table_offset < 0 or coordinate_table_offset + coordinate_table_size > len(data):
             raise ValueError("발견물 좌표 테이블의 범위를 검증하지 못했습니다.")
+        description_table_offset = pe.get_offset_from_rva(
+            DISCOVERY_DESCRIPTION_POINTER_TABLE_VA - pe.OPTIONAL_HEADER.ImageBase
+        )
+        description_table_size = DISCOVERY_RECORD_COUNT * 4
+        if (
+            description_table_offset < 0
+            or description_table_offset + description_table_size > len(data)
+        ):
+            raise ValueError("발견물 설명 포인터 테이블의 범위를 검증하지 못했습니다.")
         records: list[DiscoveryRecord] = []
         for identifier in range(DISCOVERY_RECORD_COUNT):
             metadata_offset = (
@@ -3596,6 +3814,27 @@ def _read_discovery_records_from_data(data: bytes) -> tuple[DiscoveryRecord, ...
                 name = data[name_offset:name_end].decode("cp949")
             except UnicodeDecodeError as error:
                 raise ValueError(f"발견물 {identifier}번 이름을 읽지 못했습니다.") from error
+            description_va = struct.unpack_from(
+                "<I", data, description_table_offset + identifier * 4,
+            )[0]
+            try:
+                description_offset = pe.get_offset_from_rva(
+                    description_va - pe.OPTIONAL_HEADER.ImageBase
+                )
+            except pefile.PEFormatError as error:
+                raise ValueError(
+                    f"발견물 {identifier}번 설명 주소를 검증하지 못했습니다."
+                ) from error
+            description_end = data.find(
+                b"\0", description_offset,
+                min(description_offset + DISCOVERY_DESCRIPTION_SLOT_STRIDE, len(data)),
+            )
+            if not 0 <= description_offset < len(data) or description_end < 0:
+                raise ValueError(f"발견물 {identifier}번 설명 주소를 검증하지 못했습니다.")
+            try:
+                description = data[description_offset:description_end].decode("cp949")
+            except UnicodeDecodeError as error:
+                raise ValueError(f"발견물 {identifier}번 설명을 읽지 못했습니다.") from error
             raw_coordinates = struct.unpack_from("<iiii", data, coordinate_offset)
             coordinates: tuple[int | None, int | None, int | None, int | None] = (
                 (None, None, None, None)
@@ -3629,7 +3868,7 @@ def _read_discovery_records_from_data(data: bytes) -> tuple[DiscoveryRecord, ...
                 raise ValueError(f"발견물 {identifier}번 마스터 값을 검증하지 못했습니다.")
             records.append(DiscoveryRecord(
                 identifier, name, category_id, game_id, value, min_x, min_y, max_x, max_y,
-                still_slot, avi_id, animation_part,
+                still_slot, avi_id, animation_part, description,
             ))
         return tuple(records)
     finally:
@@ -3697,6 +3936,14 @@ def apply_discovery_edit(data: bytearray, edit: DiscoveryEdit | None) -> bool:
         raise ValueError("발견물 이름은 CP949에서 사용할 수 있는 문자만 입력할 수 있습니다.") from error
     if len(name_bytes) > DISCOVERY_NAME_MAX_BYTES:
         raise ValueError("발견물 이름은 최대 31바이트까지 입력할 수 있습니다.")
+    try:
+        description_bytes = edit.description.encode("cp949")
+    except UnicodeEncodeError as error:
+        raise ValueError("발견물 설명은 CP949에서 사용할 수 있는 문자만 입력할 수 있습니다.") from error
+    if len(description_bytes) > DISCOVERY_DESCRIPTION_MAX_BYTES:
+        raise ValueError(
+            f"발견물 설명은 최대 {DISCOVERY_DESCRIPTION_MAX_BYTES}바이트까지 입력할 수 있습니다."
+        )
     coordinates = (edit.min_x, edit.min_y, edit.max_x, edit.max_y)
     if (
         not 0 <= edit.identifier < DISCOVERY_RECORD_COUNT
@@ -3714,10 +3961,11 @@ def apply_discovery_edit(data: bytearray, edit: DiscoveryEdit | None) -> bool:
     current = _read_discovery_records_from_data(bytes(data))[edit.identifier]
     if (
         current.name, current.category_id, current.value, current.min_x, current.min_y,
-        current.max_x, current.max_y, current.still_slot, current.avi_id, current.animation_part,
+        current.max_x, current.max_y, current.still_slot, current.avi_id,
+        current.animation_part, current.description,
     ) == (
         name, edit.category_id, edit.value, edit.min_x, edit.min_y, edit.max_x, edit.max_y,
-        edit.still_slot, edit.avi_id, edit.animation_part,
+        edit.still_slot, edit.avi_id, edit.animation_part, edit.description,
     ):
         return False
     if edit.still_slot is not None and not 0 <= edit.still_slot < NO_DISCOVERY_MEDIA:
@@ -3742,6 +3990,9 @@ def apply_discovery_edit(data: bytearray, edit: DiscoveryEdit | None) -> bool:
     try:
         metadata_offset = _discovery_metadata_offset(pe, edit.identifier)
         coordinate_offset = _discovery_coordinate_offset(pe, edit.identifier)
+        description_table_offset = pe.get_offset_from_rva(
+            DISCOVERY_DESCRIPTION_POINTER_TABLE_VA - pe.OPTIONAL_HEADER.ImageBase
+        )
     finally:
         pe.close()
     media_record_offset = metadata_offset + DISCOVERY_MEDIA_RECORD_RELATIVE_OFFSET
@@ -3759,6 +4010,24 @@ def apply_discovery_edit(data: bytearray, edit: DiscoveryEdit | None) -> bool:
         data[slot_offset:slot_offset + DISCOVERY_NAME_SLOT_STRIDE] = b"\0" * DISCOVERY_NAME_SLOT_STRIDE
         data[slot_offset:slot_offset + len(name_bytes) + 1] = name_bytes + b"\0"
         struct.pack_into("<I", data, metadata_offset + DISCOVERY_NAME_POINTER_OFFSET, slot_va)
+    if current.description != edit.description:
+        section, _created = ensure_patch_section(
+            data, PATCH_SECTION_DISCOVERY_DESCRIPTIONS_SIZE,
+        )
+        slot_offset, slot_va = section.slot(
+            DISCOVERY_DESCRIPTION_SLOT_OFFSET
+            + edit.identifier * DISCOVERY_DESCRIPTION_SLOT_STRIDE,
+            DISCOVERY_DESCRIPTION_SLOT_STRIDE,
+        )
+        data[slot_offset:slot_offset + DISCOVERY_DESCRIPTION_SLOT_STRIDE] = (
+            b"\0" * DISCOVERY_DESCRIPTION_SLOT_STRIDE
+        )
+        data[slot_offset:slot_offset + len(description_bytes) + 1] = (
+            description_bytes + b"\0"
+        )
+        struct.pack_into(
+            "<I", data, description_table_offset + edit.identifier * 4, slot_va,
+        )
     if edit.min_x is not None:
         struct.pack_into("<iiii", data, coordinate_offset, edit.min_x, edit.min_y, edit.max_x, edit.max_y)
     struct.pack_into("<I", data, metadata_offset + DISCOVERY_CATEGORY_OFFSET, edit.category_id)
@@ -3817,6 +4086,372 @@ def apply_discover_avi_patch(data: bytearray, enabled: bool) -> bool:
         pe.close()
     if read_discover_avi_patch_state(bytes(data)) != enabled:
         raise ValueError("DISCOVER 대신 AVI 사용 패치의 저장 후 검증에 실패했습니다.")
+    return True
+
+
+def _library_hint_condition_offset(
+    pe: pefile.PE,
+    hint_id: int,
+    data_size: int,
+) -> int:
+    if not 0 <= hint_id < LIBRARY_HINT_RECORD_COUNT:
+        raise ValueError("도서관 힌트 ID가 범위를 벗어났습니다.")
+    table_offset = pe.get_offset_from_rva(
+        LIBRARY_HINT_TABLE_VA - pe.OPTIONAL_HEADER.ImageBase
+    )
+    table_size = LIBRARY_HINT_RECORD_COUNT * LIBRARY_HINT_RECORD_SIZE
+    if table_offset < 0 or table_offset + table_size > data_size:
+        raise ValueError("도서관 힌트 마스터 테이블의 범위를 검증하지 못했습니다.")
+    return table_offset + hint_id * LIBRARY_HINT_RECORD_SIZE
+
+
+def _read_discovery_hint_edit_from_data(
+    data: bytes,
+    hint_id: int,
+) -> DiscoveryHintEdit:
+    pe = pefile.PE(data=data, fast_load=True)
+    try:
+        if pe.FILE_HEADER.Machine != 0x14C or pe.OPTIONAL_HEADER.ImageBase != 0x400000:
+            raise ValueError("지원하는 32비트 CDS III 실행 파일이 아닙니다.")
+        offset = _library_hint_condition_offset(pe, hint_id, len(data))
+        name_va = struct.unpack_from(
+            "<I", data, offset + LIBRARY_HINT_NAME_POINTER_OFFSET,
+        )[0]
+        try:
+            name_offset = pe.get_offset_from_rva(name_va - pe.OPTIONAL_HEADER.ImageBase)
+        except pefile.PEFormatError as error:
+            raise ValueError(f"도서관 힌트 {hint_id}번 이름 주소를 검증하지 못했습니다.") from error
+        name_end = data.find(b"\0", name_offset, min(name_offset + 80, len(data)))
+        if not 0 <= name_offset < len(data) or name_end < 0:
+            raise ValueError(f"도서관 힌트 {hint_id}번 이름 주소를 검증하지 못했습니다.")
+        try:
+            name = data[name_offset:name_end].decode("cp949")
+        except UnicodeDecodeError as error:
+            raise ValueError(f"도서관 힌트 {hint_id}번 이름을 읽지 못했습니다.") from error
+        target_id = struct.unpack_from(
+            "<I", data, offset + LIBRARY_HINT_TARGET_ID_OFFSET,
+        )[0]
+        required_skill_id = struct.unpack_from(
+            "<i", data, offset + LIBRARY_HINT_REQUIRED_SKILL_OFFSET,
+        )[0]
+        required_language_id = struct.unpack_from(
+            "<i", data, offset + LIBRARY_HINT_REQUIRED_LANGUAGE_OFFSET,
+        )[0]
+        required_level = struct.unpack_from(
+            "<i", data, offset + LIBRARY_HINT_REQUIRED_LEVEL_OFFSET,
+        )[0]
+        prerequisite_discovery_ids = tuple(
+            prerequisite_id
+            for prerequisite_id in struct.unpack_from(
+                f"<{LIBRARY_HINT_PREREQUISITE_CAPACITY}i",
+                data,
+                offset + LIBRARY_HINT_PREREQUISITE_LIST_OFFSET,
+            )
+            if prerequisite_id >= 0
+        )
+        return DiscoveryHintEdit(
+            hint_id,
+            name,
+            target_id,
+            required_skill_id,
+            required_language_id,
+            required_level,
+            prerequisite_discovery_ids,
+        )
+    finally:
+        pe.close()
+
+
+def apply_discovery_hint_edit(
+    data: bytearray,
+    edit: DiscoveryHintEdit | None,
+) -> bool:
+    """Update one library hint without changing its sources or target rows."""
+    if edit is None:
+        return False
+    name = edit.name.strip()
+    if not name:
+        raise ValueError("힌트 이름을 입력해 주세요.")
+    try:
+        name_bytes = name.encode("cp949")
+    except UnicodeEncodeError as error:
+        raise ValueError("힌트 이름은 CP949에서 사용할 수 있는 문자만 입력할 수 있습니다.") from error
+    if (
+        len(name) > LIBRARY_HINT_NAME_MAX_CHARACTERS
+        or len(name_bytes) > LIBRARY_HINT_NAME_MAX_BYTES
+    ):
+        raise ValueError(
+            "힌트 이름은 최대 18자·CP949 36바이트까지 입력할 수 있습니다."
+        )
+    prerequisites = tuple(edit.prerequisite_discovery_ids)
+    if (
+        not 0 <= edit.hint_id < LIBRARY_HINT_RECORD_COUNT
+        or not 0 <= edit.target_id <= 0xFFFFFFFF
+        or not LIBRARY_HINT_SKILL_MIN <= edit.required_skill_id <= LIBRARY_HINT_SKILL_MAX
+        or not LIBRARY_HINT_LANGUAGE_MIN <= edit.required_language_id <= LIBRARY_HINT_LANGUAGE_MAX
+        or not LIBRARY_HINT_LEVEL_MIN <= edit.required_level <= LIBRARY_HINT_LEVEL_MAX
+        or len(prerequisites) > LIBRARY_HINT_PREREQUISITE_CAPACITY
+        or len(set(prerequisites)) != len(prerequisites)
+        or any(
+            not LIBRARY_HINT_DISCOVERY_MIN <= prerequisite_id <= LIBRARY_HINT_DISCOVERY_MAX
+            for prerequisite_id in prerequisites
+        )
+    ):
+        raise ValueError("힌트 입력값을 확인해 주세요.")
+    normalized = DiscoveryHintEdit(
+        edit.hint_id,
+        name,
+        edit.target_id,
+        edit.required_skill_id,
+        edit.required_language_id,
+        edit.required_level,
+        prerequisites,
+    )
+    current = _read_discovery_hint_edit_from_data(bytes(data), edit.hint_id)
+    if current == normalized:
+        return False
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        offset = _library_hint_condition_offset(pe, edit.hint_id, len(data))
+    finally:
+        pe.close()
+    if current.name != name:
+        section, _created = ensure_patch_section(
+            data, PATCH_SECTION_LIBRARY_HINT_NAMES_SIZE,
+        )
+        slot_offset, slot_va = section.slot(
+            LIBRARY_HINT_NAME_SLOT_OFFSET
+            + edit.hint_id * LIBRARY_HINT_NAME_SLOT_STRIDE,
+            LIBRARY_HINT_NAME_SLOT_STRIDE,
+        )
+        data[slot_offset:slot_offset + LIBRARY_HINT_NAME_SLOT_STRIDE] = (
+            b"\0" * LIBRARY_HINT_NAME_SLOT_STRIDE
+        )
+        data[slot_offset:slot_offset + len(name_bytes) + 1] = name_bytes + b"\0"
+        struct.pack_into(
+            "<I", data, offset + LIBRARY_HINT_NAME_POINTER_OFFSET, slot_va,
+        )
+    struct.pack_into(
+        "<I", data, offset + LIBRARY_HINT_TARGET_ID_OFFSET, edit.target_id,
+    )
+    struct.pack_into(
+        "<i", data, offset + LIBRARY_HINT_REQUIRED_SKILL_OFFSET,
+        edit.required_skill_id,
+    )
+    struct.pack_into(
+        "<i", data, offset + LIBRARY_HINT_REQUIRED_LANGUAGE_OFFSET,
+        edit.required_language_id,
+    )
+    struct.pack_into(
+        "<i", data, offset + LIBRARY_HINT_REQUIRED_LEVEL_OFFSET,
+        edit.required_level,
+    )
+    padded_prerequisites = prerequisites + (-1,) * (
+        LIBRARY_HINT_PREREQUISITE_CAPACITY - len(prerequisites)
+    )
+    struct.pack_into(
+        f"<{LIBRARY_HINT_PREREQUISITE_CAPACITY}i",
+        data,
+        offset + LIBRARY_HINT_PREREQUISITE_LIST_OFFSET,
+        *padded_prerequisites,
+    )
+    if _read_discovery_hint_edit_from_data(bytes(data), edit.hint_id) != normalized:
+        raise ValueError("힌트 정보의 저장 후 검증에 실패했습니다.")
+    return True
+
+
+def _read_library_book_edit_from_data(
+    data: bytes,
+    record_number: int,
+) -> LibraryBookEdit:
+    if not 0 <= record_number < LIBRARY_BOOK_RECORD_COUNT:
+        raise ValueError("도서관 책 레코드 번호가 범위를 벗어났습니다.")
+    pe = pefile.PE(data=data, fast_load=True)
+    try:
+        if pe.FILE_HEADER.Machine != 0x14C or pe.OPTIONAL_HEADER.ImageBase != 0x400000:
+            raise ValueError("지원하는 32비트 CDS III 실행 파일이 아닙니다.")
+        table_offset = pe.get_offset_from_rva(
+            LIBRARY_BOOK_TABLE_VA - pe.OPTIONAL_HEADER.ImageBase
+        )
+        table_size = LIBRARY_BOOK_RECORD_COUNT * LIBRARY_BOOK_RECORD_SIZE
+        if table_offset < 0 or table_offset + table_size > len(data):
+            raise ValueError("도서관 책 테이블의 범위를 검증하지 못했습니다.")
+        record_offset = table_offset + record_number * LIBRARY_BOOK_RECORD_SIZE
+        def read_text(pointer_field: int, field_name: str) -> str:
+            text_va = struct.unpack_from("<I", data, pointer_field)[0]
+            try:
+                text_offset = pe.get_offset_from_rva(
+                    text_va - pe.OPTIONAL_HEADER.ImageBase
+                )
+            except pefile.PEFormatError as error:
+                raise ValueError(
+                    f"도서관 책 {record_number}번 {field_name} 주소를 검증하지 못했습니다."
+                ) from error
+            text_end = data.find(
+                b"\0", text_offset, min(text_offset + 80, len(data)),
+            )
+            if not 0 <= text_offset < len(data) or text_end < 0:
+                raise ValueError(
+                    f"도서관 책 {record_number}번 {field_name} 주소를 검증하지 못했습니다."
+                )
+            try:
+                text = data[text_offset:text_end].decode("cp949")
+            except UnicodeDecodeError as error:
+                raise ValueError(
+                    f"도서관 책 {record_number}번 {field_name}을 읽지 못했습니다."
+                ) from error
+            if not text:
+                raise ValueError(
+                    f"도서관 책 {record_number}번 {field_name}이 비어 있습니다."
+                )
+            return text
+
+        title = read_text(
+            record_offset + LIBRARY_BOOK_TITLE_POINTER_OFFSET, "제목",
+        )
+        author = read_text(
+            record_offset + LIBRARY_BOOK_AUTHOR_POINTER_OFFSET, "저자",
+        )
+        raw_city_ids = struct.unpack_from(
+            f"<{LIBRARY_BOOK_CITY_CAPACITY}i",
+            data,
+            record_offset + LIBRARY_BOOK_CITY_LIST_OFFSET,
+        )
+        if any(not -1 <= city_id < CITY_RECORD_COUNT for city_id in raw_city_ids):
+            raise ValueError(
+                f"도서관 책 {record_number}번 출현 도시를 검증하지 못했습니다."
+            )
+        city_ids = tuple(city_id for city_id in raw_city_ids if city_id >= 0)
+        if len(set(city_ids)) != len(city_ids):
+            raise ValueError(
+                f"도서관 책 {record_number}번 출현 도시에 중복값이 있습니다."
+            )
+        return LibraryBookEdit(record_number, title, author, city_ids)
+    finally:
+        pe.close()
+
+
+def _read_library_book_title_from_data(data: bytes, record_number: int) -> str:
+    """Compatibility helper used by earlier title-only callers and tests."""
+    return _read_library_book_edit_from_data(data, record_number).title
+
+
+def apply_library_book_edits(
+    data: bytearray,
+    edits: tuple[LibraryBookEdit, ...],
+) -> bool:
+    """Update library-book title, author and eight city slots."""
+    if not edits:
+        return False
+    if len({edit.record_number for edit in edits}) != len(edits):
+        raise ValueError("같은 도서관 책의 수정이 중복되었습니다.")
+    normalized: list[tuple[LibraryBookEdit, bytes, bytes, LibraryBookEdit]] = []
+    for edit in edits:
+        title = edit.title.strip()
+        author = edit.author.strip()
+        if not title:
+            raise ValueError("책 제목을 입력해 주세요.")
+        if not author:
+            raise ValueError("책 저자를 입력해 주세요.")
+        try:
+            title_bytes = title.encode("cp949")
+        except UnicodeEncodeError as error:
+            raise ValueError("책 제목은 CP949에서 사용할 수 있는 문자만 입력할 수 있습니다.") from error
+        try:
+            author_bytes = author.encode("cp949")
+        except UnicodeEncodeError as error:
+            raise ValueError("책 저자는 CP949에서 사용할 수 있는 문자만 입력할 수 있습니다.") from error
+        if (
+            not 0 <= edit.record_number < LIBRARY_BOOK_RECORD_COUNT
+            or len(title) > LIBRARY_BOOK_TITLE_MAX_CHARACTERS
+            or len(title_bytes) > LIBRARY_BOOK_TITLE_MAX_BYTES
+        ):
+            raise ValueError("책 제목은 최대 18자·CP949 36바이트까지 입력할 수 있습니다.")
+        if (
+            len(author) > LIBRARY_BOOK_AUTHOR_MAX_CHARACTERS
+            or len(author_bytes) > LIBRARY_BOOK_AUTHOR_MAX_BYTES
+        ):
+            raise ValueError("책 저자는 최대 18자·CP949 36바이트까지 입력할 수 있습니다.")
+        city_ids = tuple(edit.city_ids)
+        if (
+            len(city_ids) > LIBRARY_BOOK_CITY_CAPACITY
+            or len(set(city_ids)) != len(city_ids)
+            or any(not 0 <= city_id < CITY_RECORD_COUNT for city_id in city_ids)
+        ):
+            raise ValueError("책 출현 도시는 중복 없이 최대 8곳까지 설정할 수 있습니다.")
+        normalized_edit = LibraryBookEdit(
+            edit.record_number, title, author, city_ids,
+        )
+        current = _read_library_book_edit_from_data(bytes(data), edit.record_number)
+        if current != normalized_edit:
+            normalized.append(
+                (normalized_edit, title_bytes, author_bytes, current)
+            )
+    if not normalized:
+        return False
+
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        table_offset = pe.get_offset_from_rva(
+            LIBRARY_BOOK_TABLE_VA - pe.OPTIONAL_HEADER.ImageBase
+        )
+    finally:
+        pe.close()
+    string_changes = any(
+        edit.title != current.title or edit.author != current.author
+        for edit, _title_bytes, _author_bytes, current in normalized
+    )
+    section = None
+    if string_changes:
+        section, _created = ensure_patch_section(
+            data, PATCH_SECTION_LIBRARY_BOOKS_SIZE,
+        )
+    for edit, title_bytes, author_bytes, current in normalized:
+        record_offset = table_offset + edit.record_number * LIBRARY_BOOK_RECORD_SIZE
+        if edit.title != current.title:
+            assert section is not None
+            slot_offset, slot_va = section.slot(
+                LIBRARY_BOOK_TITLE_SLOT_OFFSET
+                + edit.record_number * LIBRARY_BOOK_TITLE_SLOT_STRIDE,
+                LIBRARY_BOOK_TITLE_SLOT_STRIDE,
+            )
+            data[slot_offset:slot_offset + LIBRARY_BOOK_TITLE_SLOT_STRIDE] = (
+                b"\0" * LIBRARY_BOOK_TITLE_SLOT_STRIDE
+            )
+            data[slot_offset:slot_offset + len(title_bytes) + 1] = title_bytes + b"\0"
+            struct.pack_into(
+                "<I", data,
+                record_offset + LIBRARY_BOOK_TITLE_POINTER_OFFSET,
+                slot_va,
+            )
+        if edit.author != current.author:
+            assert section is not None
+            slot_offset, slot_va = section.slot(
+                LIBRARY_BOOK_AUTHOR_SLOT_OFFSET
+                + edit.record_number * LIBRARY_BOOK_AUTHOR_SLOT_STRIDE,
+                LIBRARY_BOOK_AUTHOR_SLOT_STRIDE,
+            )
+            data[slot_offset:slot_offset + LIBRARY_BOOK_AUTHOR_SLOT_STRIDE] = (
+                b"\0" * LIBRARY_BOOK_AUTHOR_SLOT_STRIDE
+            )
+            data[slot_offset:slot_offset + len(author_bytes) + 1] = author_bytes + b"\0"
+            struct.pack_into(
+                "<I", data,
+                record_offset + LIBRARY_BOOK_AUTHOR_POINTER_OFFSET,
+                slot_va,
+            )
+        padded_city_ids = edit.city_ids + (-1,) * (
+            LIBRARY_BOOK_CITY_CAPACITY - len(edit.city_ids)
+        )
+        struct.pack_into(
+            f"<{LIBRARY_BOOK_CITY_CAPACITY}i",
+            data,
+            record_offset + LIBRARY_BOOK_CITY_LIST_OFFSET,
+            *padded_city_ids,
+        )
+    for edit, _title_bytes, _author_bytes, _current in normalized:
+        if _read_library_book_edit_from_data(bytes(data), edit.record_number) != edit:
+            raise ValueError("도서관 책 정보의 저장 후 검증에 실패했습니다.")
     return True
 
 
@@ -4290,7 +4925,7 @@ def read_settings(
 ) -> tuple[
     str, tuple[tuple[int, int], ...], int, int, bool, int, int, int, int, int,
     int, int, int, int, int, int, bool, PirateVarietySettings, bool, Decimal, bool,
-    bool, bool, bool, bool, bool,
+    bool, bool, bool, bool, bool, bool,
 ]:
     """Read the settings currently encoded in a selected executable."""
     target = target.resolve(strict=True)
@@ -4334,6 +4969,7 @@ def read_settings(
             read_failed_pottery_patch_state(data),
             _judgment_fix_patch_info(data),
             _cannon_accuracy_fix_patch_info(data),
+            _ship_reuse_fix_patch_info(data),
             read_knossos_hint_fix_state(data),
             read_discover_avi_patch_state(data),
         )
@@ -4387,6 +5023,7 @@ def apply_all(
     failed_pottery_enabled: bool = False,
     judgment_fix_enabled: bool = False,
     cannon_accuracy_fix_enabled: bool = False,
+    ship_reuse_fix_enabled: bool = False,
     knossos_hint_fix_enabled: bool = False,
     discover_avi_enabled: bool = False,
     figurehead_effect_settings: FigureheadEffectSettings = DEFAULT_FIGUREHEAD_EFFECT_SETTINGS,
@@ -4400,6 +5037,8 @@ def apply_all(
     fake_item_edit: FakeItemEdit | None = None,
     discovery_edit: DiscoveryEdit | None = None,
     hint_edit: HintEdit | None = None,
+    discovery_hint_edit: DiscoveryHintEdit | None = None,
+    library_book_edits: tuple[LibraryBookEdit, ...] = (),
 ) -> Path | None:
     """Apply all selected settings atomically and create one original backup."""
     target = target.resolve(strict=True)
@@ -4407,6 +5046,7 @@ def apply_all(
     before_coordinate = bytearray(original)
     failed_pottery_was_enabled = read_failed_pottery_patch_state(original)
     judgment_fix_was_enabled = _judgment_fix_patch_info(original)
+    ship_reuse_fix_was_enabled = _ship_reuse_fix_patch_info(original)
     knossos_hint_fix_was_enabled = read_knossos_hint_fix_state(original)
     discover_avi_was_enabled = read_discover_avi_patch_state(original)
     # Coordinate-style restoration may clear extensions after its own payload.
@@ -4420,6 +5060,8 @@ def apply_all(
         apply_failed_pottery_patch(before_coordinate, False)
     if judgment_fix_was_enabled:
         apply_judgment_fix(before_coordinate, False)
+    if ship_reuse_fix_was_enabled:
+        apply_ship_reuse_fix(before_coordinate, False)
     if knossos_hint_fix_was_enabled:
         apply_knossos_hint_fix(before_coordinate, False)
     if _eclipse_patch_info(bytes(before_coordinate))[0]:
@@ -4433,6 +5075,7 @@ def apply_all(
     apply_npc_daily_departure(updated, npc_daily_departure_enabled)
     apply_judgment_fix(updated, judgment_fix_enabled)
     apply_cannon_accuracy_fix(updated, cannon_accuracy_fix_enabled)
+    apply_ship_reuse_fix(updated, ship_reuse_fix_enabled)
     apply_gameplay_options(
         updated,
         long_rest_max,
@@ -4465,6 +5108,8 @@ def apply_all(
     apply_fake_item_edit(updated, fake_item_edit)
     apply_discovery_edit(updated, discovery_edit)
     apply_hint_edit(updated, hint_edit)
+    apply_discovery_hint_edit(updated, discovery_hint_edit)
+    apply_library_book_edits(updated, library_book_edits)
     # Coordinated bug fixes intentionally win over direct edits to their rows
     # so a checked feature can never be saved half-applied.
     if failed_pottery_enabled or failed_pottery_was_enabled:

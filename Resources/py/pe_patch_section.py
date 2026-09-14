@@ -76,6 +76,34 @@ NPC_DAILY_DEPARTURE_SLOT_SIZE = 0x100
 # front-rank normalization without changing the surrounding battle routine.
 JUDGMENT_FIX_SLOT_OFFSET = 0x14100
 JUDGMENT_FIX_SLOT_SIZE = 0x100
+# Wrapper used while constructing a ship in a recycled runtime slot.  The
+# original constructor calculates weight before clearing the previous ship's
+# cannon fields, so the stale cannon weight is carried into the new ship.
+SHIP_REUSE_FIX_SLOT_OFFSET = 0x14200
+SHIP_REUSE_FIX_SLOT_SIZE = 0x100
+# Discovery descriptions are independent pointer strings.  A fixed 512-byte
+# row leaves room beyond every original Korean description while keeping each
+# discovery edit isolated from its neighbours.
+DISCOVERY_DESCRIPTION_SLOT_OFFSET = 0x15000
+DISCOVERY_DESCRIPTION_SLOT_STRIDE = 0x200
+DISCOVERY_DESCRIPTION_SLOT_SIZE = DISCOVERY_DESCRIPTION_SLOT_STRIDE * 231
+# Library-hint names are pointer strings stored immediately before each
+# 0x50-byte hint-condition row.  Keep the earlier experimental 32-byte range
+# at 0x32000 untouched and use new 64-byte rows that fit 18 Korean characters.
+LIBRARY_HINT_NAME_SLOT_OFFSET = 0x34000
+LIBRARY_HINT_NAME_SLOT_STRIDE = 0x40
+LIBRARY_HINT_NAME_SLOT_SIZE = LIBRARY_HINT_NAME_SLOT_STRIDE * 186
+# Book records can share an original title pointer.  Redirect each edited row
+# to its own 64-byte slot so changing one city-specific edition changes only
+# that record.
+LIBRARY_BOOK_TITLE_SLOT_OFFSET = 0x37000
+LIBRARY_BOOK_TITLE_SLOT_STRIDE = 0x40
+LIBRARY_BOOK_TITLE_SLOT_SIZE = LIBRARY_BOOK_TITLE_SLOT_STRIDE * 257
+# Authors are pointer strings as well.  Keep an independent row for every
+# book so editing one city-specific edition never changes a shared author.
+LIBRARY_BOOK_AUTHOR_SLOT_OFFSET = 0x3C000
+LIBRARY_BOOK_AUTHOR_SLOT_STRIDE = 0x40
+LIBRARY_BOOK_AUTHOR_SLOT_SIZE = LIBRARY_BOOK_AUTHOR_SLOT_STRIDE * 257
 PATCH_SECTION_DISCOVERY_NAMES_SIZE = 0x4000
 PATCH_SECTION_MASTER_NAMES_SIZE = 0x4000
 PATCH_SECTION_ITEM_NAMES_SIZE = 0x6000
@@ -83,6 +111,10 @@ PATCH_SECTION_CITY_NAMES_SIZE = 0x8000
 PATCH_SECTION_HINT_TEXTS_SIZE = 0x14000
 PATCH_SECTION_NPC_DAILY_DEPARTURE_SIZE = 0x15000
 PATCH_SECTION_JUDGMENT_FIX_SIZE = 0x14200
+PATCH_SECTION_SHIP_REUSE_FIX_SIZE = 0x14300
+PATCH_SECTION_DISCOVERY_DESCRIPTIONS_SIZE = 0x32000
+PATCH_SECTION_LIBRARY_HINT_NAMES_SIZE = 0x37000
+PATCH_SECTION_LIBRARY_BOOKS_SIZE = 0x41000
 
 
 @dataclass(frozen=True)

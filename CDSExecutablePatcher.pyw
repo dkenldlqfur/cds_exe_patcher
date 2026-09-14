@@ -33,10 +33,22 @@ from slave_patch import (
     is_library_enabled as is_slave_library_enabled,
 )
 from mughal_patch import MughalPatchError, apply as apply_mughal_patch, is_enabled as is_mughal_enabled
+from sea_monster_patch import (
+    SeaMonsterPatchError,
+    apply as apply_sea_monster_patch,
+    is_enabled as is_sea_monster_patch_enabled,
+)
 from avi_preview import AviPreview
 from city_reader import CityImageReadError, read_city_image
 from discover_animation_preview import DiscoverAnimationPreview
 from discover_avi_assets import DiscoverAviAssetError, install_discover_avi_assets
+from discovery_hint_links import (
+    DiscoveryHintBookSource,
+    DiscoveryHintLink,
+    DiscoveryHintTarget,
+    read_discovery_hint_links,
+    read_discovery_hint_targets,
+)
 from discovery_reader import DiscoveryImageReadError, discovery_still_count, read_discovery_still
 from item_reader import ItemImageReadError, read_item_image
 from portrait_reader import PortraitReadError, portrait_count, read_portrait
@@ -55,11 +67,21 @@ from patch_cds_integrated import (
     CityRecord,
     ItemEdit,
     ItemRecord,
+    ITEM_BOOK_CATEGORY,
+    LIBRARY_HINT_NAME_MAX_BYTES,
+    LIBRARY_HINT_NAME_MAX_CHARACTERS,
+    LIBRARY_BOOK_AUTHOR_MAX_BYTES,
+    LIBRARY_BOOK_AUTHOR_MAX_CHARACTERS,
+    LIBRARY_BOOK_TITLE_MAX_BYTES,
+    LIBRARY_BOOK_TITLE_MAX_CHARACTERS,
+    LibraryBookEdit,
     FakeItemEdit,
     FakeItemRecord,
     DiscoveryEdit,
     DiscoveryRecord,
+    DiscoveryHintEdit,
     DISCOVERY_AVI_MAX,
+    DISCOVERY_DESCRIPTION_MAX_BYTES,
     HintEdit,
     HintRecord,
     FigureheadEffectSettings,
@@ -145,6 +167,11 @@ BUG_FIX_DETAILS = """버그 수정
 - 포술 레벨과 현재 함포 수가 낮을 때 포격 명중률이 비정상적으로 100%가 되는 문제를 수정합니다.
 - 음수로 계산된 포격 명중률을 정상적인 최솟값 1%로 보정합니다.
 
+[선박 슬롯 재사용 중량 버그 수정]
+- 함포를 장착한 선박을 매각한 뒤 해당 슬롯에 새 선박을 구입하면, 기존 함포 중량만큼 최대중량이 증가하는 문제를 수정합니다.
+- 새 선박의 중량과 적재량을 계산하기 전에 이전 선박의 함포 종류·현재 함포 수·최대 함포 수를 초기화합니다.
+- 이미 매각되어 함포 정보가 남은 빈 슬롯을 다시 사용하는 경우에도 적용됩니다.
+
 [크노소스 주점 힌트 수정]
 - 주점 힌트 ID 88의 잘못된 대상 코드 302를 크노소스 발견물 코드 112로 수정합니다.
 
@@ -196,6 +223,19 @@ MUGHAL_DETAILS = """by 히소카
 - DISEV.CDS의 이벤트 파트 92를 무제국 발견 조건 수정본으로 교체합니다.
 
 체크 해제 시 이벤트 파트 92만 지원하는 원본 상태로 복원합니다.
+"""
+
+SEA_MONSTER_DETAILS = """해상괴물 조우 버그 수정
+
+- DISEV.CDS의 해상괴물 이벤트 파트 196~199를 수정합니다.
+- 196: 시서펜트
+- 197: 크라켄
+- 198: 맨터
+- 199: 식인상어
+- 전투 승리 경로의 결과 0은 변경하지 않습니다.
+- 퇴각·실패 경로의 마지막 결과를 1에서 2로 변경해, 조우를 완료 처리하지 않고 나중에 다시 조우할 수 있게 합니다.
+
+체크 해제 시 네 이벤트의 퇴각·실패 결과를 원본값 1로 복원합니다.
 """
 
 
@@ -456,6 +496,19 @@ class NativeWinEdit:
         self._user32.GetWindowTextW(ctypes.c_void_p(self.hwnd), buffer, len(buffer))
         return buffer.value
 
+    def get_limited(self) -> str:
+        """Return the current text after enforcing configured character/byte limits."""
+        raw_text = self.get()
+        text = (
+            raw_text[:self.max_characters]
+            if self.max_characters is not None else raw_text
+        )
+        if self.max_bytes is not None:
+            text = self._limit_cp949_bytes(text, self.max_bytes)
+        if text != raw_text:
+            self._set_text_and_place_cursor_at_end(text)
+        return text
+
     def set(self, value: str) -> None:
         value = str(value)
         if self.hwnd and self._user32 is not None:
@@ -522,7 +575,7 @@ class CDSExecutablePatcher(tk.Tk):
         self.departure = tk.StringVar(value="0")
         self.arrival_wait = tk.StringVar(value="0")
         self.npc_daily_departure_enabled = tk.BooleanVar(value=False)
-        self.npc_departure_probability_label = tk.StringVar(value="월간 출발 확률: 1 /")
+        self.npc_departure_probability_label = tk.StringVar(value="출발 확률: 1 /")
         self.npc_activity_min_age = tk.StringVar(value="0")
         self.npc_activity_max_age = tk.StringVar(value="0")
         self.western_encounter_denominator = tk.StringVar(value="0")
@@ -564,6 +617,7 @@ class CDSExecutablePatcher(tk.Tk):
         self.kaaba_enabled = tk.BooleanVar(value=False)
         self.slave_enabled = tk.BooleanVar(value=False)
         self.mughal_enabled = tk.BooleanVar(value=False)
+        self.sea_monster_patch_enabled = tk.BooleanVar(value=False)
         self.sponsor_name = tk.StringVar()
         self.sponsor_face_code = tk.StringVar()
         self.sponsor_gender = tk.StringVar()
@@ -644,6 +698,7 @@ class CDSExecutablePatcher(tk.Tk):
         self.item_buy_price = tk.StringVar()
         self.item_sell_price = tk.StringVar()
         self.item_effect_value = tk.StringVar()
+        self.item_hint_selection = tk.StringVar(value="연결 없음")
         self.fake_item_category = tk.StringVar()
         self.fake_item_target_code = tk.StringVar()
         self.fake_item_value = tk.StringVar()
@@ -674,6 +729,7 @@ class CDSExecutablePatcher(tk.Tk):
         self._item_records: tuple[ItemRecord, ...] = ()
         self._item_by_identifier: dict[int, ItemRecord] = {}
         self._item_discovery_media_links: dict[int, int] = {}
+        self._item_hint_ids_by_name: dict[str, int] = {}
         self._item_controls: list[tk.Widget] = []
         self._fake_item_records: tuple[FakeItemRecord, ...] = ()
         self._fake_item_by_identifier: dict[int, FakeItemRecord] = {}
@@ -692,11 +748,29 @@ class CDSExecutablePatcher(tk.Tk):
         self.discovery_min_y_direction = tk.StringVar()
         self.discovery_max_x_direction = tk.StringVar()
         self.discovery_max_y_direction = tk.StringVar()
+        self.discovery_description_byte_count = tk.StringVar(
+            value=f"0 / {DISCOVERY_DESCRIPTION_MAX_BYTES}바이트",
+        )
         self._discovery_records: tuple[DiscoveryRecord, ...] = ()
         self._discovery_by_identifier: dict[int, DiscoveryRecord] = {}
         self._discovery_controls: list[tk.Widget] = []
         self._discovery_coordinate_controls: list[tk.Widget] = []
         self._discovery_still_slot_count = 85
+        self._discovery_hint_links: tuple[DiscoveryHintLink, ...] = ()
+        self._discovery_hint_by_identifier: dict[str, DiscoveryHintLink] = {}
+        self._discovery_hint_targets: tuple[DiscoveryHintTarget, ...] = ()
+        self.discovery_hint_required_skill = tk.StringVar(value="없음")
+        self.discovery_hint_required_language = tk.StringVar(value="없음")
+        self.discovery_hint_required_level = tk.StringVar(value="0")
+        self.discovery_hint_name = tk.StringVar()
+        self.discovery_hint_target_id = tk.StringVar(value="0")
+        self.discovery_hint_prerequisites = [
+            tk.StringVar(value="없음") for _ in range(8)
+        ]
+        self._discovery_hint_prerequisite_ids_by_label: dict[str, int] = {}
+        self._discovery_hint_condition_hint_id: int | None = None
+        self._library_book_edits: dict[int, LibraryBookEdit] = {}
+        self._discovery_hint_controls: list[tk.Widget | NativeWinEdit] = []
         self.hint_target_code = tk.StringVar()
         self.hint_target_name = tk.StringVar()
         self.hint_city_names = [tk.StringVar(value="없음") for _ in range(4)]
@@ -722,9 +796,13 @@ class CDSExecutablePatcher(tk.Tk):
         self._barmaid_controls: list[tk.Widget] = []
         self._slave_was_enabled = False
         self._mughal_was_enabled = False
+        self._sea_monster_patch_was_enabled = False
         self._update_checking = False
         self._update_button: ttk.Button | None = None
         self._available_update: tuple[GitHubReleaseUpdater, dict, dict] | None = None
+        self._treeview_sort_directions: dict[tuple[str, str], bool] = {}
+        self._treeview_sort_titles: dict[tuple[str, str], str] = {}
+        self._treeview_active_sorts: dict[str, tuple[str, bool]] = {}
         self._splash: tk.Toplevel | None = None
         self._splash_image: ImageTk.PhotoImage | None = None
         self._barmaid_face_photo: ImageTk.PhotoImage | None = None
@@ -746,10 +824,8 @@ class CDSExecutablePatcher(tk.Tk):
         self.person_face_code.trace_add("write", self._on_person_face_code_changed)
         self.person_gender.trace_add("write", self._on_person_face_code_changed)
         self.discovery_still_slot.trace_add("write", self._on_discovery_media_changed)
+        self.item_category.trace_add("write", self._on_item_category_changed)
         self.hint_target_code.trace_add("write", self._on_hint_target_code_changed)
-        self.npc_daily_departure_enabled.trace_add(
-            "write", self._update_npc_departure_probability_label,
-        )
         self.city_trade_region.trace_add("write", lambda *_args: self._refresh_city_common_goods())
         for variable in self.barmaid_child_aptitudes:
             variable.trace_add("write", self._update_barmaid_child_aptitude_total)
@@ -824,6 +900,15 @@ class CDSExecutablePatcher(tk.Tk):
         window.geometry(f"+{max(x, 0)}+{max(y, 0)}")
 
     @staticmethod
+    def _hide_detail_window(window: tk.Toplevel) -> None:
+        """Hide a reusable editor dialog without discarding its current values."""
+        try:
+            window.grab_release()
+        except tk.TclError:
+            pass
+        window.withdraw()
+
+    @staticmethod
     def _validate_integer_text(proposed: str, lower: str, upper: str) -> bool:
         """Allow only an in-range integer while the user is editing a field."""
         minimum, maximum = int(lower), int(upper)
@@ -850,6 +935,75 @@ class CDSExecutablePatcher(tk.Tk):
             return False
         return float(lower) <= value <= float(upper)
 
+    def _enable_treeview_text_sort(
+        self, tree: ttk.Treeview, column: str, title: str,
+    ) -> None:
+        """Make one Treeview heading toggle ascending/descending sorting."""
+        key = (str(tree), column)
+        self._treeview_sort_titles[key] = title
+        tree.heading(
+            column,
+            text=title,
+            command=lambda: self._toggle_treeview_text_sort(tree, column),
+        )
+
+    def _toggle_treeview_text_sort(self, tree: ttk.Treeview, column: str) -> None:
+        tree_key = str(tree)
+        active = self._treeview_active_sorts.get(tree_key)
+        # A newly selected column starts ascending; repeated clicks reverse it.
+        descending = not active[1] if active is not None and active[0] == column else False
+        for key in tuple(self._treeview_sort_directions):
+            if key[0] == tree_key:
+                del self._treeview_sort_directions[key]
+        key = (tree_key, column)
+        self._treeview_sort_directions[key] = descending
+        self._treeview_active_sorts[tree_key] = (column, descending)
+        self._apply_treeview_text_sort(tree, column, descending)
+
+    def _reapply_treeview_text_sort(self, tree: ttk.Treeview, column: str) -> None:
+        active = self._treeview_active_sorts.get(str(tree))
+        if active is not None:
+            self._apply_treeview_text_sort(tree, active[0], active[1])
+
+    @staticmethod
+    def _treeview_sort_value(value: str) -> tuple[int, int | str]:
+        normalized = value.strip().replace(",", "")
+        signed_digits = normalized[1:] if normalized.startswith(("+", "-")) else normalized
+        if signed_digits.isdecimal():
+            return 0, int(normalized)
+        return 1, value.strip().casefold()
+
+    def _apply_treeview_text_sort(
+        self, tree: ttk.Treeview, column: str, descending: bool,
+    ) -> None:
+        rows = list(tree.get_children(""))
+        rows.sort(
+            key=lambda item: self._treeview_sort_value(str(tree.set(item, column))),
+            reverse=descending,
+        )
+        for index, item in enumerate(rows):
+            tree.move(item, "", index)
+        tree_key = str(tree)
+        key = (tree_key, column)
+        for heading_key, heading_title in self._treeview_sort_titles.items():
+            if heading_key[0] != tree_key:
+                continue
+            heading_column = heading_key[1]
+            tree.heading(
+                heading_column,
+                text=heading_title,
+                command=lambda selected=heading_column: self._toggle_treeview_text_sort(
+                    tree, selected,
+                ),
+            )
+        title = self._treeview_sort_titles.get(key, column)
+        arrow = "▼" if descending else "▲"
+        tree.heading(
+            column,
+            text=f"{title} {arrow}",
+            command=lambda: self._toggle_treeview_text_sort(tree, column),
+        )
+
     def _limit_integer_input(self, widget: ttk.Entry | ttk.Spinbox, minimum: int, maximum: int) -> None:
         widget.configure(
             validate="key",
@@ -861,10 +1015,6 @@ class CDSExecutablePatcher(tk.Tk):
             validate="key",
             validatecommand=(self._decimal_validation_command, "%P", str(minimum), str(maximum)),
         )
-
-    def _update_npc_departure_probability_label(self, *_args: str) -> None:
-        period = "일일" if self.npc_daily_departure_enabled.get() else "월간"
-        self.npc_departure_probability_label.set(f"{period} 출발 확률: 1 /")
 
     def _build(self) -> None:
         ttk.Style(self).configure("Credit.TLabel", foreground="#1A73E8")
@@ -895,6 +1045,7 @@ class CDSExecutablePatcher(tk.Tk):
         fake_item_tab = ttk.Frame(settings_notebook, padding=10)
         figurehead_tab = ttk.Frame(settings_notebook, padding=10)
         discovery_tab = ttk.Frame(settings_notebook, padding=10)
+        discovery_hint_tab = ttk.Frame(settings_notebook, padding=10)
         hint_tab = ttk.Frame(settings_notebook, padding=10)
         settings_notebook.add(basic_tab, text="기본 정보")
         settings_notebook.add(additional_tab, text="추가 패치")
@@ -908,10 +1059,12 @@ class CDSExecutablePatcher(tk.Tk):
         settings_notebook.add(fake_item_tab, text="모조품")
         settings_notebook.add(figurehead_tab, text="선수상 효과")
         settings_notebook.add(discovery_tab, text="발견물")
+        settings_notebook.add(discovery_hint_tab, text="힌트")
         settings_notebook.add(hint_tab, text="주점 힌트")
         # The discovery page is shorter than the largest notebook page.  Keep
         # its grid at the upper-left instead of centering it in the spare area.
         discovery_tab.grid_anchor("nw")
+        discovery_hint_tab.grid_anchor("nw")
         hint_tab.grid_anchor("nw")
 
         basic_left_column = ttk.Frame(basic_tab)
@@ -1085,6 +1238,7 @@ class CDSExecutablePatcher(tk.Tk):
                 ("third", fleet_names[2], 110),
             ):
                 tree.heading(column, text=text)
+                self._enable_treeview_text_sort(tree, column, text)
                 tree.column(column, width=width, minwidth=width, anchor=tk.CENTER, stretch=True)
             tree.bind("<Double-1>", lambda event, current_region=region: self._edit_pirate_probability(event, current_region))
             self.pirate_probability_trees[region] = tree
@@ -1210,6 +1364,18 @@ class CDSExecutablePatcher(tk.Tk):
             text="내용…",
             command=lambda: self.show_patch_details("무제국 발견 조건", MUGHAL_DETAILS),
         ).grid(row=2, column=1, padx=(10, 0), pady=(6, 0), sticky="e")
+        ttk.Checkbutton(
+            discovery_box,
+            text="해상괴물 조우 버그 수정",
+            variable=self.sea_monster_patch_enabled,
+        ).grid(row=3, column=0, pady=(6, 0), sticky="w")
+        ttk.Button(
+            discovery_box,
+            text="내용…",
+            command=lambda: self.show_patch_details(
+                "해상괴물 조우 버그 수정", SEA_MONSTER_DETAILS,
+            ),
+        ).grid(row=3, column=1, padx=(10, 0), pady=(6, 0), sticky="e")
 
         person_list_box = ttk.LabelFrame(person_tab, text="인물 목록", padding=10)
         person_list_box.grid(row=0, column=0, rowspan=2, sticky="nsew")
@@ -1224,6 +1390,8 @@ class CDSExecutablePatcher(tk.Tk):
         person_list_frame.grid(row=1, column=0, columnspan=2, pady=(8, 0), sticky="nsew")
         self.person_list = ttk.Treeview(person_list_frame, columns=("id", "name"), show="headings", height=15, selectmode="browse")
         self.person_list.heading("id", text="번호"); self.person_list.heading("name", text="이름")
+        self._enable_treeview_text_sort(self.person_list, "id", "번호")
+        self._enable_treeview_text_sort(self.person_list, "name", "이름")
         self.person_list.column("id", width=48, anchor="center", stretch=False); self.person_list.column("name", width=175, anchor="w")
         person_scroll = ttk.Scrollbar(person_list_frame, orient="vertical", command=self.person_list.yview)
         self.person_list.configure(yscrollcommand=person_scroll.set)
@@ -1302,6 +1470,8 @@ class CDSExecutablePatcher(tk.Tk):
         ship_list_box.grid(row=0, column=0, sticky="ns")
         self.ship_type_list = ttk.Treeview(ship_list_box, columns=("id", "name"), show="headings", height=8, selectmode="browse")
         self.ship_type_list.heading("id", text="번호"); self.ship_type_list.heading("name", text="선종")
+        self._enable_treeview_text_sort(self.ship_type_list, "id", "번호")
+        self._enable_treeview_text_sort(self.ship_type_list, "name", "선종")
         self.ship_type_list.column("id", width=48, anchor="center", stretch=False); self.ship_type_list.column("name", width=150, anchor="w")
         ship_scroll = ttk.Scrollbar(ship_list_box, orient="vertical", command=self.ship_type_list.yview)
         self.ship_type_list.configure(yscrollcommand=ship_scroll.set)
@@ -1370,6 +1540,8 @@ class CDSExecutablePatcher(tk.Tk):
             city_list_frame, columns=("id", "name"), show="headings", height=16, selectmode="browse",
         )
         self.city_list.heading("id", text="번호"); self.city_list.heading("name", text="이름")
+        self._enable_treeview_text_sort(self.city_list, "id", "번호")
+        self._enable_treeview_text_sort(self.city_list, "name", "이름")
         self.city_list.column("id", width=48, anchor="center", stretch=False)
         self.city_list.column("name", width=160, anchor="w", stretch=True)
         city_scroll = ttk.Scrollbar(city_list_frame, orient="vertical", command=self.city_list.yview)
@@ -1617,6 +1789,9 @@ class CDSExecutablePatcher(tk.Tk):
             item_list_frame, columns=("id", "category", "name"), show="headings", height=17, selectmode="browse",
         )
         self.item_list.heading("id", text="번호"); self.item_list.heading("category", text="분류"); self.item_list.heading("name", text="이름")
+        self._enable_treeview_text_sort(self.item_list, "id", "번호")
+        self._enable_treeview_text_sort(self.item_list, "category", "분류")
+        self._enable_treeview_text_sort(self.item_list, "name", "이름")
         self.item_list.column("id", width=48, anchor="center", stretch=False)
         self.item_list.column("category", width=68, anchor="center", stretch=False)
         self.item_list.column("name", width=185, anchor="w")
@@ -1641,23 +1816,33 @@ class CDSExecutablePatcher(tk.Tk):
         )
         self.item_category_selector.grid(row=1, column=1, padx=(6, 0), pady=(8, 0), sticky="w")
         self._bind_combobox_arrow_selection(self.item_category_selector)
-        ttk.Label(item_box, text="구매가:").grid(row=2, column=0, pady=(8, 0), sticky="w")
+        ttk.Label(item_box, text="연결 힌트:").grid(row=2, column=0, pady=(8, 0), sticky="w")
+        self.item_hint_selector = ttk.Combobox(
+            item_box,
+            textvariable=self.item_hint_selection,
+            values=("연결 없음",),
+            width=24,
+            state="disabled",
+        )
+        self.item_hint_selector.grid(row=2, column=1, padx=(6, 0), pady=(8, 0), sticky="w")
+        self._bind_combobox_arrow_selection(self.item_hint_selector)
+        ttk.Label(item_box, text="구매가:").grid(row=3, column=0, pady=(8, 0), sticky="w")
         self.item_buy_price_entry = ttk.Spinbox(
             item_box, from_=0, to=99_999_999, textvariable=self.item_buy_price, width=11, state="disabled",
         )
-        self.item_buy_price_entry.grid(row=2, column=1, padx=(6, 0), pady=(8, 0), sticky="w")
+        self.item_buy_price_entry.grid(row=3, column=1, padx=(6, 0), pady=(8, 0), sticky="w")
         self._limit_integer_input(self.item_buy_price_entry, 0, 99_999_999)
-        ttk.Label(item_box, text="판매가:").grid(row=3, column=0, pady=(8, 0), sticky="w")
+        ttk.Label(item_box, text="판매가:").grid(row=4, column=0, pady=(8, 0), sticky="w")
         self.item_sell_price_entry = ttk.Spinbox(
             item_box, from_=0, to=99_999_999, textvariable=self.item_sell_price, width=11, state="disabled",
         )
-        self.item_sell_price_entry.grid(row=3, column=1, padx=(6, 0), pady=(8, 0), sticky="w")
+        self.item_sell_price_entry.grid(row=4, column=1, padx=(6, 0), pady=(8, 0), sticky="w")
         self._limit_integer_input(self.item_sell_price_entry, 0, 99_999_999)
-        ttk.Label(item_box, text="효과 코드:").grid(row=4, column=0, pady=(8, 0), sticky="w")
+        ttk.Label(item_box, text="효과 코드:").grid(row=5, column=0, pady=(8, 0), sticky="w")
         self.item_effect_entry = ttk.Spinbox(
             item_box, from_=0, to=255, textvariable=self.item_effect_value, width=7, state="disabled",
         )
-        self.item_effect_entry.grid(row=4, column=1, padx=(6, 0), pady=(8, 0), sticky="w")
+        self.item_effect_entry.grid(row=5, column=1, padx=(6, 0), pady=(8, 0), sticky="w")
         self._limit_integer_input(self.item_effect_entry, 0, 255)
         # ITEM.CDS pictures remain at their original 120x120 size.  Items
         # Items without ITEM.CDS art can use 240x176 DISCOVER media or a
@@ -1678,6 +1863,7 @@ class CDSExecutablePatcher(tk.Tk):
             self.item_search_entry, self.item_list, self.item_name_entry,
             self.item_category_selector, self.item_buy_price_entry,
             self.item_sell_price_entry, self.item_effect_entry,
+            self.item_hint_selector,
         ))
         self._set_item_controls_enabled(False)
 
@@ -1701,6 +1887,9 @@ class CDSExecutablePatcher(tk.Tk):
         self.fake_item_list.heading("id", text="번호")
         self.fake_item_list.heading("name", text="이름")
         self.fake_item_list.heading("city", text="판매 도시")
+        self._enable_treeview_text_sort(self.fake_item_list, "id", "번호")
+        self._enable_treeview_text_sort(self.fake_item_list, "name", "이름")
+        self._enable_treeview_text_sort(self.fake_item_list, "city", "판매 도시")
         self.fake_item_list.column("id", width=48, anchor="center", stretch=False)
         self.fake_item_list.column("name", width=180, anchor="w", stretch=False)
         self.fake_item_list.column("city", width=105, anchor="w", stretch=False)
@@ -1764,11 +1953,10 @@ class CDSExecutablePatcher(tk.Tk):
         self._set_fake_item_controls_enabled(False)
 
         figurehead_tab.columnconfigure(0, weight=1)
-        figurehead_tab.columnconfigure(1, weight=1)
         figurehead_tab.rowconfigure(0, weight=1)
 
         figurehead_list_box = ttk.LabelFrame(figurehead_tab, text="선수상 효과 목록", padding=10)
-        figurehead_list_box.grid(row=0, column=0, padx=(0, 5), sticky="nsew")
+        figurehead_list_box.grid(row=0, column=0, sticky="nsew")
         figurehead_list_box.columnconfigure(0, weight=1)
         figurehead_list_box.rowconfigure(0, weight=1)
         figurehead_list_frame = ttk.Frame(figurehead_list_box)
@@ -1785,9 +1973,12 @@ class CDSExecutablePatcher(tk.Tk):
         self.figurehead_list.heading("code", text="코드")
         self.figurehead_list.heading("effect", text="효과")
         self.figurehead_list.heading("setting", text="설정값")
+        self._enable_treeview_text_sort(self.figurehead_list, "code", "코드")
+        self._enable_treeview_text_sort(self.figurehead_list, "effect", "효과")
+        self._enable_treeview_text_sort(self.figurehead_list, "setting", "설정값")
         self.figurehead_list.column("code", width=45, anchor="center", stretch=False)
-        self.figurehead_list.column("effect", width=205, anchor="w", stretch=False)
-        self.figurehead_list.column("setting", width=160, anchor="w", stretch=True)
+        self.figurehead_list.column("effect", width=360, anchor="w", stretch=True)
+        self.figurehead_list.column("setting", width=260, anchor="w", stretch=True)
         figurehead_scroll = ttk.Scrollbar(
             figurehead_list_frame, orient="vertical", command=self.figurehead_list.yview,
         )
@@ -1795,9 +1986,22 @@ class CDSExecutablePatcher(tk.Tk):
         self.figurehead_list.grid(row=0, column=0, sticky="nsew")
         figurehead_scroll.grid(row=0, column=1, sticky="ns")
         self.figurehead_list.bind("<<TreeviewSelect>>", self._on_figurehead_effect_selected)
+        self.figurehead_list.bind("<Double-1>", self._show_figurehead_effect_details)
 
-        figurehead_detail_box = ttk.LabelFrame(figurehead_tab, text="선택한 선수상 효과", padding=10)
-        figurehead_detail_box.grid(row=0, column=1, padx=(5, 0), sticky="new")
+        self.figurehead_detail_window = tk.Toplevel(self)
+        self.figurehead_detail_window.title("선수상 효과")
+        self.figurehead_detail_window.resizable(False, False)
+        self.figurehead_detail_window.transient(self)
+        self.figurehead_detail_window.protocol(
+            "WM_DELETE_WINDOW",
+            lambda: self._hide_detail_window(self.figurehead_detail_window),
+        )
+        figurehead_detail_frame = ttk.Frame(self.figurehead_detail_window, padding=12)
+        figurehead_detail_frame.pack(fill=tk.BOTH, expand=True)
+        figurehead_detail_box = ttk.LabelFrame(
+            figurehead_detail_frame, text="선택한 선수상 효과", padding=10,
+        )
+        figurehead_detail_box.pack(fill=tk.BOTH, expand=True)
         ttk.Label(figurehead_detail_box, text="효과 코드:").grid(row=0, column=0, sticky="w")
         ttk.Label(figurehead_detail_box, textvariable=self.figurehead_selected_code).grid(
             row=0, column=1, columnspan=2, padx=(8, 0), sticky="w",
@@ -1807,49 +2011,57 @@ class CDSExecutablePatcher(tk.Tk):
             row=1, column=1, columnspan=2, padx=(8, 0), pady=(8, 0), sticky="w",
         )
 
-        figurehead_disaster_box = ttk.LabelFrame(
+        self.figurehead_disaster_box = ttk.LabelFrame(
             figurehead_detail_box, text="해상 재해 방지", padding=10,
         )
-        figurehead_disaster_box.grid(row=2, column=0, columnspan=3, pady=(12, 0), sticky="ew")
-        figurehead_disaster_box.columnconfigure(1, weight=1)
+        self.figurehead_disaster_box.grid(
+            row=2, column=0, columnspan=3, pady=(12, 0), sticky="ew",
+        )
+        self.figurehead_disaster_box.columnconfigure(1, weight=1)
         ttk.Label(
-            figurehead_disaster_box, textvariable=self.figurehead_disaster_description,
+            self.figurehead_disaster_box, textvariable=self.figurehead_disaster_description,
         ).grid(row=0, column=0, columnspan=3, sticky="w")
-        ttk.Label(figurehead_disaster_box, text="방지 확률:").grid(row=1, column=0, pady=(8, 0), sticky="w")
+        ttk.Label(self.figurehead_disaster_box, text="방지 확률:").grid(
+            row=1, column=0, pady=(8, 0), sticky="w",
+        )
         self.figurehead_disaster_entry = ttk.Spinbox(
-            figurehead_disaster_box, from_=0, to=100,
+            self.figurehead_disaster_box, from_=0, to=100,
             textvariable=self.figurehead_disaster_chances[0], width=8, state="disabled",
         )
         self.figurehead_disaster_entry.grid(row=1, column=1, padx=(8, 4), pady=(8, 0), sticky="w")
-        ttk.Label(figurehead_disaster_box, text="%").grid(row=1, column=2, pady=(8, 0), sticky="w")
+        ttk.Label(self.figurehead_disaster_box, text="%").grid(
+            row=1, column=2, pady=(8, 0), sticky="w",
+        )
         self._limit_integer_input(self.figurehead_disaster_entry, 0, 100)
 
-        figurehead_value_box = ttk.LabelFrame(
+        self.figurehead_value_box = ttk.LabelFrame(
             figurehead_detail_box, text="고유 효과", padding=10,
         )
-        figurehead_value_box.grid(row=3, column=0, columnspan=3, pady=(10, 0), sticky="ew")
+        self.figurehead_value_box.grid(
+            row=3, column=0, columnspan=3, pady=(10, 0), sticky="ew",
+        )
         self.figurehead_primary_label_widget = ttk.Label(
-            figurehead_value_box, textvariable=self.figurehead_primary_label,
+            self.figurehead_value_box, textvariable=self.figurehead_primary_label,
         )
         self.figurehead_primary_label_widget.grid(row=0, column=0, sticky="w")
         self.figurehead_primary_entry = ttk.Spinbox(
-            figurehead_value_box, from_=0, to=1000, width=8, state="disabled",
+            self.figurehead_value_box, from_=0, to=1000, width=8, state="disabled",
         )
         self.figurehead_primary_entry.grid(row=0, column=1, padx=(8, 4), sticky="w")
         self.figurehead_primary_unit_widget = ttk.Label(
-            figurehead_value_box, textvariable=self.figurehead_primary_unit,
+            self.figurehead_value_box, textvariable=self.figurehead_primary_unit,
         )
         self.figurehead_primary_unit_widget.grid(row=0, column=2, sticky="w")
         self.figurehead_secondary_label_widget = ttk.Label(
-            figurehead_value_box, textvariable=self.figurehead_secondary_label,
+            self.figurehead_value_box, textvariable=self.figurehead_secondary_label,
         )
         self.figurehead_secondary_label_widget.grid(row=1, column=0, pady=(8, 0), sticky="w")
         self.figurehead_secondary_entry = ttk.Spinbox(
-            figurehead_value_box, from_=1, to=127, width=8, state="disabled",
+            self.figurehead_value_box, from_=1, to=127, width=8, state="disabled",
         )
         self.figurehead_secondary_entry.grid(row=1, column=1, padx=(8, 4), pady=(8, 0), sticky="w")
         self.figurehead_secondary_unit_widget = ttk.Label(
-            figurehead_value_box, textvariable=self.figurehead_secondary_unit,
+            self.figurehead_value_box, textvariable=self.figurehead_secondary_unit,
         )
         self.figurehead_secondary_unit_widget.grid(row=1, column=2, pady=(8, 0), sticky="w")
         self._figurehead_controls.extend((
@@ -1871,6 +2083,15 @@ class CDSExecutablePatcher(tk.Tk):
             self.figurehead_all_attack_percent,
         ):
             variable.trace_add("write", self._on_figurehead_effect_value_changed)
+        ttk.Button(
+            figurehead_detail_frame, text="닫기",
+            command=lambda: self._hide_detail_window(self.figurehead_detail_window),
+        ).pack(pady=(10, 0))
+        self.figurehead_detail_window.bind(
+            "<Escape>",
+            lambda _event: self._hide_detail_window(self.figurehead_detail_window),
+        )
+        self.figurehead_detail_window.withdraw()
         self._refresh_figurehead_effect_list()
         self._set_figurehead_controls_enabled(False)
 
@@ -1894,6 +2115,9 @@ class CDSExecutablePatcher(tk.Tk):
         self.discovery_list.heading("id", text="번호")
         self.discovery_list.heading("category", text="분류")
         self.discovery_list.heading("name", text="이름")
+        self._enable_treeview_text_sort(self.discovery_list, "id", "번호")
+        self._enable_treeview_text_sort(self.discovery_list, "category", "분류")
+        self._enable_treeview_text_sort(self.discovery_list, "name", "이름")
         self.discovery_list.column("id", width=48, anchor="center", stretch=False)
         self.discovery_list.column("category", width=58, anchor="center", stretch=False)
         self.discovery_list.column("name", width=150, anchor="w", stretch=True)
@@ -1907,8 +2131,16 @@ class CDSExecutablePatcher(tk.Tk):
         discovery_list_frame.columnconfigure(0, weight=1)
         discovery_list_frame.rowconfigure(0, weight=1)
 
-        discovery_box = ttk.LabelFrame(discovery_tab, text="발견물 정보", padding=10)
-        discovery_box.grid(row=0, column=1, padx=(10, 0), sticky="nw")
+        self.discovery_details_notebook = ttk.Notebook(discovery_tab)
+        self.discovery_details_notebook.grid(
+            row=0, column=1, padx=(10, 0), sticky="nw",
+        )
+        discovery_box = ttk.Frame(self.discovery_details_notebook, padding=10)
+        discovery_description_tab = ttk.Frame(
+            self.discovery_details_notebook, padding=10,
+        )
+        self.discovery_details_notebook.add(discovery_box, text="정보")
+        self.discovery_details_notebook.add(discovery_description_tab, text="설명")
         discovery_name_row = ttk.Frame(discovery_box)
         discovery_name_row.grid(row=0, column=0, columnspan=2, sticky="w")
         ttk.Label(discovery_name_row, text="이름:").grid(row=0, column=0, sticky="w")
@@ -1974,6 +2206,48 @@ class CDSExecutablePatcher(tk.Tk):
                 first_direction_selector, first_entry, second_direction_selector, second_entry,
             ))
 
+        discovery_description_tab.columnconfigure(0, weight=1)
+        discovery_description_tab.rowconfigure(1, weight=1)
+        discovery_description_header = ttk.Frame(discovery_description_tab)
+        discovery_description_header.grid(
+            row=0, column=0, pady=(0, 4), sticky="ew",
+        )
+        discovery_description_header.columnconfigure(1, weight=1)
+        ttk.Label(discovery_description_header, text="설명:").grid(
+            row=0, column=0, sticky="w",
+        )
+        ttk.Label(
+            discovery_description_header,
+            textvariable=self.discovery_description_byte_count,
+        ).grid(row=0, column=1, sticky="e")
+        discovery_description_frame = ttk.Frame(discovery_description_tab)
+        discovery_description_frame.grid(
+            row=1, column=0, sticky="nsew",
+        )
+        discovery_description_frame.columnconfigure(0, weight=1)
+        discovery_description_frame.rowconfigure(0, weight=1)
+        self.discovery_description_editor = tk.Text(
+            discovery_description_frame,
+            width=66,
+            height=5,
+            wrap="word",
+            undo=True,
+            state="disabled",
+        )
+        discovery_description_scroll = ttk.Scrollbar(
+            discovery_description_frame,
+            orient="vertical",
+            command=self.discovery_description_editor.yview,
+        )
+        self.discovery_description_editor.configure(
+            yscrollcommand=discovery_description_scroll.set,
+        )
+        self.discovery_description_editor.grid(row=0, column=0, sticky="nsew")
+        discovery_description_scroll.grid(row=0, column=1, sticky="ns")
+        self.discovery_description_editor.bind(
+            "<<Modified>>", self._on_discovery_description_modified,
+        )
+
         discovery_preview_box = tk.Frame(discovery_tab, width=324, height=244, bg="#222222", relief="ridge", bd=2)
         discovery_preview_box.grid(row=1, column=1, padx=(10, 0), pady=(10, 0), sticky="nw")
         discovery_preview_box.grid_propagate(False)
@@ -1994,8 +2268,86 @@ class CDSExecutablePatcher(tk.Tk):
             self.discovery_category_selector,
             self.discovery_value_entry,
             self.discovery_still_slot_entry,
+            self.discovery_description_editor,
         ))
         self._set_discovery_controls_enabled(False)
+
+        discovery_hint_list_box = ttk.LabelFrame(
+            discovery_hint_tab, text="힌트-발견물 연결 목록", padding=10,
+        )
+        discovery_hint_list_box.grid(row=0, column=0, sticky="nsew")
+        discovery_hint_tab.grid_rowconfigure(0, weight=1)
+        discovery_hint_tab.grid_columnconfigure(0, weight=1)
+        discovery_hint_list_box.columnconfigure(1, weight=1)
+        discovery_hint_list_box.rowconfigure(1, weight=1)
+        ttk.Label(discovery_hint_list_box, text="검색:").grid(row=0, column=0, sticky="w")
+        discovery_hint_search_host = tk.Frame(
+            discovery_hint_list_box, width=235, height=23,
+        )
+        discovery_hint_search_host.grid(row=0, column=1, padx=(6, 0), sticky="w")
+        self.discovery_hint_search_entry = NativeWinEdit(
+            discovery_hint_search_host,
+            self._schedule_discovery_hint_list_refresh,
+            width=235,
+            height=23,
+        )
+        discovery_hint_list_frame = ttk.Frame(discovery_hint_list_box)
+        discovery_hint_list_frame.grid(
+            row=1, column=0, columnspan=2, pady=(8, 0), sticky="nsew",
+        )
+        discovery_hint_list_frame.columnconfigure(0, weight=1)
+        discovery_hint_list_frame.rowconfigure(0, weight=1)
+        self.discovery_hint_list = ttk.Treeview(
+            discovery_hint_list_frame,
+            columns=("hint_id", "books", "authors", "target_id", "targets"),
+            show="headings",
+            height=19,
+            selectmode="browse",
+        )
+        self.discovery_hint_list.heading("hint_id", text="힌트 ID")
+        self.discovery_hint_list.heading("books", text="책 제목")
+        self.discovery_hint_list.heading("authors", text="저자")
+        self._enable_treeview_text_sort(self.discovery_hint_list, "hint_id", "힌트 ID")
+        self._enable_treeview_text_sort(self.discovery_hint_list, "books", "책 제목")
+        self._enable_treeview_text_sort(self.discovery_hint_list, "authors", "저자")
+        self.discovery_hint_list.heading("target_id", text="대상 ID")
+        self.discovery_hint_list.heading("targets", text="연결 대상")
+        self._enable_treeview_text_sort(self.discovery_hint_list, "target_id", "대상 ID")
+        self._enable_treeview_text_sort(self.discovery_hint_list, "targets", "연결 대상")
+        self.discovery_hint_list.column(
+            "hint_id", width=60, anchor="center", stretch=False,
+        )
+        self.discovery_hint_list.column(
+            "books", width=210, anchor="w", stretch=True,
+        )
+        self.discovery_hint_list.column(
+            "authors", width=180, anchor="w", stretch=True,
+        )
+        self.discovery_hint_list.column(
+            "target_id", width=65, anchor="center", stretch=False,
+        )
+        self.discovery_hint_list.column(
+            "targets", width=300, anchor="w", stretch=True,
+        )
+        discovery_hint_scroll = ttk.Scrollbar(
+            discovery_hint_list_frame,
+            orient="vertical",
+            command=self.discovery_hint_list.yview,
+        )
+        self.discovery_hint_list.configure(yscrollcommand=discovery_hint_scroll.set)
+        self.discovery_hint_list.grid(row=0, column=0, sticky="nsew")
+        discovery_hint_scroll.grid(row=0, column=1, sticky="ns")
+        self.discovery_hint_list.bind(
+            "<<TreeviewSelect>>", self._on_discovery_hint_selected,
+        )
+        self.discovery_hint_list.bind(
+            "<Double-1>", self._show_discovery_hint_details,
+        )
+        self._discovery_hint_controls.extend((
+            self.discovery_hint_search_entry,
+            self.discovery_hint_list,
+        ))
+        self._set_discovery_hint_controls_enabled(False)
 
         hint_list_box = ttk.LabelFrame(hint_tab, text="주점 힌트 목록", padding=10)
         hint_list_box.grid(row=0, column=0, sticky="nsew")
@@ -2020,6 +2372,9 @@ class CDSExecutablePatcher(tk.Tk):
         self.hint_list.heading("id", text="ID")
         self.hint_list.heading("target", text="대상 발견물")
         self.hint_list.heading("text", text="힌트 내용")
+        self._enable_treeview_text_sort(self.hint_list, "id", "ID")
+        self._enable_treeview_text_sort(self.hint_list, "target", "대상 발견물")
+        self._enable_treeview_text_sort(self.hint_list, "text", "힌트 내용")
         self.hint_list.column("id", width=48, anchor="center", stretch=False)
         self.hint_list.column("target", width=150, anchor="w", stretch=False)
         self.hint_list.column("text", width=142, anchor="w", stretch=True)
@@ -2028,10 +2383,23 @@ class CDSExecutablePatcher(tk.Tk):
         self.hint_list.grid(row=0, column=0, sticky="nsew")
         hint_scroll.grid(row=0, column=1, sticky="ns")
         self.hint_list.bind("<<TreeviewSelect>>", self._on_hint_selected)
+        self.hint_list.bind("<Double-1>", self._show_hint_details)
 
-        hint_box = ttk.LabelFrame(hint_tab, text="주점 힌트 정보", padding=10)
-        hint_box.grid(row=0, column=1, padx=(10, 0), sticky="new")
+        self.hint_detail_window = tk.Toplevel(self)
+        self.hint_detail_window.title("주점 힌트 정보")
+        self.hint_detail_window.geometry("620x520")
+        self.hint_detail_window.minsize(540, 440)
+        self.hint_detail_window.transient(self)
+        self.hint_detail_window.protocol(
+            "WM_DELETE_WINDOW",
+            lambda: self._hide_detail_window(self.hint_detail_window),
+        )
+        hint_detail_frame = ttk.Frame(self.hint_detail_window, padding=12)
+        hint_detail_frame.pack(fill=tk.BOTH, expand=True)
+        hint_box = ttk.LabelFrame(hint_detail_frame, text="주점 힌트 정보", padding=10)
+        hint_box.pack(fill=tk.BOTH, expand=True)
         hint_box.columnconfigure(1, weight=1)
+        hint_box.rowconfigure(3, weight=1)
         ttk.Label(hint_box, text="대상 발견물:").grid(row=0, column=0, sticky="w")
         hint_target_frame = ttk.Frame(hint_box)
         hint_target_frame.grid(row=0, column=1, padx=(8, 0), sticky="ew")
@@ -2086,6 +2454,15 @@ class CDSExecutablePatcher(tk.Tk):
             self.hint_search_entry, self.hint_list, self.hint_target_code_entry,
             *self.hint_city_selectors, self.hint_text_editor,
         ))
+        ttk.Button(
+            hint_detail_frame, text="닫기",
+            command=lambda: self._hide_detail_window(self.hint_detail_window),
+        ).pack(pady=(10, 0))
+        self.hint_detail_window.bind(
+            "<Escape>",
+            lambda _event: self._hide_detail_window(self.hint_detail_window),
+        )
+        self.hint_detail_window.withdraw()
         self._set_hint_controls_enabled(False)
 
         barmaid_list_box = ttk.LabelFrame(barmaid_tab, text="여급 목록", padding=10)
@@ -2106,6 +2483,8 @@ class CDSExecutablePatcher(tk.Tk):
         )
         self.barmaid_list.heading("id", text="번호")
         self.barmaid_list.heading("name", text="이름")
+        self._enable_treeview_text_sort(self.barmaid_list, "id", "번호")
+        self._enable_treeview_text_sort(self.barmaid_list, "name", "이름")
         self.barmaid_list.column("id", width=48, anchor="center", stretch=False)
         self.barmaid_list.column("name", width=130, anchor="w", stretch=True)
         barmaid_list_scroll = ttk.Scrollbar(barmaid_list_frame, orient="vertical", command=self.barmaid_list.yview)
@@ -2222,6 +2601,8 @@ class CDSExecutablePatcher(tk.Tk):
         )
         self.sponsor_list.heading("id", text="번호")
         self.sponsor_list.heading("name", text="이름")
+        self._enable_treeview_text_sort(self.sponsor_list, "id", "번호")
+        self._enable_treeview_text_sort(self.sponsor_list, "name", "이름")
         self.sponsor_list.column("id", width=48, anchor="center", stretch=False)
         self.sponsor_list.column("name", width=165, anchor="w", stretch=True)
         sponsor_list_scroll = ttk.Scrollbar(sponsor_list_frame, orient="vertical", command=self.sponsor_list.yview)
@@ -2395,6 +2776,7 @@ class CDSExecutablePatcher(tk.Tk):
             if query and query not in record.name.casefold():
                 continue
             tree.insert("", tk.END, iid=str(record.identifier), values=(f"{record.identifier:03d}", record.name))
+        self._reapply_treeview_text_sort(tree, "name")
         if selected_identifier and tree.exists(selected_identifier):
             tree.selection_set(selected_identifier)
             tree.focus(selected_identifier)
@@ -2564,6 +2946,7 @@ class CDSExecutablePatcher(tk.Tk):
         query = self.person_search_entry.get().strip().casefold()
         for record in self._person_records:
             if not query or query in record.name.casefold(): tree.insert("", "end", iid=str(record.identifier), values=(f"{record.identifier:03d}", record.name))
+        self._reapply_treeview_text_sort(tree, "name")
         if selected and tree.exists(selected[0]): tree.selection_set(selected[0])
 
     def _selected_person_record(self) -> PersonRecord | None:
@@ -2637,6 +3020,7 @@ class CDSExecutablePatcher(tk.Tk):
         self.ship_type_list.delete(*self.ship_type_list.get_children())
         for record in records:
             self.ship_type_list.insert("", "end", iid=str(record.identifier), values=(f"{record.identifier:02d}", record.name))
+        self._reapply_treeview_text_sort(self.ship_type_list, "name")
         self._set_ship_type_controls_enabled(bool(records))
         if records:
             self.ship_type_list.selection_set(str(records[0].identifier))
@@ -2721,6 +3105,7 @@ class CDSExecutablePatcher(tk.Tk):
         )
         self._ship_type_by_identifier = {record.identifier: record for record in self._ship_type_records}
         self.ship_type_list.item(str(edit.identifier), values=(f"{edit.identifier:02d}", edit.name))
+        self._reapply_treeview_text_sort(self.ship_type_list, "name")
 
     def _set_city_controls_enabled(self, enabled: bool) -> None:
         for control in self._city_controls:
@@ -2752,6 +3137,7 @@ class CDSExecutablePatcher(tk.Tk):
             if query and query not in record.name.casefold():
                 continue
             tree.insert("", "end", iid=str(record.identifier), values=(f"{record.identifier:03d}", record.name))
+        self._reapply_treeview_text_sort(tree, "name")
         if selected_identifier and tree.exists(selected_identifier):
             tree.selection_set(selected_identifier)
             tree.focus(selected_identifier)
@@ -3003,6 +3389,22 @@ class CDSExecutablePatcher(tk.Tk):
                 control.configure(state="readonly" if enabled else "disabled")
             else:
                 control.state(["!disabled"] if enabled else ["disabled"])
+        self._update_item_hint_control_state()
+
+    def _on_item_category_changed(self, *_args: str) -> None:
+        self._update_item_hint_control_state()
+
+    def _update_item_hint_control_state(self) -> None:
+        selector = getattr(self, "item_hint_selector", None)
+        if selector is None:
+            return
+        try:
+            is_book = item_category_raw_id(self.item_category.get()) == ITEM_BOOK_CATEGORY
+        except (ValueError, IndexError):
+            is_book = False
+        selector.configure(
+            state="readonly" if is_book and self._item_records else "disabled",
+        )
 
     def _figurehead_effect_name(self, code: int) -> str:
         names: list[str] = []
@@ -3080,6 +3482,7 @@ class CDSExecutablePatcher(tk.Tk):
                 self.figurehead_list.item(item_id, values=values)
             else:
                 self.figurehead_list.insert("", "end", iid=item_id, values=values)
+        self._reapply_treeview_text_sort(self.figurehead_list, "code")
         if selected_code and self.figurehead_list.exists(selected_code):
             self.figurehead_list.selection_set(selected_code)
             self.figurehead_list.focus(selected_code)
@@ -3111,6 +3514,7 @@ class CDSExecutablePatcher(tk.Tk):
         editable = self._figurehead_loaded
 
         if code <= 33:
+            self.figurehead_disaster_box.grid()
             grade = FIGUREHEAD_DISASTER_GRADES[code]
             self.figurehead_disaster_description.set(
                 f"{FIGUREHEAD_DISASTER_NAMES[code % 4]} · {grade}등급 (동일 등급 공통)"
@@ -3123,8 +3527,13 @@ class CDSExecutablePatcher(tk.Tk):
         else:
             self.figurehead_disaster_description.set("해상 재해 방지 효과 없음")
             self.figurehead_disaster_entry.state(["disabled"])
+            self.figurehead_disaster_box.grid_remove()
 
         fields = self._figurehead_unique_effect_fields(code)
+        if fields:
+            self.figurehead_value_box.grid()
+        else:
+            self.figurehead_value_box.grid_remove()
         widgets = (
             (
                 self.figurehead_primary_label_widget,
@@ -3156,6 +3565,27 @@ class CDSExecutablePatcher(tk.Tk):
                 label_widget.grid_remove()
                 entry.grid_remove()
                 unit_widget.grid_remove()
+
+    def _show_figurehead_effect_details(self, event: tk.Event | None = None) -> None:
+        if event is not None:
+            row_identifier = self.figurehead_list.identify_row(event.y)
+            if not row_identifier:
+                return
+            self.figurehead_list.selection_set(row_identifier)
+            self.figurehead_list.focus(row_identifier)
+        if not self.figurehead_list.selection():
+            return
+        self._on_figurehead_effect_selected()
+        self.figurehead_detail_window.geometry("")
+        self.figurehead_detail_window.deiconify()
+        self.figurehead_detail_window.lift()
+        self.figurehead_detail_window.update_idletasks()
+        width = max(430, self.figurehead_detail_window.winfo_reqwidth())
+        height = self.figurehead_detail_window.winfo_reqheight()
+        self.figurehead_detail_window.geometry(f"{width}x{height}")
+        self._center_dialog(self.figurehead_detail_window)
+        self.figurehead_detail_window.grab_set()
+        self.figurehead_detail_window.focus_force()
 
     def _on_figurehead_effect_value_changed(self, *_args) -> None:
         self._refresh_figurehead_effect_list()
@@ -3238,6 +3668,7 @@ class CDSExecutablePatcher(tk.Tk):
                 "", "end", iid=str(record.identifier),
                 values=(f"{record.identifier:03d}", category, record.name),
             )
+        self._reapply_treeview_text_sort(tree, "name")
         if selected_identifier and tree.exists(selected_identifier):
             tree.selection_set(selected_identifier)
             tree.focus(selected_identifier)
@@ -3275,6 +3706,10 @@ class CDSExecutablePatcher(tk.Tk):
         self.item_buy_price.set(str(record.buy_price))
         self.item_sell_price.set(str(record.sell_price))
         self.item_effect_value.set(str(record.effect_value))
+        link = self._discovery_hint_by_identifier.get(str(record.hint_id))
+        self.item_hint_selection.set(
+            "연결 없음" if record.hint_id < 0 else link.hint_name if link else "연결 없음"
+        )
 
     def _show_item_image(self, record: ItemRecord) -> None:
         """Display ITEM.CDS art or the item's linked discovery media."""
@@ -3358,12 +3793,19 @@ class CDSExecutablePatcher(tk.Tk):
         if record is None:
             return None
         try:
+            hint_selection = self.item_hint_selection.get()
+            hint_id = (
+                -1
+                if hint_selection == "연결 없음"
+                else self._item_hint_ids_by_name[hint_selection]
+            )
             return ItemEdit(
                 record.identifier, self.item_name_entry.get().strip(),
                 int(self.item_buy_price.get()), int(self.item_sell_price.get()),
                 int(self.item_effect_value.get()), item_category_raw_id(self.item_category.get()),
+                hint_id,
             )
-        except (ValueError, IndexError) as error:
+        except (ValueError, IndexError, KeyError) as error:
             raise ValueError("아이템 입력값을 확인해 주세요.") from error
 
     def _remember_item_edit(self, edit: ItemEdit | None) -> None:
@@ -3378,6 +3820,7 @@ class CDSExecutablePatcher(tk.Tk):
                 edit.sell_price if record.identifier == edit.identifier else record.sell_price,
                 edit.effect_value if record.identifier == edit.identifier else record.effect_value,
                 edit.category_id if record.identifier == edit.identifier else record.category_id,
+                edit.hint_id if record.identifier == edit.identifier else record.hint_id,
             )
             for record in self._item_records
         )
@@ -3425,6 +3868,7 @@ class CDSExecutablePatcher(tk.Tk):
                 "", "end", iid=str(record.identifier),
                 values=(f"{record.identifier:03d}", record.name, city_name),
             )
+        self._reapply_treeview_text_sort(tree, "name")
         if selected_identifier and tree.exists(selected_identifier):
             tree.selection_set(selected_identifier)
             tree.focus(selected_identifier)
@@ -3541,6 +3985,8 @@ class CDSExecutablePatcher(tk.Tk):
                 control.configure(selectmode="browse" if enabled else "none")
             elif isinstance(control, ttk.Combobox):
                 control.configure(state="readonly" if enabled else "disabled")
+            elif isinstance(control, tk.Text):
+                control.configure(state="normal" if enabled else "disabled")
             else:
                 control.state(["!disabled"] if enabled else ["disabled"])
 
@@ -3567,6 +4013,7 @@ class CDSExecutablePatcher(tk.Tk):
                 "", "end", iid=str(record.identifier),
                 values=(f"{record.identifier:03d}", category, record.name),
             )
+        self._reapply_treeview_text_sort(tree, "name")
         if selected_identifier and tree.exists(selected_identifier):
             tree.selection_set(selected_identifier)
             tree.focus(selected_identifier)
@@ -3612,6 +4059,11 @@ class CDSExecutablePatcher(tk.Tk):
         )
         self.discovery_category.set(DISCOVERY_CATEGORY_NAMES[record.category_id])
         self.discovery_value.set(str(record.value))
+        self.discovery_description_editor.configure(state="normal")
+        self.discovery_description_editor.delete("1.0", tk.END)
+        self.discovery_description_editor.insert("1.0", record.description)
+        self.discovery_description_editor.edit_modified(False)
+        self._update_discovery_description_byte_count()
         self._show_discovery_image(record)
         coordinate_values = (
             (world_y_to_latitude(record.min_y), world_y_to_latitude(record.max_y),
@@ -3633,6 +4085,27 @@ class CDSExecutablePatcher(tk.Tk):
         coordinate_state = ["!disabled"] if record.min_x is not None else ["disabled"]
         for control in self._discovery_coordinate_controls:
             control.state(coordinate_state)
+
+    def _on_discovery_description_modified(
+        self, _event: tk.Event | None = None,
+    ) -> None:
+        if not self.discovery_description_editor.edit_modified():
+            return
+        self.discovery_description_editor.edit_modified(False)
+        self._update_discovery_description_byte_count()
+
+    def _update_discovery_description_byte_count(self) -> None:
+        description = self.discovery_description_editor.get("1.0", "end-1c")
+        try:
+            byte_count = len(description.encode("cp949"))
+        except UnicodeEncodeError:
+            self.discovery_description_byte_count.set(
+                f"CP949 변환 불가 / {DISCOVERY_DESCRIPTION_MAX_BYTES}바이트"
+            )
+            return
+        self.discovery_description_byte_count.set(
+            f"{byte_count} / {DISCOVERY_DESCRIPTION_MAX_BYTES}바이트"
+        )
 
     def _discovery_media_info(self, record: DiscoveryRecord) -> tuple[str | None, int | None, int]:
         """Return the actively selected discovery media field and its valid maximum.
@@ -3803,6 +4276,7 @@ class CDSExecutablePatcher(tk.Tk):
                 still_slot,
                 avi_id,
                 animation_part,
+                self.discovery_description_editor.get("1.0", "end-1c"),
             )
         except (ValueError, IndexError) as error:
             raise ValueError("발견물 입력값을 확인해 주세요.") from error
@@ -3814,7 +4288,7 @@ class CDSExecutablePatcher(tk.Tk):
             DiscoveryRecord(
                 record.identifier, edit.name, edit.category_id, record.game_id, edit.value,
                 edit.min_x, edit.min_y, edit.max_x, edit.max_y,
-                edit.still_slot, edit.avi_id, edit.animation_part,
+                edit.still_slot, edit.avi_id, edit.animation_part, edit.description,
             ) if record.identifier == edit.identifier else record
             for record in self._discovery_records
         )
@@ -3822,6 +4296,579 @@ class CDSExecutablePatcher(tk.Tk):
         self._refresh_discovery_list()
         self._configure_hint_target_values()
         self._refresh_hint_list()
+
+    def _set_discovery_hint_controls_enabled(self, enabled: bool) -> None:
+        for control in self._discovery_hint_controls:
+            if isinstance(control, NativeWinEdit):
+                control.set_enabled(enabled)
+            elif isinstance(control, ttk.Treeview):
+                control.configure(selectmode="browse" if enabled else "none")
+
+    def _schedule_discovery_hint_list_refresh(self) -> None:
+        job = getattr(self, "_discovery_hint_search_job", None)
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+        self._discovery_hint_search_job = self.after(
+            120, self._refresh_discovery_hint_list,
+        )
+
+    def _library_book_for_display(
+        self, source: DiscoveryHintBookSource,
+    ) -> tuple[str, str, tuple[int, ...]]:
+        pending = self._library_book_edits.get(source.record_number)
+        if pending is not None:
+            return pending.title, pending.author, pending.city_ids
+        return source.title, source.author, source.city_ids
+
+    def _refresh_discovery_hint_list(self) -> None:
+        tree = self.discovery_hint_list
+        selected = tree.selection()
+        selected_identifier = selected[0] if selected else ""
+        tree.delete(*tree.get_children())
+        query = self.discovery_hint_search_entry.get().strip().casefold()
+        for link in self._discovery_hint_links:
+            book_titles = tuple(dict.fromkeys(
+                (
+                    *(
+                        self._library_book_for_display(source)[0]
+                        for source in link.book_sources
+                    ),
+                    *(source.name for source in link.item_sources),
+                )
+            ))
+            authors = tuple(dict.fromkeys(
+                self._library_book_for_display(source)[1]
+                for source in link.book_sources
+            ))
+            book_title_text = " / ".join(book_titles) or "출처 연결 없음"
+            author_text = " / ".join(authors) or "-"
+            target_names = " / ".join(target.name for target in link.targets)
+            search_values = (
+                str(link.hint_id),
+                f"{link.hint_id:03d}",
+                link.hint_name,
+                str(link.target_id),
+                book_title_text,
+                author_text,
+                target_names,
+                *(target.kind for target in link.targets),
+                *(str(target.record_number) for target in link.targets),
+            )
+            if query and not any(query in value.casefold() for value in search_values):
+                continue
+            tree.insert(
+                "", "end", iid=link.identifier,
+                values=(
+                    f"{link.hint_id:03d}",
+                    book_title_text,
+                    author_text,
+                    link.target_id,
+                    target_names,
+                ),
+            )
+        self._reapply_treeview_text_sort(tree, "books")
+        if selected_identifier and tree.exists(selected_identifier):
+            tree.selection_set(selected_identifier)
+            tree.focus(selected_identifier)
+            tree.see(selected_identifier)
+
+    def _selected_discovery_hint_link(self) -> DiscoveryHintLink | None:
+        selection = self.discovery_hint_list.selection()
+        if not selection:
+            return None
+        return self._discovery_hint_by_identifier.get(selection[0])
+
+    def _load_discovery_hint_links(
+        self,
+        links: tuple[DiscoveryHintLink, ...],
+        targets: tuple[DiscoveryHintTarget, ...],
+    ) -> None:
+        self._discovery_hint_links = links
+        self._discovery_hint_condition_hint_id = None
+        self._library_book_edits.clear()
+        self._discovery_hint_by_identifier = {
+            link.identifier: link for link in links
+        }
+        self._discovery_hint_targets = targets
+        self._discovery_hint_prerequisite_ids_by_label = {
+            f"{target.record_number:03d} {target.name}": target.record_number
+            for target in targets
+        }
+        self._item_hint_ids_by_name = {
+            link.hint_name: link.hint_id for link in links
+        }
+        self.item_hint_selector.configure(
+            values=("연결 없음", *(link.hint_name for link in links)),
+        )
+        self.discovery_hint_search_entry.set("")
+        self._refresh_discovery_hint_list()
+        self._set_discovery_hint_controls_enabled(bool(links))
+        if links:
+            first_identifier = links[0].identifier
+            self.discovery_hint_list.selection_set(first_identifier)
+            self.discovery_hint_list.focus(first_identifier)
+            self._on_discovery_hint_selected()
+
+    def _on_discovery_hint_selected(self, _event: tk.Event | None = None) -> None:
+        link = self._selected_discovery_hint_link()
+        if link is None:
+            return
+        self.discovery_hint_required_skill.set(
+            "없음"
+            if link.required_skill_id < 0
+            else PERSON_SKILL_NAMES[link.required_skill_id]
+        )
+        self.discovery_hint_required_language.set(
+            "없음"
+            if link.required_language_id < 0
+            else BARMAID_LANGUAGE_NAMES[link.required_language_id]
+        )
+        self.discovery_hint_required_level.set(str(link.required_level))
+        self.discovery_hint_name.set(link.hint_name)
+        self.discovery_hint_target_id.set(str(link.target_id))
+        labels_by_id = {
+            record_number: label
+            for label, record_number in self._discovery_hint_prerequisite_ids_by_label.items()
+        }
+        prerequisite_labels = tuple(
+            labels_by_id[target.record_number]
+            for target in link.prerequisite_discoveries
+        )
+        for index, variable in enumerate(self.discovery_hint_prerequisites):
+            variable.set(
+                prerequisite_labels[index]
+                if index < len(prerequisite_labels) else "없음"
+            )
+        self._discovery_hint_condition_hint_id = link.hint_id
+
+    def _show_discovery_hint_details(self, event: tk.Event | None = None) -> None:
+        if event is not None:
+            row_identifier = self.discovery_hint_list.identify_row(event.y)
+            if not row_identifier:
+                return
+            self.discovery_hint_list.selection_set(row_identifier)
+            self.discovery_hint_list.focus(row_identifier)
+        link = self._selected_discovery_hint_link()
+        if link is None:
+            return
+        if self._discovery_hint_condition_hint_id != link.hint_id:
+            self._on_discovery_hint_selected()
+
+        window = tk.Toplevel(self)
+        window.withdraw()
+        window.title("힌트 정보")
+        window.geometry("820x700")
+        window.minsize(760, 620)
+        window.transient(self)
+
+        frame = ttk.Frame(window, padding=12)
+        frame.pack(fill=tk.BOTH, expand=True)
+        summary = ttk.LabelFrame(frame, text="기본 정보", padding=10)
+        summary.pack(fill=tk.X)
+        for column in (1, 3, 5):
+            summary.columnconfigure(column, weight=1)
+        ttk.Label(summary, text="힌트 ID:").grid(row=0, column=0, sticky="w")
+        ttk.Label(summary, text=f"{link.hint_id:03d}").grid(
+            row=0, column=1, padx=(7, 16), sticky="w",
+        )
+        ttk.Label(summary, text="힌트 이름:").grid(row=0, column=2, sticky="w")
+        hint_name_host = tk.Frame(summary, width=190, height=23)
+        hint_name_host.grid(row=0, column=3, padx=(7, 16), sticky="ew")
+        hint_name_entry = NativeWinEdit(
+            hint_name_host,
+            lambda: self.discovery_hint_name.set(hint_name_entry.get()),
+            width=190,
+            height=23,
+        )
+        hint_name_entry.max_characters = LIBRARY_HINT_NAME_MAX_CHARACTERS
+        hint_name_entry.max_bytes = LIBRARY_HINT_NAME_MAX_BYTES
+        window.update_idletasks()
+        hint_name_entry.set(self.discovery_hint_name.get())
+        ttk.Label(summary, text="대상 ID:").grid(row=0, column=4, sticky="w")
+        hint_target_entry = ttk.Spinbox(
+            summary, from_=0, to=0xFFFFFFFF,
+            textvariable=self.discovery_hint_target_id, width=10,
+        )
+        hint_target_entry.grid(row=0, column=5, padx=(7, 0), sticky="w")
+        self._limit_integer_input(hint_target_entry, 0, 0xFFFFFFFF)
+
+        requirement_box = ttk.LabelFrame(frame, text="열람 조건", padding=10)
+        requirement_box.pack(fill=tk.X, pady=(10, 0))
+        condition_row = ttk.Frame(requirement_box)
+        condition_row.pack(fill=tk.X)
+        condition_values = (
+            (
+                "요구 기술:", self.discovery_hint_required_skill,
+                ("없음", *PERSON_SKILL_NAMES), 15,
+            ),
+            (
+                "요구 언어:", self.discovery_hint_required_language,
+                ("없음", *BARMAID_LANGUAGE_NAMES), 18,
+            ),
+        )
+        for index, (label, variable, values, width) in enumerate(condition_values):
+            ttk.Label(condition_row, text=label).grid(
+                row=0, column=index * 2, sticky="w",
+            )
+            selector = ttk.Combobox(
+                condition_row, textvariable=variable, values=values,
+                width=width, state="readonly",
+            )
+            selector.grid(
+                row=0, column=index * 2 + 1, padx=(7, 18), sticky="w",
+            )
+            self._bind_combobox_arrow_selection(selector)
+        ttk.Label(condition_row, text="요구 레벨:").grid(
+            row=0, column=4, sticky="w",
+        )
+        required_level_entry = ttk.Spinbox(
+            condition_row, from_=0, to=3,
+            textvariable=self.discovery_hint_required_level, width=5,
+        )
+        required_level_entry.grid(row=0, column=5, padx=(7, 0), sticky="w")
+        self._limit_integer_input(required_level_entry, 0, 3)
+
+        prerequisite_box = ttk.Frame(requirement_box)
+        prerequisite_box.pack(fill=tk.X, pady=(9, 0))
+        prerequisite_values = (
+            "없음", *self._discovery_hint_prerequisite_ids_by_label.keys(),
+        )
+        for index, variable in enumerate(self.discovery_hint_prerequisites):
+            row = index // 2
+            column = (index % 2) * 2
+            ttk.Label(prerequisite_box, text=f"선행 발견물 {index + 1}:").grid(
+                row=row, column=column, pady=(0 if row == 0 else 6, 0), sticky="w",
+            )
+            selector = ttk.Combobox(
+                prerequisite_box, textvariable=variable,
+                values=prerequisite_values, width=28, state="readonly",
+            )
+            selector.grid(
+                row=row, column=column + 1,
+                padx=(7, 18 if column == 0 else 0),
+                pady=(0 if row == 0 else 6, 0), sticky="w",
+            )
+            self._bind_combobox_arrow_selection(selector)
+
+        source_box = ttk.LabelFrame(frame, text="힌트 출처", padding=8)
+        source_box.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+        source_box.columnconfigure(0, weight=1)
+        source_box.rowconfigure(0, weight=1)
+        source_tree = ttk.Treeview(
+            source_box,
+            columns=(
+                "kind", "source_id", "title", "author",
+                *(f"city{index}" for index in range(1, 9)),
+            ),
+            show="headings",
+            height=4,
+        )
+        source_tree.heading("kind", text="구분")
+        source_tree.heading("source_id", text="ID")
+        source_tree.heading("title", text="책 제목")
+        source_tree.heading("author", text="저자")
+        self._enable_treeview_text_sort(source_tree, "kind", "구분")
+        self._enable_treeview_text_sort(source_tree, "source_id", "ID")
+        self._enable_treeview_text_sort(source_tree, "title", "책 제목")
+        self._enable_treeview_text_sort(source_tree, "author", "저자")
+        for index in range(1, 9):
+            column = f"city{index}"
+            self._enable_treeview_text_sort(source_tree, column, f"도시 {index}")
+            source_tree.column(column, width=90, anchor="w", stretch=False)
+        source_tree.column("kind", width=75, anchor="center", stretch=False)
+        source_tree.column("source_id", width=50, anchor="center", stretch=False)
+        source_tree.column("title", width=150, anchor="w", stretch=False)
+        source_tree.column("author", width=150, anchor="w", stretch=False)
+        source_scroll = ttk.Scrollbar(
+            source_box, orient="vertical", command=source_tree.yview,
+        )
+        source_horizontal_scroll = ttk.Scrollbar(
+            source_box, orient="horizontal", command=source_tree.xview,
+        )
+        source_tree.configure(
+            yscrollcommand=source_scroll.set,
+            xscrollcommand=source_horizontal_scroll.set,
+        )
+        source_tree.grid(row=0, column=0, sticky="nsew")
+        source_scroll.grid(row=0, column=1, sticky="ns")
+        source_horizontal_scroll.grid(row=1, column=0, sticky="ew")
+        book_sources_by_row: dict[str, DiscoveryHintBookSource] = {}
+        if link.book_sources or link.item_sources:
+            for source in link.book_sources:
+                title, author, city_ids = self._library_book_for_display(source)
+                cities = tuple(
+                    BARMAID_CITY_NAMES[city_id]
+                    if 0 <= city_id < len(BARMAID_CITY_NAMES)
+                    else f"도시 {city_id}"
+                    for city_id in city_ids
+                )
+                city_columns = cities + ("없음",) * (8 - len(cities))
+                row_identifier = f"book:{source.record_number}"
+                book_sources_by_row[row_identifier] = source
+                source_tree.insert(
+                    "", "end", iid=row_identifier,
+                    values=(
+                        "도서관", f"{source.record_number:03d}",
+                        title, author, *city_columns,
+                    ),
+                )
+            for source in link.item_sources:
+                source_tree.insert(
+                    "", "end", iid=f"item:{source.record_number}",
+                    values=(
+                        "서적 아이템", f"{source.record_number:03d}",
+                        source.name, "-", *("-",) * 8,
+                    ),
+                )
+        else:
+            source_tree.insert(
+                "", "end",
+                values=("-", "-", "출처 연결 없음", "-", *("-",) * 8),
+            )
+
+        def edit_book_source(event: tk.Event) -> None:
+            row_identifier = source_tree.identify_row(event.y)
+            source = book_sources_by_row.get(row_identifier)
+            if source is None:
+                return
+            source_tree.selection_set(row_identifier)
+            source_tree.focus(row_identifier)
+
+            def update_row(edit: LibraryBookEdit) -> None:
+                city_names = tuple(
+                    BARMAID_CITY_NAMES[city_id] for city_id in edit.city_ids
+                )
+                city_columns = city_names + ("없음",) * (8 - len(city_names))
+                source_tree.item(
+                    row_identifier,
+                    values=(
+                        "도서관", f"{edit.record_number:03d}",
+                        edit.title, edit.author, *city_columns,
+                    ),
+                )
+                self._reapply_treeview_text_sort(source_tree, "title")
+                self._refresh_discovery_hint_list()
+
+            self._show_library_book_editor(source, window, update_row)
+
+        source_tree.bind("<Double-1>", edit_book_source)
+
+        target_box = ttk.LabelFrame(frame, text="연결 대상", padding=8)
+        target_box.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+        target_box.columnconfigure(0, weight=1)
+        target_box.rowconfigure(0, weight=1)
+        target_tree = ttk.Treeview(
+            target_box,
+            columns=("kind", "record", "name"),
+            show="headings",
+            height=4,
+        )
+        target_tree.heading("kind", text="구분")
+        target_tree.heading("record", text="레코드")
+        target_tree.heading("name", text="이름")
+        self._enable_treeview_text_sort(target_tree, "kind", "구분")
+        self._enable_treeview_text_sort(target_tree, "record", "레코드")
+        self._enable_treeview_text_sort(target_tree, "name", "이름")
+        target_tree.column("kind", width=70, anchor="center", stretch=False)
+        target_tree.column("record", width=70, anchor="center", stretch=False)
+        target_tree.column("name", width=450, anchor="w", stretch=True)
+        target_scroll = ttk.Scrollbar(
+            target_box, orient="vertical", command=target_tree.yview,
+        )
+        target_tree.configure(yscrollcommand=target_scroll.set)
+        target_tree.grid(row=0, column=0, sticky="nsew")
+        target_scroll.grid(row=0, column=1, sticky="ns")
+        for target in link.targets:
+            target_tree.insert(
+                "", "end",
+                values=(target.kind, f"{target.record_number:03d}", target.name),
+            )
+
+        def close_window() -> None:
+            self.discovery_hint_name.set(hint_name_entry.get_limited())
+            window.destroy()
+
+        ttk.Button(frame, text="닫기", command=close_window).pack(pady=(10, 0))
+        window.protocol("WM_DELETE_WINDOW", close_window)
+        self._center_dialog(window)
+        window.deiconify()
+        window.lift()
+        window.grab_set()
+
+    def _show_library_book_editor(
+        self,
+        source: DiscoveryHintBookSource,
+        parent: tk.Toplevel,
+        on_saved,
+    ) -> None:
+        title, author, city_ids = self._library_book_for_display(source)
+        window = tk.Toplevel(self)
+        window.withdraw()
+        window.title("도서관 책 정보")
+        window.geometry("570x390")
+        window.resizable(False, False)
+        window.transient(parent)
+
+        frame = ttk.Frame(window, padding=12)
+        frame.pack(fill=tk.BOTH, expand=True)
+        basic_box = ttk.LabelFrame(frame, text="기본 정보", padding=10)
+        basic_box.pack(fill=tk.X)
+        basic_box.columnconfigure(1, weight=1)
+        ttk.Label(basic_box, text="책 ID:").grid(row=0, column=0, sticky="w")
+        ttk.Label(basic_box, text=f"{source.record_number:03d}").grid(
+            row=0, column=1, padx=(8, 0), sticky="w",
+        )
+        ttk.Label(basic_box, text="책 제목:").grid(
+            row=1, column=0, pady=(8, 0), sticky="w",
+        )
+        title_host = tk.Frame(basic_box, width=430, height=23)
+        title_host.grid(row=1, column=1, padx=(8, 0), pady=(8, 0), sticky="ew")
+        title_editor = NativeWinEdit(
+            title_host, lambda: None, width=430, height=23,
+        )
+        title_editor.max_characters = LIBRARY_BOOK_TITLE_MAX_CHARACTERS
+        title_editor.max_bytes = LIBRARY_BOOK_TITLE_MAX_BYTES
+
+        ttk.Label(basic_box, text="저자:").grid(
+            row=2, column=0, pady=(8, 0), sticky="w",
+        )
+        author_host = tk.Frame(basic_box, width=430, height=23)
+        author_host.grid(row=2, column=1, padx=(8, 0), pady=(8, 0), sticky="ew")
+        author_editor = NativeWinEdit(
+            author_host, lambda: None, width=430, height=23,
+        )
+        author_editor.max_characters = LIBRARY_BOOK_AUTHOR_MAX_CHARACTERS
+        author_editor.max_bytes = LIBRARY_BOOK_AUTHOR_MAX_BYTES
+
+        city_box = ttk.LabelFrame(frame, text="출현 도시", padding=10)
+        city_box.pack(fill=tk.X, pady=(10, 0))
+        city_values = ("없음", *BARMAID_CITY_NAMES)
+        padded_city_ids = city_ids + (-1,) * (8 - len(city_ids))
+        city_variables = [
+            tk.StringVar(
+                value="없음" if city_id < 0 else BARMAID_CITY_NAMES[city_id]
+            )
+            for city_id in padded_city_ids
+        ]
+        for index, variable in enumerate(city_variables):
+            row = index % 4
+            column = (index // 4) * 2
+            ttk.Label(city_box, text=f"도시 {index + 1}:").grid(
+                row=row, column=column,
+                pady=(0 if row == 0 else 8, 0), sticky="w",
+            )
+            selector = ttk.Combobox(
+                city_box,
+                textvariable=variable,
+                values=city_values,
+                width=18,
+                state="readonly",
+            )
+            selector.grid(
+                row=row, column=column + 1,
+                padx=(7, 20 if column == 0 else 0),
+                pady=(0 if row == 0 else 8, 0), sticky="w",
+            )
+            self._bind_combobox_arrow_selection(selector)
+
+        window.update_idletasks()
+        title_editor.set(title)
+        author_editor.set(author)
+
+        def close_window() -> None:
+            try:
+                window.grab_release()
+            except tk.TclError:
+                pass
+            window.destroy()
+            if parent.winfo_exists():
+                parent.grab_set()
+                parent.focus_force()
+
+        def save_book() -> None:
+            edited_title = title_editor.get_limited().strip()
+            edited_author = author_editor.get_limited().strip()
+            if not edited_title:
+                messagebox.showwarning(
+                    "책 제목 필요", "책 제목을 입력해 주세요.", parent=window,
+                )
+                return
+            if not edited_author:
+                messagebox.showwarning(
+                    "저자 필요", "저자를 입력해 주세요.", parent=window,
+                )
+                return
+            edited_city_ids = tuple(
+                BARMAID_CITY_NAMES.index(variable.get())
+                for variable in city_variables
+                if variable.get() != "없음"
+            )
+            if len(set(edited_city_ids)) != len(edited_city_ids):
+                messagebox.showwarning(
+                    "출현 도시 중복",
+                    "같은 출현 도시는 두 번 설정할 수 없습니다.",
+                    parent=window,
+                )
+                return
+            edit = LibraryBookEdit(
+                source.record_number,
+                edited_title,
+                edited_author,
+                edited_city_ids,
+            )
+            original = LibraryBookEdit(
+                source.record_number, source.title, source.author, source.city_ids,
+            )
+            if edit == original:
+                self._library_book_edits.pop(source.record_number, None)
+            else:
+                self._library_book_edits[source.record_number] = edit
+            on_saved(edit)
+            close_window()
+
+        buttons = ttk.Frame(frame)
+        buttons.pack(pady=(10, 0))
+        ttk.Button(buttons, text="확인", command=save_book).pack(side=tk.LEFT)
+        ttk.Button(buttons, text="취소", command=close_window).pack(
+            side=tk.LEFT, padx=(8, 0),
+        )
+        window.protocol("WM_DELETE_WINDOW", close_window)
+        self._center_dialog(window)
+        window.deiconify()
+        window.lift()
+        window.grab_set()
+        window.focus_force()
+
+    def _current_discovery_hint_edit(
+        self,
+    ) -> DiscoveryHintEdit | None:
+        link = self._selected_discovery_hint_link()
+        if link is None:
+            return None
+        if self._discovery_hint_condition_hint_id != link.hint_id:
+            self._on_discovery_hint_selected()
+        try:
+            skill_name = self.discovery_hint_required_skill.get()
+            language_name = self.discovery_hint_required_language.get()
+            prerequisites = tuple(
+                self._discovery_hint_prerequisite_ids_by_label[label]
+                for variable in self.discovery_hint_prerequisites
+                if (label := variable.get()) != "없음"
+            )
+            return DiscoveryHintEdit(
+                link.hint_id,
+                self.discovery_hint_name.get().strip(),
+                int(self.discovery_hint_target_id.get()),
+                -1 if skill_name == "없음" else PERSON_SKILL_NAMES.index(skill_name),
+                -1 if language_name == "없음" else BARMAID_LANGUAGE_NAMES.index(language_name),
+                int(self.discovery_hint_required_level.get()),
+                prerequisites,
+            )
+        except (ValueError, KeyError) as error:
+            raise ValueError("힌트 열람 조건 입력값을 확인해 주세요.") from error
 
     def _set_hint_controls_enabled(self, enabled: bool) -> None:
         for control in self._hint_controls:
@@ -3871,6 +4918,7 @@ class CDSExecutablePatcher(tk.Tk):
                 "", "end", iid=str(record.identifier),
                 values=(record.target_code, target_label, summary),
             )
+        self._reapply_treeview_text_sort(tree, "id")
         if selected_identifier and tree.exists(selected_identifier):
             tree.selection_set(selected_identifier)
             tree.focus(selected_identifier)
@@ -3932,6 +4980,22 @@ class CDSExecutablePatcher(tk.Tk):
         self.hint_text_editor.insert("1.0", record.text)
         self.hint_text_editor.edit_modified(False)
         self._update_hint_text_byte_count()
+
+    def _show_hint_details(self, event: tk.Event | None = None) -> None:
+        if event is not None:
+            row_identifier = self.hint_list.identify_row(event.y)
+            if not row_identifier:
+                return
+            self.hint_list.selection_set(row_identifier)
+            self.hint_list.focus(row_identifier)
+        if self._selected_hint_record() is None:
+            return
+        self._on_hint_selected()
+        self.hint_detail_window.deiconify()
+        self.hint_detail_window.lift()
+        self._center_dialog(self.hint_detail_window)
+        self.hint_detail_window.grab_set()
+        self.hint_detail_window.focus_force()
 
     def _on_hint_text_modified(self, _event: tk.Event | None = None) -> None:
         if not self.hint_text_editor.edit_modified():
@@ -4093,6 +5157,7 @@ class CDSExecutablePatcher(tk.Tk):
             if query and query not in record.name.casefold():
                 continue
             tree.insert("", tk.END, iid=str(record.identifier), values=(f"{record.identifier:03d}", record.name))
+        self._reapply_treeview_text_sort(tree, "name")
         if selected_identifier and tree.exists(selected_identifier):
             tree.selection_set(selected_identifier)
             tree.focus(selected_identifier)
@@ -4284,6 +5349,7 @@ class CDSExecutablePatcher(tk.Tk):
                     tree.item(item_id, values=values)
                 else:
                     tree.insert("", tk.END, iid=item_id, values=values)
+            self._reapply_treeview_text_sort(tree, "stage")
 
     def _edit_pirate_probability(self, event: tk.Event, region: str) -> None:
         if not self.pirate_variety_enabled.get():
@@ -4356,6 +5422,7 @@ class CDSExecutablePatcher(tk.Tk):
                     failed_pottery_enabled,
                     judgment_fix_enabled,
                     cannon_accuracy_fix_enabled,
+                    ship_reuse_fix_enabled,
                     knossos_hint_fix_enabled,
                     discover_avi_enabled,
                 ) = read_settings(target)
@@ -4372,6 +5439,8 @@ class CDSExecutablePatcher(tk.Tk):
                 fake_item_records = read_fake_item_records(target)
                 figurehead_effect_settings = read_figurehead_effect_settings(target)
                 discovery_records = read_discovery_records(target)
+                discovery_hint_links = read_discovery_hint_links(target)
+                discovery_hint_targets = read_discovery_hint_targets(target)
                 hint_records = read_hint_records(target)
                 discovery_slot_count = discovery_still_count(target)
                 portrait_counts = {
@@ -4398,6 +5467,9 @@ class CDSExecutablePatcher(tk.Tk):
             self._load_person_records(person_records)
             self._load_ship_type_records(ship_type_records)
             self._load_discovery_records(discovery_records)
+            self._load_discovery_hint_links(
+                discovery_hint_links, discovery_hint_targets,
+            )
             self._load_item_records(item_records, item_discovery_media_links)
             self._load_figurehead_effect_settings(figurehead_effect_settings)
             self._load_city_records(city_records, trade_good_names, trade_region_goods)
@@ -4425,6 +5497,7 @@ class CDSExecutablePatcher(tk.Tk):
                 failed_pottery_enabled
                 or judgment_fix_enabled
                 or cannon_accuracy_fix_enabled
+                or ship_reuse_fix_enabled
                 or knossos_hint_fix_enabled
             )
             self.discover_avi_enabled.set(discover_avi_enabled)
@@ -4451,6 +5524,14 @@ class CDSExecutablePatcher(tk.Tk):
             except MughalPatchError as exc:
                 self.mughal_enabled.set(False)
                 self._mughal_was_enabled = False
+                discovery_errors.append(str(exc))
+            try:
+                sea_monster_patch_enabled = is_sea_monster_patch_enabled(target)
+                self.sea_monster_patch_enabled.set(sea_monster_patch_enabled)
+                self._sea_monster_patch_was_enabled = sea_monster_patch_enabled
+            except SeaMonsterPatchError as exc:
+                self.sea_monster_patch_enabled.set(False)
+                self._sea_monster_patch_was_enabled = False
                 discovery_errors.append(str(exc))
             if discovery_errors:
                 messagebox.showwarning(
@@ -4762,6 +5843,10 @@ class CDSExecutablePatcher(tk.Tk):
             figurehead_effect_settings = self._current_figurehead_effect_settings()
             discovery_edit = self._current_discovery_edit()
             hint_edit = self._current_hint_edit()
+            discovery_hint_edit = self._current_discovery_hint_edit()
+            library_book_edits = tuple(
+                self._library_book_edits.values()
+            )
             target = Path(self.path.get())
             backed_up_paths: set[Path] = set()
             discover_avi_installed = (
@@ -4789,6 +5874,7 @@ class CDSExecutablePatcher(tk.Tk):
                 self.bug_fixes_enabled.get(),
                 self.bug_fixes_enabled.get(),
                 self.bug_fixes_enabled.get(),
+                self.bug_fixes_enabled.get(),
                 self.discover_avi_enabled.get(),
                 figurehead_effect_settings,
                 barmaid_edit,
@@ -4801,6 +5887,8 @@ class CDSExecutablePatcher(tk.Tk):
                 fake_item_edit,
                 discovery_edit,
                 hint_edit,
+                discovery_hint_edit,
+                library_book_edits,
             )
             if backup is not None:
                 backed_up_paths.add(target.resolve())
@@ -4822,11 +5910,16 @@ class CDSExecutablePatcher(tk.Tk):
                 mughal_backups = apply_mughal_patch(
                     target, self.mughal_enabled.get(), backed_up_paths
                 )
+            sea_monster_backups: tuple[Path, ...] = ()
+            if self.sea_monster_patch_enabled.get() or self._sea_monster_patch_was_enabled:
+                sea_monster_backups = apply_sea_monster_patch(
+                    target, self.sea_monster_patch_enabled.get(), backed_up_paths
+                )
             self.cold_north_latitude.set(f"{cold_limit_to_latitude(cold_north_limit):.3f}")
             self.cold_south_latitude.set(f"{cold_limit_to_latitude(cold_south_limit):.3f}")
         except (
             ValueError, DiscoverAviAssetError, KaabaPatchError, KaabaSavePatchError,
-            SlavePatchError, MughalPatchError,
+            SlavePatchError, MughalPatchError, SeaMonsterPatchError,
         ) as exc:
             messagebox.showerror("입력 또는 패치 오류", str(exc), parent=self)
             return
@@ -4835,12 +5928,14 @@ class CDSExecutablePatcher(tk.Tk):
             return
         if (backup is None and not kaaba_backups and kaaba_save_backup is None
                 and not slave_library_backups and not slave_dialogue_backups and not mughal_backups
+                and not sea_monster_backups
                 and not discover_avi_installed):
             messagebox.showinfo("완료", "선택한 설정이 이미 적용되어 있습니다.", parent=self)
         else:
             backups = [
                 backup, *kaaba_backups, kaaba_save_backup,
                 *slave_library_backups, *slave_dialogue_backups, *mughal_backups,
+                *sea_monster_backups,
             ]
             backup_text = "\n".join(str(path) for path in backups if path is not None)
             details = ["선택한 설정을 적용했습니다."]
@@ -4863,10 +5958,14 @@ class CDSExecutablePatcher(tk.Tk):
         selected_fake = self.fake_item_list.selection()
         selected_hint = self.hint_list.selection()
         selected_discovery = self.discovery_list.selection()
+        selected_discovery_hint = self.discovery_hint_list.selection()
         self._load_fake_item_records(read_fake_item_records(target))
         self._load_hint_records(read_hint_records(target))
         self._item_discovery_media_links = read_item_discovery_media_links(target)
         self._load_discovery_records(read_discovery_records(target))
+        self._load_discovery_hint_links(
+            read_discovery_hint_links(target), read_discovery_hint_targets(target),
+        )
         if selected_fake and self.fake_item_list.exists(selected_fake[0]):
             self.fake_item_list.selection_set(selected_fake[0])
             self.fake_item_list.focus(selected_fake[0])
@@ -4879,8 +5978,13 @@ class CDSExecutablePatcher(tk.Tk):
             self.discovery_list.selection_set(selected_discovery[0])
             self.discovery_list.focus(selected_discovery[0])
             self._on_discovery_selected()
+        if selected_discovery_hint and self.discovery_hint_list.exists(selected_discovery_hint[0]):
+            self.discovery_hint_list.selection_set(selected_discovery_hint[0])
+            self.discovery_hint_list.focus(selected_discovery_hint[0])
+            self._on_discovery_hint_selected()
         self._slave_was_enabled = self.slave_enabled.get()
         self._mughal_was_enabled = self.mughal_enabled.get()
+        self._sea_monster_patch_was_enabled = self.sea_monster_patch_enabled.get()
 
 
 if __name__ == "__main__":
