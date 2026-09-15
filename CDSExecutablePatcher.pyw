@@ -1386,19 +1386,32 @@ class CDSExecutablePatcher(tk.Tk):
         person_search_host = tk.Frame(person_list_box, width=150, height=23)
         person_search_host.grid(row=0, column=1, padx=(6, 0), sticky="w")
         self.person_search_entry = NativeWinEdit(person_search_host, self._schedule_person_list_refresh, width=150, height=23)
-        person_list_frame = ttk.Frame(person_list_box)
-        person_list_frame.grid(row=1, column=0, columnspan=2, pady=(8, 0), sticky="nsew")
-        self.person_list = ttk.Treeview(person_list_frame, columns=("id", "name"), show="headings", height=15, selectmode="browse")
-        self.person_list.heading("id", text="번호"); self.person_list.heading("name", text="이름")
-        self._enable_treeview_text_sort(self.person_list, "id", "번호")
-        self._enable_treeview_text_sort(self.person_list, "name", "이름")
-        self.person_list.column("id", width=48, anchor="center", stretch=False); self.person_list.column("name", width=175, anchor="w")
-        person_scroll = ttk.Scrollbar(person_list_frame, orient="vertical", command=self.person_list.yview)
-        self.person_list.configure(yscrollcommand=person_scroll.set)
-        self.person_list.grid(row=0, column=0, sticky="nsew"); person_scroll.grid(row=0, column=1, sticky="ns")
-        self.person_list.bind("<<TreeviewSelect>>", self._on_person_selected)
-        person_list_frame.columnconfigure(0, weight=1)
-        person_list_frame.rowconfigure(0, weight=1)
+        self.person_list_notebook = ttk.Notebook(person_list_box)
+        self.person_list_notebook.grid(row=1, column=0, columnspan=2, pady=(8, 0), sticky="nsew")
+        self.person_lists: dict[str, ttk.Treeview] = {}
+        for category_key, category_label in (
+            ("general", "일반"),
+            ("event", "이벤트"),
+            ("land", "육상전"),
+            ("sea", "해상전"),
+            ("monster", "해수괴·더미"),
+        ):
+            category_tab = ttk.Frame(self.person_list_notebook)
+            category_tab.columnconfigure(0, weight=1)
+            category_tab.rowconfigure(0, weight=1)
+            self.person_list_notebook.add(category_tab, text=category_label)
+            tree = ttk.Treeview(category_tab, columns=("id", "name"), show="headings", height=15, selectmode="browse")
+            tree.heading("id", text="번호"); tree.heading("name", text="이름")
+            self._enable_treeview_text_sort(tree, "id", "번호")
+            self._enable_treeview_text_sort(tree, "name", "이름")
+            tree.column("id", width=48, anchor="center", stretch=False); tree.column("name", width=175, anchor="w")
+            person_scroll = ttk.Scrollbar(category_tab, orient="vertical", command=tree.yview)
+            tree.configure(yscrollcommand=person_scroll.set)
+            tree.grid(row=0, column=0, sticky="nsew"); person_scroll.grid(row=0, column=1, sticky="ns")
+            tree.bind("<<TreeviewSelect>>", self._on_person_selected)
+            self.person_lists[category_key] = tree
+        self.person_list = self.person_lists["general"]
+        self.person_list_notebook.bind("<<NotebookTabChanged>>", self._on_person_category_changed)
 
         person_details = ttk.Notebook(person_tab)
         person_details.grid(row=0, column=1, padx=(10, 0), sticky="nw")
@@ -1414,7 +1427,7 @@ class CDSExecutablePatcher(tk.Tk):
         preview_box = tk.Frame(person_box, width=84, height=100, bg="#222222", relief="ridge", bd=2)
         preview_box.grid(row=0, column=4, rowspan=6, padx=(14, 0), sticky="n"); preview_box.grid_propagate(False)
         self.person_image_preview = tk.Label(preview_box, bg="#222222", fg="#DDDDDD", text="이미지 없음"); self.person_image_preview.pack(fill=tk.BOTH, expand=True)
-        person_rows = (("얼굴 코드", self.person_face_code, 0, 413), ("1480년 나이", self.person_age, -100, 100), ("초기 명성", self.person_fame, 0, 65535), ("초기 악명", self.person_infamy, 0, 65535), ("고용비 계수", self.person_hire_cost, 0, 2000))
+        person_rows = (("얼굴 코드", self.person_face_code, -1, 413), ("1480년 나이", self.person_age, -100, 100), ("초기 명성", self.person_fame, 0, 65535), ("초기 악명", self.person_infamy, 0, 65535), ("고용비 계수", self.person_hire_cost, 0, 2000))
         for row, (label, variable, low, high) in enumerate(person_rows, start=1):
             ttk.Label(person_box, text=f"{label}:").grid(row=row, column=0, pady=2, sticky="w")
             entry = ttk.Spinbox(person_box, from_=low, to=high, textvariable=variable, width=7, state="disabled")
@@ -1463,7 +1476,7 @@ class CDSExecutablePatcher(tk.Tk):
             entry = ttk.Spinbox(language_box, from_=0, to=3, textvariable=variable, width=3, state="disabled")
             entry.grid(row=row, column=column + 1, padx=(4, 0), pady=2, sticky="w")
             self._limit_integer_input(entry, 0, 3); self._person_controls.append(entry)
-        self._person_controls.extend((self.person_search_entry, self.person_list))
+        self._person_controls.extend((self.person_search_entry, *self.person_lists.values()))
         self._set_person_controls_enabled(False)
 
         ship_list_box = ttk.LabelFrame(ship_tab, text="선종 목록", padding=10)
@@ -2863,12 +2876,15 @@ class CDSExecutablePatcher(tk.Tk):
         """Return the last valid portrait code from the selected game files."""
         return max(0, self._portrait_counts[female] - 1)
 
-    def _configure_face_code_entry(self, entry: ttk.Spinbox, *, female: bool) -> None:
+    def _configure_face_code_entry(
+        self, entry: ttk.Spinbox, *, female: bool, allow_none: bool = False,
+    ) -> None:
         maximum = self._portrait_max_code(female=female)
+        minimum = -1 if allow_none else 0
         entry.configure(
-            from_=0,
+            from_=minimum,
             to=maximum,
-            validatecommand=(self._integer_validation_command, "%P", "0", str(maximum)),
+            validatecommand=(self._integer_validation_command, "%P", str(minimum), str(maximum)),
         )
 
     def _configure_portrait_code_ranges(self) -> None:
@@ -2883,7 +2899,7 @@ class CDSExecutablePatcher(tk.Tk):
         except ValueError:
             person_gender = 0
         self._configure_face_code_entry(
-            self.person_face_entry, female=person_gender == 1,
+            self.person_face_entry, female=person_gender == 1, allow_none=True,
         )
 
     def _show_barmaid_face(self, face_code: int | None) -> None:
@@ -2941,13 +2957,49 @@ class CDSExecutablePatcher(tk.Tk):
         self._person_search_job = self.after(120, self._refresh_person_list)
 
     def _refresh_person_list(self) -> None:
-        tree = self.person_list; selected = tree.selection()
-        for item in tree.get_children(): tree.delete(item)
         query = self.person_search_entry.get().strip().casefold()
-        for record in self._person_records:
-            if not query or query in record.name.casefold(): tree.insert("", "end", iid=str(record.identifier), values=(f"{record.identifier:03d}", record.name))
-        self._reapply_treeview_text_sort(tree, "name")
-        if selected and tree.exists(selected[0]): tree.selection_set(selected[0])
+        for category_key, tree in self.person_lists.items():
+            selected = tree.selection()
+            tree.delete(*tree.get_children())
+            for record in self._person_records:
+                if self._person_category(record.identifier) != category_key:
+                    continue
+                if not query or query in record.name.casefold():
+                    tree.insert(
+                        "", "end", iid=str(record.identifier),
+                        values=(f"{record.identifier:03d}", record.name),
+                    )
+            self._reapply_treeview_text_sort(tree, "name")
+            if selected and tree.exists(selected[0]):
+                tree.selection_set(selected[0])
+
+    @staticmethod
+    def _person_category(identifier: int) -> str:
+        if identifier <= 204:
+            return "general"
+        if identifier <= 245:
+            return "event"
+        if identifier <= 261:
+            return "land"
+        if identifier <= 270:
+            return "sea"
+        return "monster"
+
+    def _on_person_category_changed(self, _event: tk.Event | None = None) -> None:
+        if not hasattr(self, "person_list_notebook"):
+            return
+        category_keys = tuple(self.person_lists)
+        tab_index = self.person_list_notebook.index("current")
+        if not 0 <= tab_index < len(category_keys):
+            return
+        self.person_list = self.person_lists[category_keys[tab_index]]
+        selection = self.person_list.selection()
+        if not selection:
+            children = self.person_list.get_children()
+            if children:
+                self.person_list.selection_set(children[0])
+                self.person_list.focus(children[0])
+        self._on_person_selected()
 
     def _selected_person_record(self) -> PersonRecord | None:
         selection = self.person_list.selection()
@@ -2957,9 +3009,19 @@ class CDSExecutablePatcher(tk.Tk):
         self._person_records = records; self._person_by_identifier = {record.identifier: record for record in records}
         self.person_search_entry.set(""); self._refresh_person_list(); self._set_person_controls_enabled(bool(records))
         if records:
-            self.person_list.selection_set(str(records[0].identifier)); self._on_person_selected()
+            first = self.person_list.get_children()
+            if first:
+                self.person_list.selection_set(first[0]); self.person_list.focus(first[0])
+            self._on_person_selected()
 
     def _on_person_selected(self, _event: tk.Event | None = None) -> None:
+        if _event is not None and isinstance(_event.widget, ttk.Treeview):
+            self.person_list = _event.widget
+            for tree in self.person_lists.values():
+                if tree is not self.person_list:
+                    other_selection = tree.selection()
+                    if other_selection:
+                        tree.selection_remove(*other_selection)
         record = self._selected_person_record()
         if not record: return
         self.person_name.set(record.name); self.person_gender.set(SPONSOR_GENDER_NAMES[record.gender]); self.person_face_code.set(str(record.face_code)); self.person_age.set(str(record.age_at_1480)); self.person_nation.set(SPONSOR_NATION_NAMES[record.nation_id]); self.person_job.set(PERSON_JOB_NAMES[record.job_id]); self.person_fame.set(str(record.fame)); self.person_infamy.set(str(record.infamy)); self.person_employment_state.set(PERSON_EMPLOYMENT_STATE_NAMES[record.employment_state]); self.person_city.set("도시 없음" if record.city_id < 0 else BARMAID_CITY_NAMES[record.city_id]); self.person_building.set(SPONSOR_BUILDING_NAMES[record.building_id]); self.person_blood.set(PERSON_BLOOD_NAMES[record.blood_id]); self.person_hire_cost.set(str(record.hire_cost))
@@ -2971,12 +3033,14 @@ class CDSExecutablePatcher(tk.Tk):
     def _on_person_face_code_changed(self, *_args: str) -> None:
         try:
             gender = SPONSOR_GENDER_NAMES.index(self.person_gender.get())
-            self._configure_face_code_entry(self.person_face_entry, female=gender == 1)
+            self._configure_face_code_entry(
+                self.person_face_entry, female=gender == 1, allow_none=True,
+            )
             self._show_person_face(int(self.person_face_code.get()), gender)
         except ValueError: self._show_person_face(None, None)
 
     def _show_person_face(self, face_code: int | None, gender: int | None) -> None:
-        if face_code is None or gender not in (0, 1): self._person_face_photo = None; self.person_image_preview.configure(image="", text="이미지 없음"); return
+        if face_code is None or face_code < 0 or gender not in (0, 1): self._person_face_photo = None; self.person_image_preview.configure(image="", text="이미지 없음"); return
         try:
             source = self._read_game_portrait(face_code, female=gender == 1); self._person_face_photo = ImageTk.PhotoImage(source.convert("RGBA"))
             self.person_image_preview.configure(image=self._person_face_photo, text="")
@@ -2999,7 +3063,7 @@ class CDSExecutablePatcher(tk.Tk):
             city = -1 if self.person_city.get() == "도시 없음" else BARMAID_CITY_NAMES.index(self.person_city.get())
             abilities = tuple(int(variable.get()) for variable in self.person_abilities)
             skills = tuple(int(variable.get()) for variable in self.person_skill_levels)
-            if not 0 <= face_code <= self._portrait_max_code(female=gender == 1):
+            if not -1 <= face_code <= self._portrait_max_code(female=gender == 1):
                 raise ValueError("인물 얼굴 코드가 선택한 성별의 이미지 범위를 벗어났습니다.")
             return PersonEdit(record.identifier, face_code, gender, int(self.person_age.get()), SPONSOR_NATION_NAMES.index(self.person_nation.get()), PERSON_JOB_NAMES.index(self.person_job.get()), int(self.person_fame.get()), int(self.person_infamy.get()), PERSON_EMPLOYMENT_STATE_NAMES.index(self.person_employment_state.get()), city, SPONSOR_BUILDING_NAMES.index(self.person_building.get()), PERSON_BLOOD_NAMES.index(self.person_blood.get()), int(self.person_vitality.get()), int(self.person_hire_cost.get()), abilities, skills)
         except (ValueError, IndexError) as error: raise ValueError("인물 입력값을 확인해 주세요.") from error

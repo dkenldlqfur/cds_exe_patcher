@@ -294,7 +294,7 @@ class SponsorEdit:
 
 @dataclass(frozen=True)
 class PersonRecord:
-    """One general-person master record embedded in the executable."""
+    """One person or event-actor master record embedded in the executable."""
 
     identifier: int
     name: str
@@ -317,7 +317,7 @@ class PersonRecord:
 
 @dataclass(frozen=True)
 class PersonEdit:
-    """The documented, fixed-width initial fields of one general person."""
+    """The documented, fixed-width initial fields of one person or actor."""
 
     identifier: int
     face_code: int
@@ -803,7 +803,11 @@ SPONSOR_PREFERENCE_MASK = 0xFF
 SPONSOR_LANGUAGE_MASK = (1 << 14) - 1
 SPONSOR_EDITABLE_FLAGS_MASK = SPONSOR_PREFERENCE_MASK | (SPONSOR_LANGUAGE_MASK << 16)
 PERSON_TABLE_FILE_OFFSET = 0x0DD9F0
-PERSON_RECORD_COUNT = 205
+# The EXE owns 0x119 (281) static person records.  IDs 0~204 are the
+# persistent people mirrored by SAVEDATA.CDS, 205~275 are event/battle
+# actors, and 276~280 are internal accumulator rows rather than people.
+PERSON_MASTER_RECORD_COUNT = 281
+PERSON_RECORD_COUNT = 276
 PERSON_RECORD_SIZE = 0xCC
 PERSON_FIRST_NAME_POINTER_OFFSET = 0x00
 PERSON_LAST_NAME_POINTER_OFFSET = 0x04
@@ -3098,8 +3102,8 @@ def apply_barmaid_edit(data: bytearray, edit: BarmaidEdit | None) -> bool:
 
 
 def _read_person_records_from_data(data: bytes) -> tuple[PersonRecord, ...]:
-    """Read the 205 general-person master records without touching dynamic saves."""
-    if PERSON_TABLE_FILE_OFFSET + PERSON_RECORD_COUNT * PERSON_RECORD_SIZE > len(data):
+    """Read editable person and event-actor records without touching saves."""
+    if PERSON_TABLE_FILE_OFFSET + PERSON_MASTER_RECORD_COUNT * PERSON_RECORD_SIZE > len(data):
         raise ValueError("인물 마스터 테이블의 범위를 검증하지 못했습니다.")
     pe = pefile.PE(data=data, fast_load=True)
     try:
@@ -3117,7 +3121,10 @@ def _read_person_records_from_data(data: bytes) -> tuple[PersonRecord, ...]:
                     raise ValueError(f"인물 {identifier}번 이름의 끝을 찾지 못했습니다.")
                 return data[text_offset:end].decode("cp949")
             first, last = string_at(PERSON_FIRST_NAME_POINTER_OFFSET), string_at(PERSON_LAST_NAME_POINTER_OFFSET)
-            face, gender = struct.unpack_from("<II", data, offset + PERSON_FACE_CODE_OFFSET)
+            face_raw, gender = struct.unpack_from("<II", data, offset + PERSON_FACE_CODE_OFFSET)
+            # Sea monsters use 0xFFFFFFFF to mean that no MALE/FEMALE portrait
+            # is associated with the actor.
+            face = -1 if face_raw == 0xFFFFFFFF else face_raw
             age, nation, job = struct.unpack_from("<iii", data, offset + PERSON_AGE_AT_1480_OFFSET)[0], struct.unpack_from("<i", data, offset + PERSON_NATION_ID_OFFSET)[0], struct.unpack_from("<i", data, offset + PERSON_JOB_ID_OFFSET)[0]
             fame, infamy = struct.unpack_from("<II", data, offset + PERSON_FAME_OFFSET)
             employment_state = struct.unpack_from("<i", data, offset + PERSON_EMPLOYMENT_STATE_OFFSET)[0]
@@ -3126,7 +3133,7 @@ def _read_person_records_from_data(data: bytes) -> tuple[PersonRecord, ...]:
             hire_cost = struct.unpack_from("<I", data, offset + PERSON_HIRE_COST_OFFSET)[0]
             abilities = struct.unpack_from(f"<{PERSON_ABILITY_COUNT}I", data, offset + PERSON_ABILITIES_OFFSET)
             skills = struct.unpack_from(f"<{PERSON_SKILL_COUNT}I", data, offset + PERSON_SKILLS_OFFSET)
-            if gender not in (0, 1) or not (0 <= face <= (143 if gender else 413)) or not -100 <= age <= 100 or not 0 <= nation <= 18 or not 0 <= job <= 3 or not 0 <= fame <= 65535 or not 0 <= infamy <= 65535 or employment_state not in (0, 1, 2) or not -1 <= city <= 225 or not 0 <= building <= 15 or not 0 <= blood <= 3 or not 0 <= vitality <= PERSON_VITALITY_MAX or not 0 <= hire_cost <= 2000 or any(not 0 <= value <= PERSON_ABILITY_MAX for value in abilities) or any(not 0 <= value <= PERSON_SKILL_MAX for value in skills):
+            if gender not in (0, 1) or not (-1 <= face <= (143 if gender else 413)) or not -100 <= age <= 100 or not 0 <= nation <= 18 or not 0 <= job <= 3 or not 0 <= fame <= 65535 or not 0 <= infamy <= 65535 or employment_state not in (0, 1, 2) or not -1 <= city <= 225 or not 0 <= building <= 15 or not 0 <= blood <= 3 or not 0 <= vitality <= PERSON_VITALITY_MAX or not 0 <= hire_cost <= 2000 or any(not 0 <= value <= PERSON_ABILITY_MAX for value in abilities) or any(not 0 <= value <= PERSON_SKILL_MAX for value in skills):
                 raise ValueError(f"인물 {identifier}번 마스터 값을 검증하지 못했습니다.")
             records.append(PersonRecord(identifier, f"{first} {last}".strip(), face, gender, age, nation, job, fame, infamy, employment_state, city, building, blood, vitality, hire_cost, abilities, skills))
         return tuple(records)
@@ -3141,13 +3148,14 @@ def read_person_records(target: Path) -> tuple[PersonRecord, ...]:
 def apply_person_edit(data: bytearray, edit: PersonEdit | None) -> bool:
     if edit is None:
         return False
-    if not 0 <= edit.identifier < PERSON_RECORD_COUNT or edit.gender not in (0, 1) or not 0 <= edit.face_code <= (143 if edit.gender else 413) or not -100 <= edit.age_at_1480 <= 100 or not 0 <= edit.nation_id <= 18 or not 0 <= edit.job_id <= 3 or not 0 <= edit.fame <= 65535 or not 0 <= edit.infamy <= 65535 or edit.employment_state not in (0, 1, 2) or not -1 <= edit.city_id <= 225 or not 0 <= edit.building_id <= 15 or not 0 <= edit.blood_id <= 3 or not 0 <= edit.vitality <= PERSON_VITALITY_MAX or not 0 <= edit.hire_cost <= 2000 or len(edit.abilities) != PERSON_ABILITY_COUNT or any(not 0 <= value <= PERSON_ABILITY_MAX for value in edit.abilities) or len(edit.skills) != PERSON_SKILL_COUNT or any(not 0 <= value <= PERSON_SKILL_MAX for value in edit.skills):
+    if not 0 <= edit.identifier < PERSON_RECORD_COUNT or edit.gender not in (0, 1) or not -1 <= edit.face_code <= (143 if edit.gender else 413) or not -100 <= edit.age_at_1480 <= 100 or not 0 <= edit.nation_id <= 18 or not 0 <= edit.job_id <= 3 or not 0 <= edit.fame <= 65535 or not 0 <= edit.infamy <= 65535 or edit.employment_state not in (0, 1, 2) or not -1 <= edit.city_id <= 225 or not 0 <= edit.building_id <= 15 or not 0 <= edit.blood_id <= 3 or not 0 <= edit.vitality <= PERSON_VITALITY_MAX or not 0 <= edit.hire_cost <= 2000 or len(edit.abilities) != PERSON_ABILITY_COUNT or any(not 0 <= value <= PERSON_ABILITY_MAX for value in edit.abilities) or len(edit.skills) != PERSON_SKILL_COUNT or any(not 0 <= value <= PERSON_SKILL_MAX for value in edit.skills):
         raise ValueError("인물 입력값을 확인해 주세요.")
     current = _read_person_records_from_data(bytes(data))[edit.identifier]
     if (current.face_code, current.gender, current.age_at_1480, current.nation_id, current.job_id, current.fame, current.infamy, current.employment_state, current.city_id, current.building_id, current.blood_id, current.vitality, current.hire_cost, current.abilities, current.skills) == (edit.face_code, edit.gender, edit.age_at_1480, edit.nation_id, edit.job_id, edit.fame, edit.infamy, edit.employment_state, edit.city_id, edit.building_id, edit.blood_id, edit.vitality, edit.hire_cost, edit.abilities, edit.skills):
         return False
     offset = PERSON_TABLE_FILE_OFFSET + edit.identifier * PERSON_RECORD_SIZE
-    struct.pack_into("<IIi", data, offset + PERSON_FACE_CODE_OFFSET, edit.face_code, edit.gender, edit.age_at_1480)
+    face_raw = 0xFFFFFFFF if edit.face_code < 0 else edit.face_code
+    struct.pack_into("<IIi", data, offset + PERSON_FACE_CODE_OFFSET, face_raw, edit.gender, edit.age_at_1480)
     struct.pack_into("<i", data, offset + PERSON_NATION_ID_OFFSET, edit.nation_id)
     struct.pack_into("<i", data, offset + PERSON_JOB_ID_OFFSET, edit.job_id)
     struct.pack_into("<II", data, offset + PERSON_FAME_OFFSET, edit.fame, edit.infamy)
