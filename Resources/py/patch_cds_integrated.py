@@ -124,6 +124,14 @@ CANNON_ACCURACY_CLAMP_BRANCH_VA = 0x436E59
 CANNON_ACCURACY_ORIGINAL_BRANCH = bytes.fromhex("72 30")  # JB +30h
 CANNON_ACCURACY_FIXED_BRANCH = bytes.fromhex("7C 30")     # JL +30h
 
+# DISEV numeric lookup ID 15 calls the player's generic language getter with
+# a hard-coded array index.  The Korean executable passes 10 (African native)
+# even though the Monument Valley negotiation needs index 11 (Central/South
+# American native).
+DISEV_LANGUAGE_LOOKUP_INSTRUCTION_VA = 0x4070CA
+DISEV_LANGUAGE_LOOKUP_ORIGINAL = bytes.fromhex("6A 0A")  # push 10
+DISEV_LANGUAGE_LOOKUP_FIXED = bytes.fromhex("6A 0B")     # push 11
+
 # Recycled ship slots retain their previous cannon type/count/capacity.  The
 # constructor calls the maximum-weight setter before clearing those fields,
 # and that setter adds the stale cannon weight to the new ship.  Redirect that
@@ -1968,6 +1976,47 @@ def apply_cannon_accuracy_fix(data: bytearray, enabled: bool) -> bool:
         if enabled else CANNON_ACCURACY_ORIGINAL_BRANCH
     )
     data[branch_offset:branch_offset + len(target)] = target
+    return True
+
+
+def _disev_language_fix_patch_info(data: bytes | bytearray) -> bool:
+    """Return whether DISEV lookup ID 15 uses language array index 11."""
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        if pe.FILE_HEADER.Machine != 0x14C or pe.OPTIONAL_HEADER.ImageBase != 0x400000:
+            raise ValueError("지원하는 32비트 CDS III 실행 파일이 아닙니다.")
+        instruction_offset = pe.get_offset_from_rva(
+            DISEV_LANGUAGE_LOOKUP_INSTRUCTION_VA - pe.OPTIONAL_HEADER.ImageBase
+        )
+    finally:
+        pe.close()
+    instruction = bytes(data[
+        instruction_offset:instruction_offset + len(DISEV_LANGUAGE_LOOKUP_ORIGINAL)
+    ])
+    if instruction == DISEV_LANGUAGE_LOOKUP_ORIGINAL:
+        return False
+    if instruction == DISEV_LANGUAGE_LOOKUP_FIXED:
+        return True
+    raise ValueError("DISEV 언어 숙련도 조회 명령을 검증하지 못했습니다.")
+
+
+def apply_disev_language_fix(data: bytearray, enabled: bool) -> bool:
+    """Use Central/South American instead of African for lookup ID 15."""
+    current_enabled = _disev_language_fix_patch_info(data)
+    if current_enabled == enabled:
+        return False
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        instruction_offset = pe.get_offset_from_rva(
+            DISEV_LANGUAGE_LOOKUP_INSTRUCTION_VA - pe.OPTIONAL_HEADER.ImageBase
+        )
+    finally:
+        pe.close()
+    target = (
+        DISEV_LANGUAGE_LOOKUP_FIXED
+        if enabled else DISEV_LANGUAGE_LOOKUP_ORIGINAL
+    )
+    data[instruction_offset:instruction_offset + len(target)] = target
     return True
 
 
@@ -4933,7 +4982,7 @@ def read_settings(
 ) -> tuple[
     str, tuple[tuple[int, int], ...], int, int, bool, int, int, int, int, int,
     int, int, int, int, int, int, bool, PirateVarietySettings, bool, Decimal, bool,
-    bool, bool, bool, bool, bool, bool,
+    bool, bool, bool, bool, bool, bool, bool,
 ]:
     """Read the settings currently encoded in a selected executable."""
     target = target.resolve(strict=True)
@@ -4979,6 +5028,7 @@ def read_settings(
             _cannon_accuracy_fix_patch_info(data),
             _ship_reuse_fix_patch_info(data),
             read_knossos_hint_fix_state(data),
+            _disev_language_fix_patch_info(data),
             read_discover_avi_patch_state(data),
         )
     finally:
@@ -5033,6 +5083,7 @@ def apply_all(
     cannon_accuracy_fix_enabled: bool = False,
     ship_reuse_fix_enabled: bool = False,
     knossos_hint_fix_enabled: bool = False,
+    disev_language_fix_enabled: bool = False,
     discover_avi_enabled: bool = False,
     figurehead_effect_settings: FigureheadEffectSettings = DEFAULT_FIGUREHEAD_EFFECT_SETTINGS,
     barmaid_edit: BarmaidEdit | None = None,
@@ -5084,6 +5135,7 @@ def apply_all(
     apply_judgment_fix(updated, judgment_fix_enabled)
     apply_cannon_accuracy_fix(updated, cannon_accuracy_fix_enabled)
     apply_ship_reuse_fix(updated, ship_reuse_fix_enabled)
+    apply_disev_language_fix(updated, disev_language_fix_enabled)
     apply_gameplay_options(
         updated,
         long_rest_max,

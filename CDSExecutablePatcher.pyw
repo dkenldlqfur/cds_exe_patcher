@@ -8,7 +8,7 @@ import threading
 import tkinter as tk
 import ctypes
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, ttk
 
 from PIL import Image, ImageTk
 
@@ -37,6 +37,11 @@ from sea_monster_patch import (
     SeaMonsterPatchError,
     apply as apply_sea_monster_patch,
     is_enabled as is_sea_monster_patch_enabled,
+)
+from geographic_discovery_still_patch import (
+    GeographicDiscoveryStillPatchError,
+    apply as apply_geographic_discovery_still_patch,
+    is_enabled as is_geographic_discovery_still_patch_enabled,
 )
 from avi_preview import AviPreview
 from city_reader import CityImageReadError, read_city_image
@@ -151,31 +156,64 @@ MISTRANSLATION_DETAILS = """by kseokjung, 오쌍, ladyous
 산속 도시 방향 북동쪽 → 북서쪽
 """
 
-BUG_FIX_DETAILS = """버그 수정
+FAILED_POTTERY_FIX_DETAILS = """실패작 도자기 등장
 
-[실패작 도자기 등장]
 - 주점 힌트의 중국 항주 표기를 중국 남경으로 수정합니다.
 - 주점 힌트 ID 182의 대상 코드를 218에서 122로 수정합니다.
 - 실패작 도자기 모조품 레코드의 판매 도시를 항주(177)에서 남경(178)으로 수정합니다.
 
-[심판 버그 수정]
+체크 해제 시 위 수정 사항을 원본 상태로 복원합니다.
+"""
+
+JUDGMENT_FIX_DETAILS = """심판 버그 수정
+
 - 육상전에서 심판으로 한쪽 전열이 전멸하고 후열이 남았을 때 전투 애니메이션이 멈추는 문제를 수정합니다.
 - 심판의 사망 처리 직후 해당 진영의 전열을 검사하고, 전열이 비었으면 후열을 정상적으로 전진시킵니다.
 - 심판의 피해량·명중 판정과 다른 육상전 규칙은 변경하지 않습니다.
 
-[포격 명중률 버그 수정]
+체크 해제 시 위 수정 사항을 원본 상태로 복원합니다.
+"""
+
+CANNON_ACCURACY_FIX_DETAILS = """포격 명중률 버그 수정
+
 - 포술 레벨과 현재 함포 수가 낮을 때 포격 명중률이 비정상적으로 100%가 되는 문제를 수정합니다.
 - 음수로 계산된 포격 명중률을 정상적인 최솟값 1%로 보정합니다.
 
-[선박 슬롯 재사용 중량 버그 수정]
+체크 해제 시 위 수정 사항을 원본 상태로 복원합니다.
+"""
+
+SHIP_REUSE_FIX_DETAILS = """선박 슬롯 재사용 중량 버그 수정
+
 - 함포를 장착한 선박을 매각한 뒤 해당 슬롯에 새 선박을 구입하면, 기존 함포 중량만큼 최대중량이 증가하는 문제를 수정합니다.
 - 새 선박의 중량과 적재량을 계산하기 전에 이전 선박의 함포 종류·현재 함포 수·최대 함포 수를 초기화합니다.
 - 이미 매각되어 함포 정보가 남은 빈 슬롯을 다시 사용하는 경우에도 적용됩니다.
 
-[크노소스 주점 힌트 수정]
+체크 해제 시 위 수정 사항을 원본 상태로 복원합니다.
+"""
+
+KNOSSOS_HINT_FIX_DETAILS = """크노소스 주점 힌트 수정
+
 - 주점 힌트 ID 88의 잘못된 대상 코드 302를 크노소스 발견물 코드 112로 수정합니다.
 
-체크 해제 시 위 수정 사항을 모두 원본 상태로 복원합니다.
+체크 해제 시 위 수정 사항을 원본 상태로 복원합니다.
+"""
+
+DISEV_LANGUAGE_FIX_DETAILS = """모뉴멘트밸리 언어 판정 수정
+
+- DISEV 수치 조회 ID 15가 아프리카토착어를 조회하는 문제를 수정합니다.
+- 언어 숙련도 배열 인덱스를 10에서 11로 변경해 중남미토착어를 조회하도록 합니다.
+- ID 15를 사용하는 이벤트 전체에 적용됩니다.
+
+체크 해제 시 위 수정 사항을 원본 상태로 복원합니다.
+"""
+
+GEOGRAPHIC_DISCOVERY_STILL_FIX_DETAILS = """지리 발견 정지 이미지 추가
+
+- 인도·향료제도·중국·지팡그 발견 이벤트에 EVSTILL 4번 이미지를 표시합니다.
+- 기존에 사용되지 않던 EVSTILL 4번 이미지를 연결하며, EXE와 EVSTILL.CDS는 변경하지 않습니다.
+- 발견물 획득 연출로 넘어가기 전에 이미지 종료 명령을 함께 실행합니다.
+
+체크 해제 시 DISEV.CDS의 네 이벤트를 이미지 표시 전 상태로 복원합니다.
 """
 
 DISCOVER_AVI_DETAILS = """DISCOVER 대신 AVI 사용
@@ -583,6 +621,13 @@ class CDSExecutablePatcher(tk.Tk):
         self.pirate_variety_enabled = tk.BooleanVar(value=False)
         self.mistranslation_fixes_enabled = tk.BooleanVar(value=False)
         self.bug_fixes_enabled = tk.BooleanVar(value=False)
+        self.failed_pottery_fix_enabled = tk.BooleanVar(value=False)
+        self.judgment_fix_enabled = tk.BooleanVar(value=False)
+        self.cannon_accuracy_fix_enabled = tk.BooleanVar(value=False)
+        self.ship_reuse_fix_enabled = tk.BooleanVar(value=False)
+        self.knossos_hint_fix_enabled = tk.BooleanVar(value=False)
+        self.disev_language_fix_enabled = tk.BooleanVar(value=False)
+        self.geographic_discovery_still_fix_enabled = tk.BooleanVar(value=False)
         self.discover_avi_enabled = tk.BooleanVar(value=False)
         self.pirate_fame_middle = tk.StringVar(value="0")
         self.pirate_fame_high = tk.StringVar(value="0")
@@ -797,9 +842,12 @@ class CDSExecutablePatcher(tk.Tk):
         self._slave_was_enabled = False
         self._mughal_was_enabled = False
         self._sea_monster_patch_was_enabled = False
+        self._geographic_discovery_still_fix_was_enabled = False
         self._update_checking = False
-        self._update_button: ttk.Button | None = None
+        self._menu_bar: tk.Menu | None = None
+        self._update_menu_index: int | None = None
         self._available_update: tuple[GitHubReleaseUpdater, dict, dict] | None = None
+        self._update_prompt: tk.Toplevel | None = None
         self._treeview_sort_directions: dict[tuple[str, str], bool] = {}
         self._treeview_sort_titles: dict[tuple[str, str], str] = {}
         self._treeview_active_sorts: dict[str, tuple[str, bool]] = {}
@@ -898,6 +946,72 @@ class CDSExecutablePatcher(tk.Tk):
         x = self.winfo_rootx() + (self.winfo_width() - window.winfo_width()) // 2
         y = self.winfo_rooty() + (self.winfo_height() - window.winfo_height()) // 2
         window.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+
+    def _show_centered_popup(
+        self,
+        title: str,
+        message: str,
+        *,
+        kind: str = "info",
+        ask: bool = False,
+        parent: tk.Misc | None = None,
+    ) -> bool:
+        """Show a modal notification centered over the main patcher window."""
+        owner = parent or self
+        dialog = tk.Toplevel(self)
+        dialog.withdraw()
+        dialog.title(title)
+        dialog.transient(owner)
+        dialog.resizable(False, False)
+
+        colors = {"info": "#1A73E8", "warning": "#C77D00", "error": "#B3261E"}
+        headings = {"info": "안내", "warning": "주의", "error": "오류"}
+        frame = ttk.Frame(dialog, padding=16)
+        frame.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(
+            frame,
+            text=headings.get(kind, "안내"),
+            foreground=colors.get(kind, colors["info"]),
+            font=("맑은 고딕", 10, "bold"),
+        ).pack(anchor="w")
+        ttk.Label(
+            frame,
+            text=message,
+            justify=tk.LEFT,
+            wraplength=480,
+        ).pack(anchor="w", pady=(8, 14))
+
+        result = False
+
+        def close(answer: bool = False) -> None:
+            nonlocal result
+            result = answer
+            try:
+                dialog.grab_release()
+            except tk.TclError:
+                pass
+            dialog.destroy()
+
+        buttons = ttk.Frame(frame)
+        buttons.pack(anchor="e")
+        if ask:
+            ttk.Button(buttons, text="예", width=9, command=lambda: close(True)).pack(side=tk.LEFT)
+            ttk.Button(buttons, text="아니오", width=9, command=close).pack(
+                side=tk.LEFT, padx=(6, 0),
+            )
+        else:
+            ttk.Button(buttons, text="확인", width=9, command=close).pack(side=tk.LEFT)
+        dialog.protocol("WM_DELETE_WINDOW", close)
+        self._center_dialog(dialog)
+        dialog.deiconify()
+        dialog.lift()
+        dialog.grab_set()
+        dialog.focus_set()
+        self.wait_window(dialog)
+        if owner is not self and owner.winfo_exists():
+            owner.grab_set()
+            owner.focus_force()
+        return result
 
     @staticmethod
     def _hide_detail_window(window: tk.Toplevel) -> None:
@@ -1018,6 +1132,12 @@ class CDSExecutablePatcher(tk.Tk):
 
     def _build(self) -> None:
         ttk.Style(self).configure("Credit.TLabel", foreground="#1A73E8")
+        menu_bar = tk.Menu(self)
+        menu_bar.add_command(label="파일 열기…", command=self.select_exe)
+        menu_bar.add_command(label="패치 적용", command=self.apply)
+        self.configure(menu=menu_bar)
+        self._menu_bar = menu_bar
+
         frame = ttk.Frame(self, padding=14)
         frame.grid(sticky="nsew")
         top_bar = ttk.Frame(frame)
@@ -1025,11 +1145,6 @@ class CDSExecutablePatcher(tk.Tk):
         ttk.Label(top_bar, text="대상 실행 파일").grid(row=0, column=0, padx=(0, 8), sticky="w")
         self.path_entry = ttk.Entry(top_bar, textvariable=self.path, width=25, state="readonly")
         self.path_entry.grid(row=0, column=1, sticky="w")
-        ttk.Button(top_bar, text="EXE 선택…", command=self.select_exe).grid(row=0, column=2, padx=(8, 0))
-        ttk.Button(top_bar, text="선택한 설정으로 패치", command=self.apply).grid(row=0, column=3, padx=(8, 0))
-        self._update_button = ttk.Button(top_bar, text="업데이트 설치…", command=self.install_available_update)
-        self._update_button.grid(row=0, column=4, padx=(8, 0))
-        self._update_button.grid_remove()
 
         settings_notebook = ttk.Notebook(frame)
         settings_notebook.grid(row=1, column=0, pady=(12, 0), sticky="nsew")
@@ -1296,6 +1411,7 @@ class CDSExecutablePatcher(tk.Tk):
 
         translation_box = ttk.LabelFrame(basic_right_column, text="기타 수정", padding=10)
         translation_box.grid(row=3, column=0, pady=(10, 0), sticky="ew")
+        translation_box.columnconfigure(0, weight=1)
         ttk.Checkbutton(
             translation_box,
             text="용어 등의 오역 수정 적용",
@@ -1310,14 +1426,17 @@ class CDSExecutablePatcher(tk.Tk):
             translation_box,
             text="버그 수정",
             variable=self.bug_fixes_enabled,
+            command=self._update_bug_fix_control_states,
         ).grid(row=1, column=0, pady=(6, 0), sticky="w")
-        ttk.Button(
+        self.bug_fix_details_button = ttk.Button(
             translation_box,
             text="내용…",
-            command=lambda: self.show_patch_details(
-                "버그 수정 내역", BUG_FIX_DETAILS,
-            ),
-        ).grid(row=1, column=1, padx=(10, 0), pady=(6, 0), sticky="e")
+            command=self.show_bug_fix_details,
+        )
+        self.bug_fix_details_button.grid(
+            row=1, column=1, padx=(10, 0), pady=(6, 0), sticky="e",
+        )
+        self._update_bug_fix_control_states()
         ttk.Checkbutton(
             translation_box,
             text="DISCOVER 대신 AVI 사용",
@@ -1376,6 +1495,18 @@ class CDSExecutablePatcher(tk.Tk):
                 "해상괴물 조우 버그 수정", SEA_MONSTER_DETAILS,
             ),
         ).grid(row=3, column=1, padx=(10, 0), pady=(6, 0), sticky="e")
+        ttk.Checkbutton(
+            discovery_box,
+            text="지리 발견 정지 이미지 추가",
+            variable=self.geographic_discovery_still_fix_enabled,
+        ).grid(row=4, column=0, pady=(6, 0), sticky="w")
+        ttk.Button(
+            discovery_box,
+            text="내용…",
+            command=lambda: self.show_patch_details(
+                "지리 발견 정지 이미지 추가", GEOGRAPHIC_DISCOVERY_STILL_FIX_DETAILS,
+            ),
+        ).grid(row=4, column=1, padx=(10, 0), pady=(6, 0), sticky="e")
 
         person_list_box = ttk.LabelFrame(person_tab, text="인물 목록", padding=10)
         person_list_box.grid(row=0, column=0, rowspan=2, sticky="nsew")
@@ -4856,13 +4987,13 @@ class CDSExecutablePatcher(tk.Tk):
             edited_title = title_editor.get_limited().strip()
             edited_author = author_editor.get_limited().strip()
             if not edited_title:
-                messagebox.showwarning(
-                    "책 제목 필요", "책 제목을 입력해 주세요.", parent=window,
+                self._show_centered_popup(
+                    "책 제목 필요", "책 제목을 입력해 주세요.", kind="warning", parent=window,
                 )
                 return
             if not edited_author:
-                messagebox.showwarning(
-                    "저자 필요", "저자를 입력해 주세요.", parent=window,
+                self._show_centered_popup(
+                    "저자 필요", "저자를 입력해 주세요.", kind="warning", parent=window,
                 )
                 return
             edited_city_ids = tuple(
@@ -4871,10 +5002,10 @@ class CDSExecutablePatcher(tk.Tk):
                 if variable.get() != "없음"
             )
             if len(set(edited_city_ids)) != len(edited_city_ids):
-                messagebox.showwarning(
+                self._show_centered_popup(
                     "출현 도시 중복",
                     "같은 출현 도시는 두 번 설정할 수 없습니다.",
-                    parent=window,
+                    kind="warning", parent=window,
                 )
                 return
             edit = LibraryBookEdit(
@@ -5347,6 +5478,114 @@ class CDSExecutablePatcher(tk.Tk):
         self._sponsor_by_identifier = {record.identifier: record for record in self._sponsor_records}
         self._refresh_sponsor_list()
 
+    def _bug_fix_options(self) -> tuple[tuple[str, tk.BooleanVar, str], ...]:
+        """Return the independently selectable fixes shown in the details dialog."""
+        return (
+            (
+                "실패작 도자기 등장",
+                self.failed_pottery_fix_enabled,
+                FAILED_POTTERY_FIX_DETAILS,
+            ),
+            ("심판 버그 수정", self.judgment_fix_enabled, JUDGMENT_FIX_DETAILS),
+            (
+                "포격 명중률 버그 수정",
+                self.cannon_accuracy_fix_enabled,
+                CANNON_ACCURACY_FIX_DETAILS,
+            ),
+            (
+                "선박 슬롯 재사용 중량 버그 수정",
+                self.ship_reuse_fix_enabled,
+                SHIP_REUSE_FIX_DETAILS,
+            ),
+            (
+                "크노소스 주점 힌트 수정",
+                self.knossos_hint_fix_enabled,
+                KNOSSOS_HINT_FIX_DETAILS,
+            ),
+            (
+                "모뉴멘트밸리 언어 판정 수정",
+                self.disev_language_fix_enabled,
+                DISEV_LANGUAGE_FIX_DETAILS,
+            ),
+        )
+
+    def show_bug_fix_details(self) -> None:
+        """Select individual bug fixes while retaining the main enable switch."""
+        window = tk.Toplevel(self)
+        window.title("버그 수정 내역")
+        window.geometry("680x620")
+        window.minsize(560, 440)
+        window.transient(self)
+
+        ttk.Label(
+            window,
+            text="메인 화면의 '버그 수정'을 체크하면 아래에서 선택한 항목만 적용됩니다.",
+            wraplength=640,
+        ).pack(anchor="w", padx=12, pady=(12, 8))
+
+        body = ttk.Frame(window)
+        body.pack(fill=tk.BOTH, expand=True, padx=12)
+        canvas = tk.Canvas(body, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(body, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        content = ttk.Frame(canvas, padding=(8, 4))
+        content_window = canvas.create_window((0, 0), window=content, anchor="nw")
+        content.bind(
+            "<Configure>",
+            lambda _event: canvas.configure(scrollregion=canvas.bbox("all")),
+        )
+        canvas.bind(
+            "<Configure>",
+            lambda event: canvas.itemconfigure(content_window, width=event.width),
+        )
+
+        options = self._bug_fix_options()
+        for row, (title, variable, details) in enumerate(options):
+            item = ttk.Frame(content)
+            item.grid(row=row * 2, column=0, sticky="ew", pady=(4, 7))
+            item.columnconfigure(0, weight=1)
+            ttk.Checkbutton(item, text=title, variable=variable).grid(
+                row=0, column=0, sticky="w",
+            )
+            description = "\n".join(details.splitlines()[1:]).strip()
+            ttk.Label(
+                item,
+                text=description,
+                justify=tk.LEFT,
+                wraplength=590,
+            ).grid(row=1, column=0, padx=(24, 0), pady=(3, 0), sticky="w")
+            if row + 1 < len(options):
+                ttk.Separator(content, orient=tk.HORIZONTAL).grid(
+                    row=row * 2 + 1, column=0, sticky="ew",
+                )
+        content.columnconfigure(0, weight=1)
+
+        buttons = ttk.Frame(window)
+        buttons.pack(fill=tk.X, padx=12, pady=10)
+        ttk.Button(
+            buttons,
+            text="전체 선택",
+            command=lambda: [variable.set(True) for _, variable, _ in options],
+        ).pack(side=tk.LEFT)
+        ttk.Button(
+            buttons,
+            text="전체 해제",
+            command=lambda: [variable.set(False) for _, variable, _ in options],
+        ).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(buttons, text="닫기", command=window.destroy).pack(side=tk.RIGHT)
+        self._center_dialog(window)
+        window.grab_set()
+
+    def _update_bug_fix_control_states(self) -> None:
+        """Enable the per-fix selector only while the master option is active."""
+        if not hasattr(self, "bug_fix_details_button"):
+            return
+        self.bug_fix_details_button.state(
+            ["!disabled"] if self.bug_fixes_enabled.get() else ["disabled"],
+        )
+
     def show_patch_details(self, title: str, details: str, first_line_color: str | None = None) -> None:
         window = tk.Toplevel(self)
         window.title(title)
@@ -5488,6 +5727,7 @@ class CDSExecutablePatcher(tk.Tk):
                     cannon_accuracy_fix_enabled,
                     ship_reuse_fix_enabled,
                     knossos_hint_fix_enabled,
+                    disev_language_fix_enabled,
                     discover_avi_enabled,
                 ) = read_settings(target)
                 barmaid_records = read_barmaid_records(target)
@@ -5512,7 +5752,7 @@ class CDSExecutablePatcher(tk.Tk):
                     False: portrait_count(target, female=False),
                 }
             except Exception as exc:
-                messagebox.showerror("EXE 읽기 실패", str(exc), parent=self)
+                self._show_centered_popup("EXE 읽기 실패", str(exc), kind="error")
                 return
             # 얼굴 미리보기도 아래 레코드 로드 중 바로 원본 게임 폴더에서 읽는다.
             self.path.set(selected)
@@ -5554,16 +5794,21 @@ class CDSExecutablePatcher(tk.Tk):
             self.eclipse_enabled.set(eclipse_enabled)
             self.eclipse_latitude.set(f"{eclipse_latitude:.3f}" if eclipse_enabled else "0")
             self.mistranslation_fixes_enabled.set(mistranslation_fixes_enabled)
-            # Older releases exposed these as separate options.  Treat any
-            # active component as the combined option so the next save applies
-            # the complete bug-fix set instead of disabling a partial patch.
-            self.bug_fixes_enabled.set(
-                failed_pottery_enabled
-                or judgment_fix_enabled
-                or cannon_accuracy_fix_enabled
-                or ship_reuse_fix_enabled
-                or knossos_hint_fix_enabled
-            )
+            self.failed_pottery_fix_enabled.set(failed_pottery_enabled)
+            self.judgment_fix_enabled.set(judgment_fix_enabled)
+            self.cannon_accuracy_fix_enabled.set(cannon_accuracy_fix_enabled)
+            self.ship_reuse_fix_enabled.set(ship_reuse_fix_enabled)
+            self.knossos_hint_fix_enabled.set(knossos_hint_fix_enabled)
+            self.disev_language_fix_enabled.set(disev_language_fix_enabled)
+            self.bug_fixes_enabled.set(any((
+                failed_pottery_enabled,
+                judgment_fix_enabled,
+                cannon_accuracy_fix_enabled,
+                ship_reuse_fix_enabled,
+                knossos_hint_fix_enabled,
+                disev_language_fix_enabled,
+            )))
+            self._update_bug_fix_control_states()
             self.discover_avi_enabled.set(discover_avi_enabled)
             discovery_errors: list[str] = []
             try:
@@ -5597,11 +5842,26 @@ class CDSExecutablePatcher(tk.Tk):
                 self.sea_monster_patch_enabled.set(False)
                 self._sea_monster_patch_was_enabled = False
                 discovery_errors.append(str(exc))
+            try:
+                geographic_discovery_still_fix_enabled = (
+                    is_geographic_discovery_still_patch_enabled(target)
+                )
+                self.geographic_discovery_still_fix_enabled.set(
+                    geographic_discovery_still_fix_enabled,
+                )
+                self._geographic_discovery_still_fix_was_enabled = (
+                    geographic_discovery_still_fix_enabled
+                )
+            except GeographicDiscoveryStillPatchError as exc:
+                self.geographic_discovery_still_fix_enabled.set(False)
+                self._geographic_discovery_still_fix_was_enabled = False
+                discovery_errors.append(str(exc))
+            self._update_bug_fix_control_states()
             if discovery_errors:
-                messagebox.showwarning(
+                self._show_centered_popup(
                     "발견물 패치 상태 확인 필요",
                     "일반 EXE 설정은 읽었습니다.\n\n" + "\n\n".join(discovery_errors),
-                    parent=self,
+                    kind="warning",
                 )
             if pirate_variety_enabled:
                 self.pirate_fame_middle.set(str(pirate_settings.fame_middle))
@@ -5752,6 +6012,54 @@ class CDSExecutablePatcher(tk.Tk):
     def _set_update_checking(self, checking: bool) -> None:
         self._update_checking = checking
 
+    def _show_update_available_prompt(self, release: dict) -> None:
+        """Ask in the center of the patcher whether to install a new release."""
+        if self._update_prompt is not None and self._update_prompt.winfo_exists():
+            self._update_prompt.lift()
+            self._update_prompt.focus_set()
+            return
+
+        version = str(release.get("tag_name", "")).strip() or "새 버전"
+        dialog = tk.Toplevel(self)
+        self._update_prompt = dialog
+        dialog.title("업데이트 발견")
+        dialog.transient(self)
+        dialog.resizable(False, False)
+
+        body = ttk.Frame(dialog, padding=16)
+        body.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(
+            body,
+            text=f"{version} 업데이트를 발견했습니다.",
+            font=("맑은 고딕", 10, "bold"),
+        ).pack(anchor="w")
+        ttk.Label(
+            body,
+            text="지금 다운로드하고 설치할까요?",
+        ).pack(anchor="w", pady=(8, 14))
+
+        buttons = ttk.Frame(body)
+        buttons.pack(anchor="e")
+
+        def close_prompt() -> None:
+            if dialog.winfo_exists():
+                dialog.destroy()
+            if self._update_prompt is dialog:
+                self._update_prompt = None
+
+        def install_update() -> None:
+            close_prompt()
+            self.install_available_update(confirm=False)
+
+        ttk.Button(buttons, text="예", width=9, command=install_update).pack(side=tk.LEFT)
+        ttk.Button(buttons, text="아니오", width=9, command=close_prompt).pack(
+            side=tk.LEFT, padx=(6, 0),
+        )
+        dialog.protocol("WM_DELETE_WINDOW", close_prompt)
+        self._center_dialog(dialog)
+        dialog.grab_set()
+        dialog.focus_set()
+
     def check_for_updates(self, silent: bool = False) -> None:
         """Check GitHub Releases without blocking the Tk event loop."""
         if self._update_checking:
@@ -5759,7 +6067,7 @@ class CDSExecutablePatcher(tk.Tk):
         updater = GitHubReleaseUpdater(APP_UPDATE_CONFIG)
         if not updater.enabled:
             if not silent:
-                messagebox.showinfo("업데이트", "업데이트 저장소가 설정되어 있지 않습니다.", parent=self)
+                self._show_centered_popup("업데이트", "업데이트 저장소가 설정되어 있지 않습니다.")
             return
         self._set_update_checking(True)
         threading.Thread(
@@ -5795,35 +6103,42 @@ class CDSExecutablePatcher(tk.Tk):
         self._set_update_checking(False)
         if error:
             if not silent:
-                messagebox.showerror("업데이트 확인 실패", error, parent=self)
+                self._show_centered_popup("업데이트 확인 실패", error, kind="error")
             return
         if update is None:
             if not silent:
-                messagebox.showinfo("업데이트", "현재 최신 버전을 사용하고 있습니다.", parent=self)
+                self._show_centered_popup("업데이트", "현재 최신 버전을 사용하고 있습니다.")
             return
         release, asset = update
         assert updater is not None
         self._available_update = (updater, release, asset)
-        if self._update_button is not None:
+        if self._menu_bar is not None:
             version = str(release.get("tag_name", "")).strip() or "새 버전"
-            self._update_button.configure(text=f"{version} 업데이트 설치…", state=tk.NORMAL)
-            self._update_button.grid()
+            label = f"{version} 업데이트 설치…"
+            if self._update_menu_index is None:
+                self._menu_bar.add_command(label=label, command=self.install_available_update)
+                self._update_menu_index = self._menu_bar.index("end")
+            else:
+                self._menu_bar.entryconfigure(
+                    self._update_menu_index, label=label, state=tk.NORMAL,
+                )
+        self._show_update_available_prompt(release)
 
-    def install_available_update(self) -> None:
-        """Ask for consent and install the update found during automatic checking."""
+    def install_available_update(self, confirm: bool = True) -> None:
+        """Install the available update, optionally asking for confirmation first."""
         if self._available_update is None:
             return
         updater, release, asset = self._available_update
         version = str(release.get("tag_name", "")).strip() or "새 버전"
-        if not messagebox.askyesno(
+        if confirm and not self._show_centered_popup(
             "업데이트 설치",
             f"{version} 업데이트를 다운로드하고 설치할까요?",
-            parent=self,
+            ask=True,
         ):
             return
         self._set_update_checking(True)
-        if self._update_button is not None:
-            self._update_button.configure(state=tk.DISABLED)
+        if self._menu_bar is not None and self._update_menu_index is not None:
+            self._menu_bar.entryconfigure(self._update_menu_index, state=tk.DISABLED)
         threading.Thread(
             target=self._download_update,
             args=(updater, release, asset),
@@ -5847,21 +6162,25 @@ class CDSExecutablePatcher(tk.Tk):
     ) -> None:
         self._set_update_checking(False)
         if error:
-            if self._update_button is not None:
-                self._update_button.configure(state=tk.NORMAL)
-            messagebox.showerror("업데이트 실패", error, parent=self)
+            if self._menu_bar is not None and self._update_menu_index is not None:
+                self._menu_bar.entryconfigure(self._update_menu_index, state=tk.NORMAL)
+            self._show_centered_popup("업데이트 실패", error, kind="error")
             return
         assert replacement is not None
         try:
             updater.launch_replacer(replacement, release)
         except UpdateError as exc:
-            messagebox.showerror("업데이트 실패", str(exc), parent=self)
+            if self._menu_bar is not None and self._update_menu_index is not None:
+                self._menu_bar.entryconfigure(self._update_menu_index, state=tk.NORMAL)
+            self._show_centered_popup("업데이트 실패", str(exc), kind="error")
             return
         self.destroy()
 
     def apply(self) -> None:
         if not self.path.get():
-            messagebox.showwarning("실행 파일 필요", "패치할 EXE 파일을 선택해 주세요.", parent=self)
+            self._show_centered_popup(
+                "실행 파일 필요", "패치할 EXE 파일을 선택해 주세요.", kind="warning",
+            )
             return
         try:
             presets = tuple((int(width.get()), int(height.get())) for width, height in zip(self.widths, self.heights))
@@ -5934,11 +6253,12 @@ class CDSExecutablePatcher(tk.Tk):
                 self.eclipse_enabled.get(),
                 self.eclipse_latitude.get(),
                 self.mistranslation_fixes_enabled.get(),
-                self.bug_fixes_enabled.get(),
-                self.bug_fixes_enabled.get(),
-                self.bug_fixes_enabled.get(),
-                self.bug_fixes_enabled.get(),
-                self.bug_fixes_enabled.get(),
+                self.bug_fixes_enabled.get() and self.failed_pottery_fix_enabled.get(),
+                self.bug_fixes_enabled.get() and self.judgment_fix_enabled.get(),
+                self.bug_fixes_enabled.get() and self.cannon_accuracy_fix_enabled.get(),
+                self.bug_fixes_enabled.get() and self.ship_reuse_fix_enabled.get(),
+                self.bug_fixes_enabled.get() and self.knossos_hint_fix_enabled.get(),
+                self.bug_fixes_enabled.get() and self.disev_language_fix_enabled.get(),
                 self.discover_avi_enabled.get(),
                 figurehead_effect_settings,
                 barmaid_edit,
@@ -5979,27 +6299,37 @@ class CDSExecutablePatcher(tk.Tk):
                 sea_monster_backups = apply_sea_monster_patch(
                     target, self.sea_monster_patch_enabled.get(), backed_up_paths
                 )
+            geographic_discovery_still_backups: tuple[Path, ...] = ()
+            geographic_discovery_still_enabled = self.geographic_discovery_still_fix_enabled.get()
+            if (
+                geographic_discovery_still_enabled
+                or self._geographic_discovery_still_fix_was_enabled
+            ):
+                geographic_discovery_still_backups = apply_geographic_discovery_still_patch(
+                    target, geographic_discovery_still_enabled, backed_up_paths,
+                )
             self.cold_north_latitude.set(f"{cold_limit_to_latitude(cold_north_limit):.3f}")
             self.cold_south_latitude.set(f"{cold_limit_to_latitude(cold_south_limit):.3f}")
         except (
             ValueError, DiscoverAviAssetError, KaabaPatchError, KaabaSavePatchError,
             SlavePatchError, MughalPatchError, SeaMonsterPatchError,
+            GeographicDiscoveryStillPatchError,
         ) as exc:
-            messagebox.showerror("입력 또는 패치 오류", str(exc), parent=self)
+            self._show_centered_popup("입력 또는 패치 오류", str(exc), kind="error")
             return
         except Exception as exc:
-            messagebox.showerror("패치 실패", str(exc), parent=self)
+            self._show_centered_popup("패치 실패", str(exc), kind="error")
             return
         if (backup is None and not kaaba_backups and kaaba_save_backup is None
                 and not slave_library_backups and not slave_dialogue_backups and not mughal_backups
-                and not sea_monster_backups
+                and not sea_monster_backups and not geographic_discovery_still_backups
                 and not discover_avi_installed):
-            messagebox.showinfo("완료", "선택한 설정이 이미 적용되어 있습니다.", parent=self)
+            self._show_centered_popup("완료", "선택한 설정이 이미 적용되어 있습니다.")
         else:
             backups = [
                 backup, *kaaba_backups, kaaba_save_backup,
                 *slave_library_backups, *slave_dialogue_backups, *mughal_backups,
-                *sea_monster_backups,
+                *sea_monster_backups, *geographic_discovery_still_backups,
             ]
             backup_text = "\n".join(str(path) for path in backups if path is not None)
             details = ["선택한 설정을 적용했습니다."]
@@ -6007,7 +6337,7 @@ class CDSExecutablePatcher(tk.Tk):
                 details.append(f"발견물 AVI 복사: {len(discover_avi_installed)}개")
             if backup_text:
                 details.append(f"원본 백업:\n{backup_text}")
-            messagebox.showinfo("완료", "\n\n".join(details), parent=self)
+            self._show_centered_popup("완료", "\n\n".join(details))
         self._remember_barmaid_edit(barmaid_edit)
         self._remember_sponsor_edit(sponsor_edit)
         self._remember_ship_type_edit(ship_type_edit)
@@ -6049,6 +6379,9 @@ class CDSExecutablePatcher(tk.Tk):
         self._slave_was_enabled = self.slave_enabled.get()
         self._mughal_was_enabled = self.mughal_enabled.get()
         self._sea_monster_patch_was_enabled = self.sea_monster_patch_enabled.get()
+        self._geographic_discovery_still_fix_was_enabled = (
+            self.geographic_discovery_still_fix_enabled.get()
+        )
 
 
 if __name__ == "__main__":
