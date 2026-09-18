@@ -81,6 +81,11 @@ JUDGMENT_FIX_SLOT_SIZE = 0x100
 # cannon fields, so the stale cannon weight is carried into the new ship.
 SHIP_REUSE_FIX_SLOT_OFFSET = 0x14200
 SHIP_REUSE_FIX_SLOT_SIZE = 0x100
+# HIST_EV subcondition 16 needs a small wrapper so it can both reverse the
+# elapsed-year subtraction and reject a missing discovery record without
+# changing subcondition 17 in the same handler.
+HISTORY_ELAPSED_YEARS_FIX_SLOT_OFFSET = 0x14300
+HISTORY_ELAPSED_YEARS_FIX_SLOT_SIZE = 0x100
 # Discovery descriptions are independent pointer strings.  A fixed 512-byte
 # row leaves room beyond every original Korean description while keeping each
 # discovery edit isolated from its neighbours.
@@ -112,6 +117,7 @@ PATCH_SECTION_HINT_TEXTS_SIZE = 0x14000
 PATCH_SECTION_NPC_DAILY_DEPARTURE_SIZE = 0x15000
 PATCH_SECTION_JUDGMENT_FIX_SIZE = 0x14200
 PATCH_SECTION_SHIP_REUSE_FIX_SIZE = 0x14300
+PATCH_SECTION_HISTORY_ELAPSED_YEARS_FIX_SIZE = 0x14400
 PATCH_SECTION_DISCOVERY_DESCRIPTIONS_SIZE = 0x32000
 PATCH_SECTION_LIBRARY_HINT_NAMES_SIZE = 0x37000
 PATCH_SECTION_LIBRARY_BOOKS_SIZE = 0x41000

@@ -207,6 +207,17 @@ DISEV_LANGUAGE_FIX_DETAILS = """모뉴멘트밸리 언어 판정 수정
 체크 해제 시 위 수정 사항을 원본 상태로 복원합니다.
 """
 
+HISTORY_ELAPSED_YEARS_FIX_DETAILS = """발견 후 경과 연수 조건 수정
+
+- HIST_EV의 `1B 0B [발견물 ID] 16 [기준 연수]` 조건이 경과 연수를 반대로 계산하는 문제를 수정합니다.
+- `현재 연도 - 발견 연도 >= 기준 연수`로 판정하며 기준값은 기존 양수 그대로 유지합니다.
+- 발견 기록이 없으면 기준값과 관계없이 거짓으로 판정합니다.
+- 같은 1B 핸들러의 다른 하위 조건은 변경하지 않습니다.
+- 파트 15의 2년 조건과 파트 19의 5년 조건에 적용됩니다.
+
+체크 해제 시 위 수정 사항을 원본 상태로 복원합니다.
+"""
+
 GEOGRAPHIC_DISCOVERY_STILL_FIX_DETAILS = """지리 발견 정지 이미지 추가
 
 - 인도·향료제도·중국·지팡그 발견 이벤트에 EVSTILL 4번 이미지를 표시합니다.
@@ -627,6 +638,7 @@ class CDSExecutablePatcher(tk.Tk):
         self.ship_reuse_fix_enabled = tk.BooleanVar(value=False)
         self.knossos_hint_fix_enabled = tk.BooleanVar(value=False)
         self.disev_language_fix_enabled = tk.BooleanVar(value=False)
+        self.history_elapsed_years_fix_enabled = tk.BooleanVar(value=False)
         self.geographic_discovery_still_fix_enabled = tk.BooleanVar(value=False)
         self.discover_avi_enabled = tk.BooleanVar(value=False)
         self.pirate_fame_middle = tk.StringVar(value="0")
@@ -5507,6 +5519,11 @@ class CDSExecutablePatcher(tk.Tk):
                 self.disev_language_fix_enabled,
                 DISEV_LANGUAGE_FIX_DETAILS,
             ),
+            (
+                "발견 후 경과 연수 조건 수정",
+                self.history_elapsed_years_fix_enabled,
+                HISTORY_ELAPSED_YEARS_FIX_DETAILS,
+            ),
         )
 
     def show_bug_fix_details(self) -> None:
@@ -5728,6 +5745,7 @@ class CDSExecutablePatcher(tk.Tk):
                     ship_reuse_fix_enabled,
                     knossos_hint_fix_enabled,
                     disev_language_fix_enabled,
+                    history_elapsed_years_fix_enabled,
                     discover_avi_enabled,
                 ) = read_settings(target)
                 barmaid_records = read_barmaid_records(target)
@@ -5800,6 +5818,7 @@ class CDSExecutablePatcher(tk.Tk):
             self.ship_reuse_fix_enabled.set(ship_reuse_fix_enabled)
             self.knossos_hint_fix_enabled.set(knossos_hint_fix_enabled)
             self.disev_language_fix_enabled.set(disev_language_fix_enabled)
+            self.history_elapsed_years_fix_enabled.set(history_elapsed_years_fix_enabled)
             self.bug_fixes_enabled.set(any((
                 failed_pottery_enabled,
                 judgment_fix_enabled,
@@ -5807,6 +5826,7 @@ class CDSExecutablePatcher(tk.Tk):
                 ship_reuse_fix_enabled,
                 knossos_hint_fix_enabled,
                 disev_language_fix_enabled,
+                history_elapsed_years_fix_enabled,
             )))
             self._update_bug_fix_control_states()
             self.discover_avi_enabled.set(discover_avi_enabled)
@@ -6259,6 +6279,7 @@ class CDSExecutablePatcher(tk.Tk):
                 self.bug_fixes_enabled.get() and self.ship_reuse_fix_enabled.get(),
                 self.bug_fixes_enabled.get() and self.knossos_hint_fix_enabled.get(),
                 self.bug_fixes_enabled.get() and self.disev_language_fix_enabled.get(),
+                self.bug_fixes_enabled.get() and self.history_elapsed_years_fix_enabled.get(),
                 self.discover_avi_enabled.get(),
                 figurehead_effect_settings,
                 barmaid_edit,

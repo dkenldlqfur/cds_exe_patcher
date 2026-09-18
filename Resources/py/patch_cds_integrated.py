@@ -35,6 +35,8 @@ from pe_patch_section import (
     FIGUREHEAD_EFFECT_SLOT_SIZE,
     HINT_TEXT_SLOT_OFFSET,
     HINT_TEXT_SLOT_STRIDE,
+    HISTORY_ELAPSED_YEARS_FIX_SLOT_OFFSET,
+    HISTORY_ELAPSED_YEARS_FIX_SLOT_SIZE,
     MISTRANSLATION_SLOT_OFFSET,
     MISTRANSLATION_SLOT_SIZE,
     NPC_DAILY_DEPARTURE_SLOT_OFFSET,
@@ -46,6 +48,7 @@ from pe_patch_section import (
     PATCH_SECTION_ITEM_NAMES_SIZE,
     PATCH_SECTION_MASTER_NAMES_SIZE,
     PATCH_SECTION_HINT_TEXTS_SIZE,
+    PATCH_SECTION_HISTORY_ELAPSED_YEARS_FIX_SIZE,
     PATCH_SECTION_JUDGMENT_FIX_SIZE,
     PATCH_SECTION_SHIP_REUSE_FIX_SIZE,
     PATCH_SECTION_NPC_DAILY_DEPARTURE_SIZE,
@@ -131,6 +134,20 @@ CANNON_ACCURACY_FIXED_BRANCH = bytes.fromhex("7C 30")     # JL +30h
 DISEV_LANGUAGE_LOOKUP_INSTRUCTION_VA = 0x4070CA
 DISEV_LANGUAGE_LOOKUP_ORIGINAL = bytes.fromhex("6A 0A")  # push 10
 DISEV_LANGUAGE_LOOKUP_FIXED = bytes.fromhex("6A 0B")     # push 11
+
+# HIST_EV condition ``1B 0B [discovery] 16 [years]`` computes the year
+# difference backwards.  Redirect only subcondition 16 through a wrapper;
+# subcondition 17 and every other 1B path remain byte-for-byte unchanged.
+HISTORY_ELAPSED_COMPARE_VA = 0x407709
+HISTORY_ELAPSED_COMPARE_ORIGINAL = bytes.fromhex(
+    "66 3B F8 1B F6 46 E9 99 07 00 00"
+)
+HISTORY_ELAPSED_RESULT_VA = 0x407EAD
+HISTORY_ELAPSED_DISCOVERY_TABLE_VA = 0x61E4C8
+HISTORY_ELAPSED_DISCOVERY_LOOKUP_VA = 0x4AAE40
+HISTORY_ELAPSED_YEARS_FIX_MAGIC = b"HISTYR1\0"
+HISTORY_ELAPSED_YEARS_FIX_VERSION = 1
+HISTORY_ELAPSED_YEARS_FIX_WRAPPER_OFFSET = 0x10
 
 # Recycled ship slots retain their previous cannon type/count/capacity.  The
 # constructor calls the maximum-weight setter before clearing those fields,
@@ -2017,6 +2034,172 @@ def apply_disev_language_fix(data: bytearray, enabled: bool) -> bool:
         if enabled else DISEV_LANGUAGE_LOOKUP_ORIGINAL
     )
     data[instruction_offset:instruction_offset + len(target)] = target
+    return True
+
+
+def _history_elapsed_years_fix_compare_offset(data: bytes | bytearray) -> int:
+    """Return the file offset of the verified subcondition-16 comparison."""
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        if pe.FILE_HEADER.Machine != 0x14C or pe.OPTIONAL_HEADER.ImageBase != 0x400000:
+            raise ValueError("지원하는 32비트 CDS III 실행 파일이 아닙니다.")
+        return pe.get_offset_from_rva(
+            HISTORY_ELAPSED_COMPARE_VA - pe.OPTIONAL_HEADER.ImageBase
+        )
+    finally:
+        pe.close()
+
+
+def _build_history_elapsed_years_fix_payload(slot_va: int) -> bytes:
+    """Build the isolated HIST_EV subcondition-16 comparison wrapper."""
+    wrapper_va = slot_va + HISTORY_ELAPSED_YEARS_FIX_WRAPPER_OFFSET
+    wrapper = bytearray(bytes.fromhex(
+        "50 "                    # push eax (positive u16 threshold)
+        "8B 44 24 18 "           # mov eax, [esp+18h] (condition stream pointer)
+        "0F B7 40 FB "           # movzx eax, word ptr [eax-5] (discovery ID)
+        "8D 14 80 "              # lea edx, [eax+eax*4]
+        "8D 04 90 "              # lea eax, [eax+edx*4] (ID * 21)
+        "8D 0C C5 00 00 00 00 "  # lea ecx, [eax*8+discovery master table]
+        "E8 00 00 00 00 "        # call discovery-record lookup
+        "85 C0 "                 # test eax, eax
+        "74 15 "                 # je missing_record
+        "8B 3D 20 4D 5A 00 "     # mov edi, [005A4D20h] (current year)
+        "2B 78 28 "              # sub edi, [eax+28h] (discovery year)
+        "58 "                    # pop eax (restore threshold)
+        "66 3B F8 "              # cmp di, ax
+        "1B F6 "                 # sbb esi, esi
+        "46 "                    # inc esi (unsigned elapsed >= threshold)
+        "E9 00 00 00 00 "        # jmp common result continuation
+        "58 "                    # missing_record: pop eax (balance threshold)
+        "33 F6 "                 # xor esi, esi
+        "E9 00 00 00 00"         # jmp common result continuation
+    ))
+    lookup_call_offset = 22
+    true_jump_offset = 47
+    false_jump_offset = 55
+    struct.pack_into("<I", wrapper, 18, HISTORY_ELAPSED_DISCOVERY_TABLE_VA)
+    struct.pack_into(
+        "<i", wrapper, lookup_call_offset + 1,
+        HISTORY_ELAPSED_DISCOVERY_LOOKUP_VA
+        - (wrapper_va + lookup_call_offset + 5),
+    )
+    for jump_offset in (true_jump_offset, false_jump_offset):
+        struct.pack_into(
+            "<i", wrapper, jump_offset + 1,
+            HISTORY_ELAPSED_RESULT_VA - (wrapper_va + jump_offset + 5),
+        )
+    if (
+        HISTORY_ELAPSED_YEARS_FIX_WRAPPER_OFFSET + len(wrapper)
+        > HISTORY_ELAPSED_YEARS_FIX_SLOT_SIZE
+    ):
+        raise AssertionError("발견 후 경과 연수 수정 래퍼가 예약 공간을 초과했습니다.")
+
+    payload = bytearray(HISTORY_ELAPSED_YEARS_FIX_SLOT_SIZE)
+    payload[:len(HISTORY_ELAPSED_YEARS_FIX_MAGIC)] = HISTORY_ELAPSED_YEARS_FIX_MAGIC
+    struct.pack_into(
+        "<I", payload, len(HISTORY_ELAPSED_YEARS_FIX_MAGIC),
+        HISTORY_ELAPSED_YEARS_FIX_VERSION,
+    )
+    payload[
+        HISTORY_ELAPSED_YEARS_FIX_WRAPPER_OFFSET:
+        HISTORY_ELAPSED_YEARS_FIX_WRAPPER_OFFSET + len(wrapper)
+    ] = wrapper
+    return bytes(payload)
+
+
+def _history_elapsed_years_fix_hook(wrapper_va: int) -> bytes:
+    """Return the near jump replacing only subcondition 16's comparison."""
+    return (
+        b"\xE9"
+        + struct.pack("<i", wrapper_va - (HISTORY_ELAPSED_COMPARE_VA + 5))
+        + b"\x90" * (len(HISTORY_ELAPSED_COMPARE_ORIGINAL) - 5)
+    )
+
+
+def _history_elapsed_years_fix_patch_info(data: bytes | bytearray) -> bool:
+    """Return whether only HIST_EV subcondition 16 uses corrected elapsed years."""
+    compare_offset = _history_elapsed_years_fix_compare_offset(data)
+    current_hook = bytes(data[
+        compare_offset:compare_offset + len(HISTORY_ELAPSED_COMPARE_ORIGINAL)
+    ])
+    section = find_patch_section(data)
+    if current_hook == HISTORY_ELAPSED_COMPARE_ORIGINAL:
+        if (
+            section is not None
+            and section.raw_size
+            >= HISTORY_ELAPSED_YEARS_FIX_SLOT_OFFSET + HISTORY_ELAPSED_YEARS_FIX_SLOT_SIZE
+            and bytes(data[
+                section.raw_offset + HISTORY_ELAPSED_YEARS_FIX_SLOT_OFFSET:
+                section.raw_offset + HISTORY_ELAPSED_YEARS_FIX_SLOT_OFFSET
+                + len(HISTORY_ELAPSED_YEARS_FIX_MAGIC)
+            ]) == HISTORY_ELAPSED_YEARS_FIX_MAGIC
+        ):
+            raise ValueError("발견 후 경과 연수 수정 코드가 남아 있지만 분기부가 원본 상태입니다.")
+        return False
+    if (
+        section is None
+        or section.raw_size
+        < HISTORY_ELAPSED_YEARS_FIX_SLOT_OFFSET + HISTORY_ELAPSED_YEARS_FIX_SLOT_SIZE
+        or section.virtual_size
+        < HISTORY_ELAPSED_YEARS_FIX_SLOT_OFFSET + HISTORY_ELAPSED_YEARS_FIX_SLOT_SIZE
+    ):
+        raise ValueError("발견 후 경과 연수 수정 분기가 있으나 .patch 데이터를 찾지 못했습니다.")
+    slot_offset, slot_va = section.slot(
+        HISTORY_ELAPSED_YEARS_FIX_SLOT_OFFSET,
+        HISTORY_ELAPSED_YEARS_FIX_SLOT_SIZE,
+    )
+    expected_payload = _build_history_elapsed_years_fix_payload(slot_va)
+    expected_hook = _history_elapsed_years_fix_hook(
+        slot_va + HISTORY_ELAPSED_YEARS_FIX_WRAPPER_OFFSET
+    )
+    if (
+        current_hook != expected_hook
+        or bytes(data[
+            slot_offset:slot_offset + HISTORY_ELAPSED_YEARS_FIX_SLOT_SIZE
+        ]) != expected_payload
+    ):
+        raise ValueError("HIST_EV 발견 후 경과 연수 수정 상태를 검증하지 못했습니다.")
+    return True
+
+
+def apply_history_elapsed_years_fix(data: bytearray, enabled: bool) -> bool:
+    """Correct only HIST_EV subcondition 16, including its missing-record result."""
+    current_enabled = _history_elapsed_years_fix_patch_info(data)
+    if current_enabled == enabled:
+        return False
+    compare_offset = _history_elapsed_years_fix_compare_offset(data)
+    if enabled:
+        section, _created = ensure_patch_section(
+            data, PATCH_SECTION_HISTORY_ELAPSED_YEARS_FIX_SIZE,
+        )
+        slot_offset, slot_va = section.slot(
+            HISTORY_ELAPSED_YEARS_FIX_SLOT_OFFSET,
+            HISTORY_ELAPSED_YEARS_FIX_SLOT_SIZE,
+        )
+        payload = _build_history_elapsed_years_fix_payload(slot_va)
+        current_payload = bytes(data[
+            slot_offset:slot_offset + HISTORY_ELAPSED_YEARS_FIX_SLOT_SIZE
+        ])
+        if any(current_payload) and current_payload != payload:
+            raise ValueError("발견 후 경과 연수 수정용 .patch 슬롯이 다른 데이터로 사용 중입니다.")
+        data[slot_offset:slot_offset + HISTORY_ELAPSED_YEARS_FIX_SLOT_SIZE] = payload
+        data[
+            compare_offset:compare_offset + len(HISTORY_ELAPSED_COMPARE_ORIGINAL)
+        ] = _history_elapsed_years_fix_hook(
+            slot_va + HISTORY_ELAPSED_YEARS_FIX_WRAPPER_OFFSET
+        )
+    else:
+        section = find_patch_section(data)
+        if section is None:
+            raise ValueError("발견 후 경과 연수 수정의 복원 데이터를 찾지 못했습니다.")
+        data[
+            compare_offset:compare_offset + len(HISTORY_ELAPSED_COMPARE_ORIGINAL)
+        ] = HISTORY_ELAPSED_COMPARE_ORIGINAL
+        clear_slot(
+            data, section,
+            HISTORY_ELAPSED_YEARS_FIX_SLOT_OFFSET,
+            HISTORY_ELAPSED_YEARS_FIX_SLOT_SIZE,
+        )
     return True
 
 
@@ -4982,7 +5165,7 @@ def read_settings(
 ) -> tuple[
     str, tuple[tuple[int, int], ...], int, int, bool, int, int, int, int, int,
     int, int, int, int, int, int, bool, PirateVarietySettings, bool, Decimal, bool,
-    bool, bool, bool, bool, bool, bool, bool,
+    bool, bool, bool, bool, bool, bool, bool, bool,
 ]:
     """Read the settings currently encoded in a selected executable."""
     target = target.resolve(strict=True)
@@ -5029,6 +5212,7 @@ def read_settings(
             _ship_reuse_fix_patch_info(data),
             read_knossos_hint_fix_state(data),
             _disev_language_fix_patch_info(data),
+            _history_elapsed_years_fix_patch_info(data),
             read_discover_avi_patch_state(data),
         )
     finally:
@@ -5084,6 +5268,7 @@ def apply_all(
     ship_reuse_fix_enabled: bool = False,
     knossos_hint_fix_enabled: bool = False,
     disev_language_fix_enabled: bool = False,
+    history_elapsed_years_fix_enabled: bool = False,
     discover_avi_enabled: bool = False,
     figurehead_effect_settings: FigureheadEffectSettings = DEFAULT_FIGUREHEAD_EFFECT_SETTINGS,
     barmaid_edit: BarmaidEdit | None = None,
@@ -5107,6 +5292,7 @@ def apply_all(
     judgment_fix_was_enabled = _judgment_fix_patch_info(original)
     ship_reuse_fix_was_enabled = _ship_reuse_fix_patch_info(original)
     knossos_hint_fix_was_enabled = read_knossos_hint_fix_state(original)
+    history_elapsed_years_fix_was_enabled = _history_elapsed_years_fix_patch_info(original)
     discover_avi_was_enabled = read_discover_avi_patch_state(original)
     # Coordinate-style restoration may clear extensions after its own payload.
     # Temporarily remove relocatable patches, apply the requested coordinate
@@ -5123,6 +5309,8 @@ def apply_all(
         apply_ship_reuse_fix(before_coordinate, False)
     if knossos_hint_fix_was_enabled:
         apply_knossos_hint_fix(before_coordinate, False)
+    if history_elapsed_years_fix_was_enabled:
+        apply_history_elapsed_years_fix(before_coordinate, False)
     if _eclipse_patch_info(bytes(before_coordinate))[0]:
         apply_eclipse_polar_caps(before_coordinate, False)
     if _npc_daily_departure_patch_info(before_coordinate):
@@ -5136,6 +5324,7 @@ def apply_all(
     apply_cannon_accuracy_fix(updated, cannon_accuracy_fix_enabled)
     apply_ship_reuse_fix(updated, ship_reuse_fix_enabled)
     apply_disev_language_fix(updated, disev_language_fix_enabled)
+    apply_history_elapsed_years_fix(updated, history_elapsed_years_fix_enabled)
     apply_gameplay_options(
         updated,
         long_rest_max,
