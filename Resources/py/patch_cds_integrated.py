@@ -50,6 +50,8 @@ from pe_patch_section import (
     PATCH_SECTION_HINT_TEXTS_SIZE,
     PATCH_SECTION_HISTORY_ELAPSED_YEARS_FIX_SIZE,
     PATCH_SECTION_JUDGMENT_FIX_SIZE,
+    PATCH_SECTION_PLAYER_FAME_LIMIT_SIZE,
+    PATCH_SECTION_SHIP_PURCHASE_BLANK_SELECTION_FIX_SIZE,
     PATCH_SECTION_SHIP_REUSE_FIX_SIZE,
     PATCH_SECTION_NPC_DAILY_DEPARTURE_SIZE,
     ITEM_NAME_SLOT_OFFSET,
@@ -66,10 +68,14 @@ from pe_patch_section import (
     PATCH_SECTION_LIBRARY_HINT_NAMES_SIZE,
     PIRATE_SLOT_OFFSET,
     PIRATE_SLOT_SIZE,
+    PLAYER_FAME_LIMIT_SLOT_OFFSET,
+    PLAYER_FAME_LIMIT_SLOT_SIZE,
     SHIP_TYPE_NAME_SLOT_OFFSET,
     SHIP_TYPE_NAME_SLOT_STRIDE,
     SHIP_REUSE_FIX_SLOT_OFFSET,
     SHIP_REUSE_FIX_SLOT_SIZE,
+    SHIP_PURCHASE_BLANK_SELECTION_FIX_SLOT_OFFSET,
+    SHIP_PURCHASE_BLANK_SELECTION_FIX_SLOT_SIZE,
     clear_slot,
     ensure_patch_section,
     find_patch_section,
@@ -161,6 +167,20 @@ SHIP_REUSE_ORIGINAL_CALL = bytes.fromhex("E8 5A 96 02 00")
 SHIP_REUSE_FIX_MAGIC = b"CDSSRF1\0"
 SHIP_REUSE_FIX_VERSION = 1
 SHIP_REUSE_FIX_WRAPPER_OFFSET = 0x20
+
+# The ship-purchase selector returns the clicked visual row.  After docking,
+# the number of selectable ship types can shrink while the list still has
+# blank rows; clicking one of those rows used to index beyond the temporary
+# candidate array at 0x44B65D.  Retain the explicit cancel (-1), but send any
+# other invalid selection back to the existing selector loop.
+SHIP_PURCHASE_BLANK_SELECTION_HOOK_VA = 0x44B628
+SHIP_PURCHASE_BLANK_SELECTION_ORIGINAL = bytes.fromhex("83 FF FF 0F 84 50 01 00 00")
+SHIP_PURCHASE_BLANK_SELECTION_RETRY_VA = 0x44B616
+SHIP_PURCHASE_BLANK_SELECTION_CANCEL_VA = 0x44B781
+SHIP_PURCHASE_BLANK_SELECTION_RESUME_VA = 0x44B631
+SHIP_PURCHASE_BLANK_SELECTION_FIX_MAGIC = b"CDSSBS1\0"
+SHIP_PURCHASE_BLANK_SELECTION_FIX_VERSION = 1
+SHIP_PURCHASE_BLANK_SELECTION_FIX_WRAPPER_OFFSET = 0x20
 
 # Random naval-combat encounter denominators.  The western region produces
 # pirate or pursuit-fleet encounters; the eastern region produces Islamic
@@ -335,7 +355,7 @@ class PersonRecord:
     building_id: int
     blood_id: int
     vitality: int
-    hire_cost: int
+    hire_cost_coefficient: int
     abilities: tuple[int, ...]
     skills: tuple[int, ...]
 
@@ -357,7 +377,7 @@ class PersonEdit:
     building_id: int
     blood_id: int
     vitality: int
-    hire_cost: int
+    hire_cost_coefficient: int
     abilities: tuple[int, ...]
     skills: tuple[int, ...]
 
@@ -586,6 +606,7 @@ class LibraryBookEdit:
     title: str
     author: str
     city_ids: tuple[int, ...]
+    appearance_year: int
 
 
 DEFAULT_PIRATE_VARIETY_SETTINGS = PirateVarietySettings()
@@ -721,6 +742,12 @@ def validate_pirate_variety_settings(settings: PirateVarietySettings) -> None:
 # without rewriting the surrounding code.
 LONG_REST_MAX_VA = 0x460783
 EXPLORATION_PREPARATION_VAS = (0x468759, 0x468785, 0x4770F1, 0x477325)
+# Both sea travel and land exploration use this immediate when the telescope
+# (item 35) is held: it is added to the city/port discovery radius in map
+# cells.  The scan is quadratic in this value, so retain a practical cap.
+TELESCOPE_CITY_DISCOVERY_BONUS_VA = 0x48D84E
+TELESCOPE_CITY_DISCOVERY_BONUS_ORIGINAL = 2
+TELESCOPE_CITY_DISCOVERY_BONUS_MAX = 32
 # The city-gate confirmation is a literal string, rather than a formatted
 # message.  Keep its displayed number in sync with the four timing operands.
 EXPLORATION_PREPARATION_MESSAGE_VA = 0x551B78
@@ -747,14 +774,13 @@ DEPOSIT_LIMIT_OPERANDS = (
 )
 MONEY_LIMIT_MIN = 1
 MONEY_LIMIT_MAX = 99_999_999
-# Fame and infamy are independent player-record accumulators.  Their original
-# limits are 100,000 and 10,000 respectively, enforced by these clamp calls.
-FAME_LIMIT_OPERANDS = (
-    (0x474188, b"\x68"),  # fame accumulator maximum
-)
-INFAMY_LIMIT_OPERANDS = (
-    (0x4741C8, b"\x68"),  # infamy accumulator maximum
-)
+# The player fame and infamy fields at 0x5B614C/0x5B6150 both pass through
+# 0x4800E0.  Its PUSH at 0x4800E5 supplies the shared original maximum.
+# 0x474188 belongs to voyage food, not fame; never edit it here.
+PLAYER_FAME_LIMIT_HOOK_VA = 0x4800E5
+PLAYER_FAME_LIMIT_HOOK_END_VA = PLAYER_FAME_LIMIT_HOOK_VA + 5
+PLAYER_FAME_LIMIT_CODE_OFFSET = 0x20
+PLAYER_FAME_LIMIT_MAGIC = b"FAMELIM1"
 FAME_INFAMY_LIMIT_MIN = 1
 FAME_LIMIT_MAX = 99_999_999
 INFAMY_LIMIT_MAX = 99_999_999
@@ -847,14 +873,26 @@ PERSON_EMPLOYMENT_STATE_OFFSET = 0x2C
 PERSON_CITY_ID_OFFSET = 0x30
 PERSON_BUILDING_ID_OFFSET = 0x34
 PERSON_BLOOD_ID_OFFSET = 0x38
-PERSON_VITALITY_OFFSET = 0x3C
+PERSON_HIRE_COST_COEFFICIENT_OFFSET = 0x3C
 PERSON_ABILITIES_OFFSET = 0x40
 PERSON_ABILITY_COUNT = 6
-PERSON_HIRE_COST_OFFSET = 0x58
+PERSON_VITALITY_OFFSET = 0x58
 PERSON_SKILLS_OFFSET = 0x60
 PERSON_SKILL_COUNT = 27
 PERSON_ABILITY_MAX = 255
-PERSON_VITALITY_MAX = 2000
+PERSON_VITALITY_MAX = 9999
+PERSON_ABILITY_LIMIT_VA = 0x432C50
+PERSON_ABILITY_LIMIT_BLOCK_SIZE = 0x30
+PERSON_VITALITY_LIMIT_VA = 0x432C87
+PERSON_ABILITY_ORIGINAL_CODE = bytes.fromhex(
+    "8b 44 24 04 56 6a 64 6a 01 8d 34 81 8b 4c 24 14 51 "
+    "8b 06 40 50 e8 f6 b8 06 00 83 c4 10 48 89 06 5e c2 08 00"
+).ljust(PERSON_ABILITY_LIMIT_BLOCK_SIZE, b"\xCC")
+PERSON_VITALITY_ORIGINAL_PREFIX = bytes.fromhex("8b 44 24 04 56 8b f1 68")
+PERSON_VITALITY_ORIGINAL_SUFFIX = bytes.fromhex(
+    "6a 00 50 8b 4e 18 51 e8 c8 b8 06 00 83 c4 10 89 46 18 5e c2 04 00"
+)
+PERSON_HIRE_COST_COEFFICIENT_MAX = 255
 PERSON_SKILL_MAX = 3
 SHIP_TYPE_TABLE_VA = 0x4FC1E0
 SHIP_TYPE_RECORD_COUNT = 8
@@ -952,9 +990,9 @@ ITEM_NAME_MAX_CHARACTERS = 11
 ITEM_NAME_MAX_BYTES = 21
 # Discovery definitions use two overlapping physical layouts.  Names,
 # categories, game IDs and values have 230 contiguous metadata rows and one
-# separate final row.  Map rectangles are an independent 231-row overlay
-# beginning one row later.  Thus the rectangle for metadata ID 0 (Hope Cape)
-# starts at 0x51C584, not at the beginning of its metadata row.
+# separate final row.  Map rectangles begin one row after their metadata:
+# 230 contiguous overlays plus one overlay after the separate final row.
+# Thus the rectangle for metadata ID 0 (Hope Cape) starts at 0x51C584.
 # Dynamic discovery/report progress is deliberately not adjacent to these
 # records: it is in SAVEDATA.CDS.
 DISCOVERY_METADATA_TABLE_VA = 0x51C528
@@ -969,6 +1007,7 @@ FAKE_ITEM_CITY_ID_OFFSET = 0x4C
 # The final metadata entry (game ID 527) is outside the main 230-row table.
 DISCOVERY_FINAL_METADATA_RECORD_VA = 0x522744
 DISCOVERY_COORDINATE_TABLE_VA = 0x51C584
+DISCOVERY_FINAL_COORDINATE_RECORD_VA = DISCOVERY_FINAL_METADATA_RECORD_VA + DISCOVERY_RECORD_SIZE
 DISCOVERY_DESCRIPTION_POINTER_TABLE_VA = 0x57AA78
 DISCOVERY_MIN_X_OFFSET = 0x00
 DISCOVERY_MIN_Y_OFFSET = 0x04
@@ -1029,6 +1068,9 @@ LIBRARY_BOOK_RECORD_COUNT = 257
 LIBRARY_BOOK_RECORD_SIZE = 0x58
 LIBRARY_BOOK_TITLE_POINTER_OFFSET = 0x00
 LIBRARY_BOOK_AUTHOR_POINTER_OFFSET = 0x04
+LIBRARY_BOOK_APPEARANCE_YEAR_OFFSET = 0x10
+LIBRARY_BOOK_YEAR_BASE = 1480
+LIBRARY_BOOK_YEAR_MAX = 1600
 LIBRARY_BOOK_CITY_LIST_OFFSET = 0x18
 LIBRARY_BOOK_CITY_CAPACITY = 8
 LIBRARY_BOOK_TITLE_MAX_CHARACTERS = 18
@@ -1262,6 +1304,7 @@ MISTRANSLATION_REPLACEMENTS = (
     (0x15E0DC, "웅변", "변론"),
     (0x1655C0, "궩갂궩귪궶갂긫긇궶갏  딲뾩궩귢귩묿궔귞빓궋궫갏갎", "그런 말도 안되는…이 자식 그거 누구한테 들었어！"),
     *((offset, "규칙", "규율") for offset in (0x166610, 0x169618, 0x1697B0, 0x16D000)),
+    (0x16E7F8, "빚    /", "계약금/"),
     (0x17A7F9, "남안", "서안"),
     (0x17B930, "개미지옥", "파리지옥"),
     (0x17C8FA, "시에라리온", "베르데　곶"),
@@ -1274,6 +1317,7 @@ MISTRANSLATION_RETIRED_REPLACEMENTS = (
     (0x1664A5, "중단", "계속"),
     (0x17A214, "항주", "남경"),
 )
+MISTRANSLATION_CONTRACT_LABEL_OFFSET = 0x16E7F8
 MISTRANSLATION_SWORD_TEXT_OFFSET = 0x156080
 MISTRANSLATION_SWORD_TEXT_CAPACITY = 16
 MISTRANSLATION_SWORD_POINTER_OFFSET = 0xFC204
@@ -1296,12 +1340,16 @@ FAILED_POTTERY_FAKE_RECORD_ID = 247
 FAILED_POTTERY_CITY_ORIGINAL = 177
 FAILED_POTTERY_CITY_PATCHED = 178
 
-# Hint 88 describes Knossos, but the original target code points at 302
-# instead of the Knossos discovery (112). Keep this correction in the
-# combined bug-fix option while allowing normal direct edits when disabled.
+# Tavern-hint corrections are applied together so the user can enable one
+# coherent repair option.  Existing releases could have only the Knossos
+# target correction applied; that legacy state is detected and upgraded on
+# the next save.
 KNOSSOS_HINT_ID = 88
 KNOSSOS_HINT_TARGET_ORIGINAL = 302
 KNOSSOS_HINT_TARGET_PATCHED = 112
+CACAO_HINT_ID = 152
+CACAO_HINT_CITY_ORIGINAL = 206  # 메리다
+CACAO_HINT_CITY_PATCHED = 204   # 미틀라
 
 
 def _translation_bytes(text: str) -> bytes:
@@ -1343,11 +1391,12 @@ def _validate_mistranslation_layout(data: bytes | bytearray) -> None:
 
 
 def read_mistranslation_patch_state(data: bytes) -> bool:
-    """Return whether every localization correction is fully applied."""
+    """Recognize the current or previous localization patch for migration."""
     _validate_mistranslation_layout(data)
     if any(
         data[offset:offset + len(_translation_bytes(corrected))] != _translation_bytes(corrected)
         for offset, _, corrected in MISTRANSLATION_REPLACEMENTS
+        if offset != MISTRANSLATION_CONTRACT_LABEL_OFFSET
     ):
         return False
 
@@ -1489,8 +1538,8 @@ def apply_failed_pottery_patch(data: bytearray, enabled: bool) -> bool:
     return changed
 
 
-def _knossos_hint_target_offset(data: bytes | bytearray) -> int:
-    """Return the target-code field of the Knossos tavern hint."""
+def _tavern_hint_bug_fix_offsets(data: bytes | bytearray) -> tuple[int, int]:
+    """Return the Knossos target and Kakao first-city fields."""
     pe = pefile.PE(data=bytes(data), fast_load=True)
     try:
         if pe.FILE_HEADER.Machine != 0x14C or pe.OPTIONAL_HEADER.ImageBase != 0x400000:
@@ -1501,28 +1550,44 @@ def _knossos_hint_target_offset(data: bytes | bytearray) -> int:
         return (
             table_offset
             + KNOSSOS_HINT_ID * HINT_RECORD_SIZE
-            + HINT_TARGET_CODE_OFFSET
+            + HINT_TARGET_CODE_OFFSET,
+            table_offset
+            + CACAO_HINT_ID * HINT_RECORD_SIZE
+            + HINT_CITY_IDS_OFFSET,
         )
     finally:
         pe.close()
 
 
-def read_knossos_hint_fix_state(data: bytes) -> bool:
-    """Return whether hint 88 currently points at the Knossos discovery."""
-    offset = _knossos_hint_target_offset(data)
-    return struct.unpack_from("<I", data, offset)[0] == KNOSSOS_HINT_TARGET_PATCHED
-
-
-def apply_knossos_hint_fix(data: bytearray, enabled: bool) -> bool:
-    """Apply or restore the corrected target of the Knossos tavern hint."""
-    offset = _knossos_hint_target_offset(data)
-    target = (
-        KNOSSOS_HINT_TARGET_PATCHED if enabled else KNOSSOS_HINT_TARGET_ORIGINAL
+def read_tavern_hint_bug_fix_state(data: bytes) -> bool:
+    """Recognize the full fix and the legacy Knossos-only patch state."""
+    knossos_offset, cacao_city_offset = _tavern_hint_bug_fix_offsets(data)
+    knossos_target = struct.unpack_from("<I", data, knossos_offset)[0]
+    # The tavern-hint editor intentionally allows arbitrary target and city
+    # edits, so only the exact legacy correction acts as an enabled marker.
+    # Do not reject a user-authored value in either field while loading EXE.
+    # Older versions contained the first correction only.  Keep it selected
+    # in the consolidated UI so a normal save upgrades it with the Kakao city.
+    cacao_city = struct.unpack_from("<i", data, cacao_city_offset)[0]
+    return (
+        knossos_target == KNOSSOS_HINT_TARGET_PATCHED
+        and cacao_city in (CACAO_HINT_CITY_ORIGINAL, CACAO_HINT_CITY_PATCHED)
     )
-    if struct.unpack_from("<I", data, offset)[0] == target:
-        return False
-    struct.pack_into("<I", data, offset, target)
-    return True
+
+
+def apply_tavern_hint_bug_fix(data: bytearray, enabled: bool) -> bool:
+    """Correct or restore the Knossos target and Kakao hint city together."""
+    knossos_offset, cacao_city_offset = _tavern_hint_bug_fix_offsets(data)
+    target = KNOSSOS_HINT_TARGET_PATCHED if enabled else KNOSSOS_HINT_TARGET_ORIGINAL
+    city = CACAO_HINT_CITY_PATCHED if enabled else CACAO_HINT_CITY_ORIGINAL
+    changed = False
+    if struct.unpack_from("<I", data, knossos_offset)[0] != target:
+        struct.pack_into("<I", data, knossos_offset, target)
+        changed = True
+    if struct.unpack_from("<i", data, cacao_city_offset)[0] != city:
+        struct.pack_into("<i", data, cacao_city_offset, city)
+        changed = True
+    return changed
 
 
 def cold_limit_to_latitude(cold_limit: int) -> Decimal:
@@ -2318,6 +2383,164 @@ def apply_ship_reuse_fix(data: bytearray, enabled: bool) -> bool:
     return True
 
 
+def _build_ship_purchase_blank_selection_fix_payload(slot_va: int) -> bytes:
+    """Build the selector-index guard used by the ship-purchase screen."""
+    wrapper_va = slot_va + SHIP_PURCHASE_BLANK_SELECTION_FIX_WRAPPER_OFFSET
+    wrapper = bytearray(bytes.fromhex(
+        "83 FF FF "                # cmp edi, -1 (explicit cancel)
+        "0F 84 00 00 00 00 "        # je  purchase cancel path
+        "85 FF "                    # test edi, edi
+        "0F 88 00 00 00 00 "        # js  selector loop
+        "3B 7D F0 "                 # cmp edi, [ebp-10h] (candidate count)
+        "0F 8D 00 00 00 00 "        # jge selector loop
+        "E9 00 00 00 00"            # jmp original valid-selection path
+    ))
+    for displacement_offset, instruction_end, target_va in (
+        (5, 9, SHIP_PURCHASE_BLANK_SELECTION_CANCEL_VA),
+        (13, 17, SHIP_PURCHASE_BLANK_SELECTION_RETRY_VA),
+        (22, 26, SHIP_PURCHASE_BLANK_SELECTION_RETRY_VA),
+        (27, 31, SHIP_PURCHASE_BLANK_SELECTION_RESUME_VA),
+    ):
+        struct.pack_into(
+            "<i", wrapper, displacement_offset,
+            target_va - (wrapper_va + instruction_end),
+        )
+    if (
+        SHIP_PURCHASE_BLANK_SELECTION_FIX_WRAPPER_OFFSET + len(wrapper)
+        > SHIP_PURCHASE_BLANK_SELECTION_FIX_SLOT_SIZE
+    ):
+        raise AssertionError("선박 구입 빈 슬롯 수정 래퍼가 예약 공간을 초과했습니다.")
+
+    payload = bytearray(SHIP_PURCHASE_BLANK_SELECTION_FIX_SLOT_SIZE)
+    payload[:len(SHIP_PURCHASE_BLANK_SELECTION_FIX_MAGIC)] = (
+        SHIP_PURCHASE_BLANK_SELECTION_FIX_MAGIC
+    )
+    struct.pack_into(
+        "<I", payload, len(SHIP_PURCHASE_BLANK_SELECTION_FIX_MAGIC),
+        SHIP_PURCHASE_BLANK_SELECTION_FIX_VERSION,
+    )
+    payload[
+        SHIP_PURCHASE_BLANK_SELECTION_FIX_WRAPPER_OFFSET:
+        SHIP_PURCHASE_BLANK_SELECTION_FIX_WRAPPER_OFFSET + len(wrapper)
+    ] = wrapper
+    return bytes(payload)
+
+
+def _ship_purchase_blank_selection_fix_hook(wrapper_va: int) -> bytes:
+    return b"\xE9" + struct.pack(
+        "<i", wrapper_va - (SHIP_PURCHASE_BLANK_SELECTION_HOOK_VA + 5),
+    ) + b"\x90" * 4
+
+
+def _ship_purchase_blank_selection_fix_patch_info(data: bytes | bytearray) -> bool:
+    """Return whether invalid ship-purchase rows are guarded before indexing."""
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        if pe.FILE_HEADER.Machine != 0x14C or pe.OPTIONAL_HEADER.ImageBase != 0x400000:
+            raise ValueError("지원하는 32비트 CDS III 실행 파일이 아닙니다.")
+        hook_offset = pe.get_offset_from_rva(
+            SHIP_PURCHASE_BLANK_SELECTION_HOOK_VA - pe.OPTIONAL_HEADER.ImageBase
+        )
+    finally:
+        pe.close()
+
+    current_hook = bytes(data[
+        hook_offset:hook_offset + len(SHIP_PURCHASE_BLANK_SELECTION_ORIGINAL)
+    ])
+    section = find_patch_section(data)
+    if current_hook == SHIP_PURCHASE_BLANK_SELECTION_ORIGINAL:
+        if (
+            section is not None
+            and section.raw_size >= (
+                SHIP_PURCHASE_BLANK_SELECTION_FIX_SLOT_OFFSET
+                + SHIP_PURCHASE_BLANK_SELECTION_FIX_SLOT_SIZE
+            )
+            and bytes(data[
+                section.raw_offset + SHIP_PURCHASE_BLANK_SELECTION_FIX_SLOT_OFFSET:
+                section.raw_offset + SHIP_PURCHASE_BLANK_SELECTION_FIX_SLOT_OFFSET
+                + len(SHIP_PURCHASE_BLANK_SELECTION_FIX_MAGIC)
+            ]) == SHIP_PURCHASE_BLANK_SELECTION_FIX_MAGIC
+        ):
+            raise ValueError("선박 구입 빈 슬롯 수정 코드가 남아 있지만 호출부가 원본 상태입니다.")
+        return False
+    if (
+        section is None
+        or section.raw_size < (
+            SHIP_PURCHASE_BLANK_SELECTION_FIX_SLOT_OFFSET
+            + SHIP_PURCHASE_BLANK_SELECTION_FIX_SLOT_SIZE
+        )
+        or section.virtual_size < (
+            SHIP_PURCHASE_BLANK_SELECTION_FIX_SLOT_OFFSET
+            + SHIP_PURCHASE_BLANK_SELECTION_FIX_SLOT_SIZE
+        )
+    ):
+        raise ValueError("선박 구입 빈 슬롯 수정 호출이 있으나 .patch 데이터를 찾지 못했습니다.")
+    slot_offset, slot_va = section.slot(
+        SHIP_PURCHASE_BLANK_SELECTION_FIX_SLOT_OFFSET,
+        SHIP_PURCHASE_BLANK_SELECTION_FIX_SLOT_SIZE,
+    )
+    expected_payload = _build_ship_purchase_blank_selection_fix_payload(slot_va)
+    expected_hook = _ship_purchase_blank_selection_fix_hook(
+        slot_va + SHIP_PURCHASE_BLANK_SELECTION_FIX_WRAPPER_OFFSET
+    )
+    if (
+        current_hook != expected_hook
+        or bytes(data[
+            slot_offset:slot_offset + SHIP_PURCHASE_BLANK_SELECTION_FIX_SLOT_SIZE
+        ]) != expected_payload
+    ):
+        raise ValueError("선박 구입 빈 슬롯 수정 상태를 검증하지 못했습니다.")
+    return True
+
+
+def apply_ship_purchase_blank_selection_fix(data: bytearray, enabled: bool) -> bool:
+    """Prevent a blank row in the ship-purchase list from indexing past candidates."""
+    current_enabled = _ship_purchase_blank_selection_fix_patch_info(data)
+    if current_enabled == enabled:
+        return False
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        hook_offset = pe.get_offset_from_rva(
+            SHIP_PURCHASE_BLANK_SELECTION_HOOK_VA - pe.OPTIONAL_HEADER.ImageBase
+        )
+    finally:
+        pe.close()
+
+    if enabled:
+        section, _created = ensure_patch_section(
+            data, PATCH_SECTION_SHIP_PURCHASE_BLANK_SELECTION_FIX_SIZE,
+        )
+        slot_offset, slot_va = section.slot(
+            SHIP_PURCHASE_BLANK_SELECTION_FIX_SLOT_OFFSET,
+            SHIP_PURCHASE_BLANK_SELECTION_FIX_SLOT_SIZE,
+        )
+        payload = _build_ship_purchase_blank_selection_fix_payload(slot_va)
+        current_payload = bytes(data[
+            slot_offset:slot_offset + SHIP_PURCHASE_BLANK_SELECTION_FIX_SLOT_SIZE
+        ])
+        if any(current_payload) and current_payload != payload:
+            raise ValueError("선박 구입 빈 슬롯 수정용 .patch 슬롯이 다른 데이터로 사용 중입니다.")
+        data[slot_offset:slot_offset + SHIP_PURCHASE_BLANK_SELECTION_FIX_SLOT_SIZE] = payload
+        data[
+            hook_offset:hook_offset + len(SHIP_PURCHASE_BLANK_SELECTION_ORIGINAL)
+        ] = _ship_purchase_blank_selection_fix_hook(
+            slot_va + SHIP_PURCHASE_BLANK_SELECTION_FIX_WRAPPER_OFFSET
+        )
+    else:
+        section = find_patch_section(data)
+        if section is None:
+            raise ValueError("선박 구입 빈 슬롯 수정의 복원 데이터를 찾지 못했습니다.")
+        data[
+            hook_offset:hook_offset + len(SHIP_PURCHASE_BLANK_SELECTION_ORIGINAL)
+        ] = SHIP_PURCHASE_BLANK_SELECTION_ORIGINAL
+        clear_slot(
+            data, section,
+            SHIP_PURCHASE_BLANK_SELECTION_FIX_SLOT_OFFSET,
+            SHIP_PURCHASE_BLANK_SELECTION_FIX_SLOT_SIZE,
+        )
+    return True
+
+
 def _read_npc_activity_ages_from_data(data: bytes) -> tuple[int, int]:
     """Read the inclusive age range used by the NPC activity predicate."""
     pe = pefile.PE(data=data, fast_load=True)
@@ -2960,6 +3183,84 @@ def _read_limit_operands(
     return tuple(values)
 
 
+def _person_ability_limit_code(limit: int) -> bytes:
+    """Encode the shared six-ability clamp with an unsigned 32-bit maximum."""
+    code = bytearray(bytes.fromhex("8b 44 24 04 56 68"))
+    code += struct.pack("<I", limit)
+    code += bytes.fromhex("6a 00 8d 34 81 8b 4c 24 14 51 8b 06 40 50")
+    call_va = PERSON_ABILITY_LIMIT_VA + len(code)
+    code += b"\xE8" + struct.pack("<i", 0x49E560 - (call_va + 5))
+    code += bytes.fromhex("83 c4 10 48 89 06 5e c2 08 00")
+    if len(code) > PERSON_ABILITY_LIMIT_BLOCK_SIZE:
+        raise AssertionError("능력치 상한 코드가 원래 함수 공간을 초과합니다.")
+    return bytes(code).ljust(PERSON_ABILITY_LIMIT_BLOCK_SIZE, b"\xCC")
+
+
+def _read_person_stat_limits_from_data(data: bytes | bytearray) -> tuple[int, int]:
+    """Read the live game clamps, validating their surrounding machine code."""
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        if pe.FILE_HEADER.Machine != 0x14C or pe.OPTIONAL_HEADER.ImageBase != 0x400000:
+            raise ValueError("지원하는 32비트 CDS III 실행 파일이 아닙니다.")
+
+        def offset(va: int) -> int:
+            return pe.get_offset_from_rva(va - pe.OPTIONAL_HEADER.ImageBase)
+
+        ability_offset = offset(PERSON_ABILITY_LIMIT_VA)
+        ability_code = bytes(data[ability_offset:ability_offset + PERSON_ABILITY_LIMIT_BLOCK_SIZE])
+        if ability_code == PERSON_ABILITY_ORIGINAL_CODE:
+            ability_limit = 100
+        elif ability_code[:6] == bytes.fromhex("8b 44 24 04 56 68"):
+            ability_limit = struct.unpack_from("<I", ability_code, 6)[0]
+            if ability_limit > PERSON_ABILITY_MAX or ability_code != _person_ability_limit_code(ability_limit):
+                raise ValueError("능력치 상한 함수의 코드를 검증하지 못했습니다.")
+        else:
+            raise ValueError("능력치 상한 함수의 코드를 검증하지 못했습니다.")
+
+        vitality_offset = offset(PERSON_VITALITY_LIMIT_VA)
+        if (
+            bytes(data[vitality_offset - 7:vitality_offset + 1])
+            != PERSON_VITALITY_ORIGINAL_PREFIX
+            or bytes(data[vitality_offset + 5:vitality_offset + 5 + len(PERSON_VITALITY_ORIGINAL_SUFFIX)])
+            != PERSON_VITALITY_ORIGINAL_SUFFIX
+        ):
+            raise ValueError("생명력 상한 함수의 코드를 검증하지 못했습니다.")
+        vitality_limit = struct.unpack_from("<I", data, vitality_offset + 1)[0]
+        if vitality_limit > PERSON_VITALITY_MAX:
+            raise ValueError("생명력 상한값이 0~9999 범위를 벗어납니다.")
+        return ability_limit, vitality_limit
+    finally:
+        pe.close()
+
+
+def read_person_stat_limits(target: Path) -> tuple[int, int]:
+    return _read_person_stat_limits_from_data(target.resolve(strict=True).read_bytes())
+
+
+def apply_person_stat_limits(data: bytearray, ability_limit: int, vitality_limit: int) -> bool:
+    if not 0 <= ability_limit <= PERSON_ABILITY_MAX:
+        raise ValueError("체력·지력·무력·매력·운·신앙심 공통 상한은 0~255 사이여야 합니다.")
+    if not 0 <= vitality_limit <= PERSON_VITALITY_MAX:
+        raise ValueError("생명력 상한은 0~9999 사이여야 합니다.")
+    current = _read_person_stat_limits_from_data(data)
+    if current == (ability_limit, vitality_limit):
+        return False
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        ability_offset = pe.get_offset_from_rva(PERSON_ABILITY_LIMIT_VA - pe.OPTIONAL_HEADER.ImageBase)
+        vitality_offset = pe.get_offset_from_rva(PERSON_VITALITY_LIMIT_VA - pe.OPTIONAL_HEADER.ImageBase)
+    finally:
+        pe.close()
+    if current[0] != ability_limit:
+        data[ability_offset:ability_offset + PERSON_ABILITY_LIMIT_BLOCK_SIZE] = (
+            PERSON_ABILITY_ORIGINAL_CODE if ability_limit == 100
+            else _person_ability_limit_code(ability_limit)
+        )
+    if current[1] != vitality_limit:
+        struct.pack_into("<I", data, vitality_offset + 1, vitality_limit)
+    return True
+
+
 def _write_limit_operands(
     data: bytearray,
     pe: pefile.PE,
@@ -2974,7 +3275,105 @@ def _write_limit_operands(
         struct.pack_into("<I", data, value_offset, value)
 
 
-def _read_gameplay_options_from_data(data: bytes) -> tuple[int, int, int, int, int, int, int, int, int]:
+def _player_fame_limit_payload(slot_va: int, fame_limit: int, infamy_limit: int) -> bytes:
+    """Route the original shared clamp to the correct player-field maximum."""
+    payload = bytearray(PLAYER_FAME_LIMIT_SLOT_SIZE)
+    payload[:len(PLAYER_FAME_LIMIT_MAGIC)] = PLAYER_FAME_LIMIT_MAGIC
+    struct.pack_into("<II", payload, 8, fame_limit, infamy_limit)
+    code_va = slot_va + PLAYER_FAME_LIMIT_CODE_OFFSET
+    # EAX is the field index: 0 is fame and 1 is infamy.  The overwritten
+    # instruction only pushed a maximum; keep all registers and the stack as
+    # they were when execution resumes at 0x4800EA.
+    code = bytearray(b"\x85\xC0\x75\x07\x68")
+    code += struct.pack("<I", fame_limit)
+    code += b"\xEB\x05\x68" + struct.pack("<I", infamy_limit)
+    code += b"\xE9" + struct.pack("<i", PLAYER_FAME_LIMIT_HOOK_END_VA - (code_va + 21))
+    if len(code) != 21:
+        raise AssertionError("명성·악명 상한 분기 크기가 올바르지 않습니다.")
+    payload[PLAYER_FAME_LIMIT_CODE_OFFSET:PLAYER_FAME_LIMIT_CODE_OFFSET + len(code)] = code
+    return bytes(payload)
+
+
+def _player_fame_limit_state(data: bytes | bytearray, pe: pefile.PE) -> tuple[int, int, bool]:
+    """Read the actual player clamp, including the independent-limit wrapper."""
+    hook_offset = pe.get_offset_from_rva(
+        PLAYER_FAME_LIMIT_HOOK_VA - pe.OPTIONAL_HEADER.ImageBase
+    )
+    if (
+        data[hook_offset - 5:hook_offset] != b"\x8B\x44\x24\x04\x56"
+        or data[hook_offset + 5:hook_offset + 14]
+        != b"\x6A\x00\x8D\xB4\x81\xAC\x00\x00\x00"
+    ):
+        raise ValueError("주인공 명성·악명 상한 함수 위치를 검증하지 못했습니다.")
+    hook = bytes(data[hook_offset:hook_offset + 5])
+    if hook[0] == 0x68:
+        shared_limit = struct.unpack_from("<I", hook, 1)[0]
+        if not FAME_INFAMY_LIMIT_MIN <= shared_limit <= 0x7FFF_FFFF:
+            raise ValueError("주인공 명성·악명 공통 상한값이 올바르지 않습니다.")
+        return shared_limit, shared_limit, False
+    if hook[0] != 0xE9:
+        raise ValueError("주인공 명성·악명 상한 명령이 예상한 형식이 아닙니다.")
+    section = find_patch_section(data)
+    if section is None:
+        raise ValueError("명성·악명 분기 코드의 .patch 섹션을 찾지 못했습니다.")
+    slot_offset, slot_va = section.slot(
+        PLAYER_FAME_LIMIT_SLOT_OFFSET, PLAYER_FAME_LIMIT_SLOT_SIZE,
+    )
+    payload = bytes(data[slot_offset:slot_offset + PLAYER_FAME_LIMIT_SLOT_SIZE])
+    if payload[:len(PLAYER_FAME_LIMIT_MAGIC)] != PLAYER_FAME_LIMIT_MAGIC:
+        raise ValueError("명성·악명 분기 코드의 식별자를 검증하지 못했습니다.")
+    fame_limit, infamy_limit = struct.unpack_from("<II", payload, 8)
+    if not (
+        FAME_INFAMY_LIMIT_MIN <= fame_limit <= FAME_LIMIT_MAX
+        and FAME_INFAMY_LIMIT_MIN <= infamy_limit <= INFAMY_LIMIT_MAX
+    ):
+        raise ValueError("명성·악명 분기 코드의 상한값이 범위를 벗어납니다.")
+    expected_hook = b"\xE9" + struct.pack(
+        "<i", slot_va + PLAYER_FAME_LIMIT_CODE_OFFSET - PLAYER_FAME_LIMIT_HOOK_END_VA,
+    )
+    if (
+        hook != expected_hook
+        or payload != _player_fame_limit_payload(slot_va, fame_limit, infamy_limit)
+    ):
+        raise ValueError("명성·악명 분기 코드가 검증한 형식과 다릅니다.")
+    return fame_limit, infamy_limit, True
+
+
+def _apply_player_fame_limits(data: bytearray, fame_limit: int, infamy_limit: int) -> None:
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        current_fame, current_infamy, installed = _player_fame_limit_state(data, pe)
+        if (current_fame, current_infamy) == (fame_limit, infamy_limit):
+            return
+        hook_offset = pe.get_offset_from_rva(
+            PLAYER_FAME_LIMIT_HOOK_VA - pe.OPTIONAL_HEADER.ImageBase
+        )
+    finally:
+        pe.close()
+    if fame_limit == infamy_limit:
+        if installed:
+            section = find_patch_section(data)
+            if section is None:
+                raise ValueError("명성·악명 분기 코드의 .patch 섹션을 찾지 못했습니다.")
+            clear_slot(data, section, PLAYER_FAME_LIMIT_SLOT_OFFSET, PLAYER_FAME_LIMIT_SLOT_SIZE)
+        data[hook_offset:hook_offset + 5] = b"\x68" + struct.pack("<I", fame_limit)
+        return
+    section, _ = ensure_patch_section(data, PATCH_SECTION_PLAYER_FAME_LIMIT_SIZE)
+    slot_offset, slot_va = section.slot(
+        PLAYER_FAME_LIMIT_SLOT_OFFSET, PLAYER_FAME_LIMIT_SLOT_SIZE,
+    )
+    current_slot = bytes(data[slot_offset:slot_offset + PLAYER_FAME_LIMIT_SLOT_SIZE])
+    if not installed and any(current_slot):
+        raise ValueError("명성·악명 분기 코드의 예약 공간이 이미 사용 중입니다.")
+    data[slot_offset:slot_offset + PLAYER_FAME_LIMIT_SLOT_SIZE] = (
+        _player_fame_limit_payload(slot_va, fame_limit, infamy_limit)
+    )
+    data[hook_offset:hook_offset + 5] = b"\xE9" + struct.pack(
+        "<i", slot_va + PLAYER_FAME_LIMIT_CODE_OFFSET - PLAYER_FAME_LIMIT_HOOK_END_VA,
+    )
+
+
+def _read_gameplay_options_from_data(data: bytes) -> tuple[int, int, int, int, int, int, int, int, int, int]:
     """Read and validate the editable gameplay operands."""
     pe = pefile.PE(data=data, fast_load=True)
     try:
@@ -2998,6 +3397,13 @@ def _read_gameplay_options_from_data(data: bytes) -> tuple[int, int, int, int, i
         if len(set(preparation_values)) != 1:
             raise ValueError("EXE 안의 탐험 준비 기간 네 곳이 서로 다릅니다.")
 
+        telescope_bonus_offset = offset(TELESCOPE_CITY_DISCOVERY_BONUS_VA)
+        if data[telescope_bonus_offset - 4:telescope_bonus_offset] != bytes.fromhex("83 44 24 14"):
+            raise ValueError("망원경 도시 발견 보정 위치를 검증하지 못했습니다.")
+        telescope_city_discovery_bonus = struct.unpack_from("b", data, telescope_bonus_offset)[0]
+        if not 0 <= telescope_city_discovery_bonus <= TELESCOPE_CITY_DISCOVERY_BONUS_MAX:
+            raise ValueError("망원경 도시 발견 보정값이 지원 범위를 벗어납니다.")
+
         succession_offset = offset(SUCCESSION_MIN_AGE_VA)
         if data[succession_offset - 2:succession_offset] != bytes.fromhex("83 f8"):
             raise ValueError(f"세대교체 나이 위치 0x{SUCCESSION_MIN_AGE_VA:X}을(를) 검증하지 못했습니다.")
@@ -3011,11 +3417,11 @@ def _read_gameplay_options_from_data(data: bytes) -> tuple[int, int, int, int, i
         cold_south_limit = struct.unpack_from("<I", data, south_offset)[0]
         cash_limit = _read_limit_operands(data, pe, CASH_LIMIT_OPERANDS, "소지금 상한")[0]
         deposit_limit = _read_limit_operands(data, pe, DEPOSIT_LIMIT_OPERANDS, "저금 상한")[0]
-        fame_limit = _read_limit_operands(data, pe, FAME_LIMIT_OPERANDS, "명성 상한")[0]
-        infamy_limit = _read_limit_operands(data, pe, INFAMY_LIMIT_OPERANDS, "악명 상한")[0]
+        fame_limit, infamy_limit, _ = _player_fame_limit_state(data, pe)
         return (
             long_rest_max,
             preparation_values[0],
+            telescope_city_discovery_bonus,
             succession_age,
             cold_north_limit,
             cold_south_limit,
@@ -3067,6 +3473,7 @@ def apply_gameplay_options(
     data: bytearray,
     long_rest_max: int,
     exploration_preparation_days: int,
+    telescope_city_discovery_bonus: int,
     succession_min_age: int,
     cold_north_limit: int,
     cold_south_limit: int,
@@ -3075,11 +3482,15 @@ def apply_gameplay_options(
     fame_limit: int,
     infamy_limit: int,
 ) -> bool:
-    """Set rest, exploration, money and polar-cold parameters."""
+    """Set rest, exploration, city-sight, money and polar-cold parameters."""
     if not 1 <= long_rest_max <= 127:
         raise ValueError("장기 휴양 최대 기간은 1~127개월 사이여야 합니다.")
     if not 1 <= exploration_preparation_days <= 127:
         raise ValueError("탐험 준비 기간은 1~127일 사이여야 합니다.")
+    if not 0 <= telescope_city_discovery_bonus <= TELESCOPE_CITY_DISCOVERY_BONUS_MAX:
+        raise ValueError(
+            f"망원경 도시 발견 보정은 0~{TELESCOPE_CITY_DISCOVERY_BONUS_MAX}칸 사이여야 합니다."
+        )
     if not 1 <= succession_min_age <= 127:
         raise ValueError("세대교체 가능 나이는 1~127세 사이여야 합니다.")
     if not 0 <= cold_north_limit <= 20000 or not 0 <= cold_south_limit <= 20000:
@@ -3097,6 +3508,7 @@ def apply_gameplay_options(
     target = (
         long_rest_max,
         exploration_preparation_days,
+        telescope_city_discovery_bonus,
         succession_min_age,
         cold_north_limit,
         cold_south_limit,
@@ -3110,15 +3522,11 @@ def apply_gameplay_options(
         displayed_days = _read_exploration_preparation_message_days(bytes(data), pe)
         cash_values = _read_limit_operands(bytes(data), pe, CASH_LIMIT_OPERANDS, "소지금 상한")
         deposit_values = _read_limit_operands(bytes(data), pe, DEPOSIT_LIMIT_OPERANDS, "저금 상한")
-        fame_values = _read_limit_operands(bytes(data), pe, FAME_LIMIT_OPERANDS, "명성 상한")
-        infamy_values = _read_limit_operands(bytes(data), pe, INFAMY_LIMIT_OPERANDS, "악명 상한")
         if (
             current == target
             and displayed_days == exploration_preparation_days
             and all(value == cash_limit for value in cash_values)
             and all(value == deposit_limit for value in deposit_values)
-            and all(value == fame_limit for value in fame_values)
-            and all(value == infamy_limit for value in infamy_values)
         ):
             return False
 
@@ -3128,6 +3536,7 @@ def apply_gameplay_options(
         data[offset(LONG_REST_MAX_VA)] = long_rest_max
         for va in EXPLORATION_PREPARATION_VAS:
             data[offset(va)] = exploration_preparation_days
+        data[offset(TELESCOPE_CITY_DISCOVERY_BONUS_VA)] = telescope_city_discovery_bonus
         message_offset = offset(EXPLORATION_PREPARATION_MESSAGE_VA)
         message = _exploration_preparation_message(exploration_preparation_days)
         if len(message) + 1 > EXPLORATION_PREPARATION_MESSAGE_SIZE:
@@ -3140,8 +3549,7 @@ def apply_gameplay_options(
         struct.pack_into("<I", data, offset(COLD_SOUTH_LIMIT_VA), cold_south_limit)
         _write_limit_operands(data, pe, CASH_LIMIT_OPERANDS, "소지금 상한", cash_limit)
         _write_limit_operands(data, pe, DEPOSIT_LIMIT_OPERANDS, "저금 상한", deposit_limit)
-        _write_limit_operands(data, pe, FAME_LIMIT_OPERANDS, "명성 상한", fame_limit)
-        _write_limit_operands(data, pe, INFAMY_LIMIT_OPERANDS, "악명 상한", infamy_limit)
+        _apply_player_fame_limits(data, fame_limit, infamy_limit)
         return True
     finally:
         pe.close()
@@ -3362,12 +3770,12 @@ def _read_person_records_from_data(data: bytes) -> tuple[PersonRecord, ...]:
             employment_state = struct.unpack_from("<i", data, offset + PERSON_EMPLOYMENT_STATE_OFFSET)[0]
             city, building, blood = struct.unpack_from("<iii", data, offset + PERSON_CITY_ID_OFFSET)
             vitality = struct.unpack_from("<I", data, offset + PERSON_VITALITY_OFFSET)[0]
-            hire_cost = struct.unpack_from("<I", data, offset + PERSON_HIRE_COST_OFFSET)[0]
+            hire_cost_coefficient = struct.unpack_from("<I", data, offset + PERSON_HIRE_COST_COEFFICIENT_OFFSET)[0]
             abilities = struct.unpack_from(f"<{PERSON_ABILITY_COUNT}I", data, offset + PERSON_ABILITIES_OFFSET)
             skills = struct.unpack_from(f"<{PERSON_SKILL_COUNT}I", data, offset + PERSON_SKILLS_OFFSET)
-            if gender not in (0, 1) or not (-1 <= face <= (143 if gender else 413)) or not -100 <= age <= 100 or not 0 <= nation <= 18 or not 0 <= job <= 3 or not 0 <= fame <= 65535 or not 0 <= infamy <= 65535 or employment_state not in (0, 1, 2) or not -1 <= city <= 225 or not 0 <= building <= 15 or not 0 <= blood <= 3 or not 0 <= vitality <= PERSON_VITALITY_MAX or not 0 <= hire_cost <= 2000 or any(not 0 <= value <= PERSON_ABILITY_MAX for value in abilities) or any(not 0 <= value <= PERSON_SKILL_MAX for value in skills):
+            if gender not in (0, 1) or not (-1 <= face <= (143 if gender else 413)) or not -100 <= age <= 100 or not 0 <= nation <= 18 or not 0 <= job <= 3 or not 0 <= fame <= 65535 or not 0 <= infamy <= 65535 or employment_state not in (0, 1, 2) or not -1 <= city <= 225 or not 0 <= building <= 15 or not 0 <= blood <= 3 or not 0 <= vitality <= PERSON_VITALITY_MAX or not 0 <= hire_cost_coefficient <= PERSON_HIRE_COST_COEFFICIENT_MAX or any(not 0 <= value <= PERSON_ABILITY_MAX for value in abilities) or any(not 0 <= value <= PERSON_SKILL_MAX for value in skills):
                 raise ValueError(f"인물 {identifier}번 마스터 값을 검증하지 못했습니다.")
-            records.append(PersonRecord(identifier, f"{first} {last}".strip(), face, gender, age, nation, job, fame, infamy, employment_state, city, building, blood, vitality, hire_cost, abilities, skills))
+            records.append(PersonRecord(identifier, f"{first} {last}".strip(), face, gender, age, nation, job, fame, infamy, employment_state, city, building, blood, vitality, hire_cost_coefficient, abilities, skills))
         return tuple(records)
     finally:
         pe.close()
@@ -3380,10 +3788,10 @@ def read_person_records(target: Path) -> tuple[PersonRecord, ...]:
 def apply_person_edit(data: bytearray, edit: PersonEdit | None) -> bool:
     if edit is None:
         return False
-    if not 0 <= edit.identifier < PERSON_RECORD_COUNT or edit.gender not in (0, 1) or not -1 <= edit.face_code <= (143 if edit.gender else 413) or not -100 <= edit.age_at_1480 <= 100 or not 0 <= edit.nation_id <= 18 or not 0 <= edit.job_id <= 3 or not 0 <= edit.fame <= 65535 or not 0 <= edit.infamy <= 65535 or edit.employment_state not in (0, 1, 2) or not -1 <= edit.city_id <= 225 or not 0 <= edit.building_id <= 15 or not 0 <= edit.blood_id <= 3 or not 0 <= edit.vitality <= PERSON_VITALITY_MAX or not 0 <= edit.hire_cost <= 2000 or len(edit.abilities) != PERSON_ABILITY_COUNT or any(not 0 <= value <= PERSON_ABILITY_MAX for value in edit.abilities) or len(edit.skills) != PERSON_SKILL_COUNT or any(not 0 <= value <= PERSON_SKILL_MAX for value in edit.skills):
+    if not 0 <= edit.identifier < PERSON_RECORD_COUNT or edit.gender not in (0, 1) or not -1 <= edit.face_code <= (143 if edit.gender else 413) or not -100 <= edit.age_at_1480 <= 100 or not 0 <= edit.nation_id <= 18 or not 0 <= edit.job_id <= 3 or not 0 <= edit.fame <= 65535 or not 0 <= edit.infamy <= 65535 or edit.employment_state not in (0, 1, 2) or not -1 <= edit.city_id <= 225 or not 0 <= edit.building_id <= 15 or not 0 <= edit.blood_id <= 3 or not 0 <= edit.vitality <= PERSON_VITALITY_MAX or not 0 <= edit.hire_cost_coefficient <= PERSON_HIRE_COST_COEFFICIENT_MAX or len(edit.abilities) != PERSON_ABILITY_COUNT or any(not 0 <= value <= PERSON_ABILITY_MAX for value in edit.abilities) or len(edit.skills) != PERSON_SKILL_COUNT or any(not 0 <= value <= PERSON_SKILL_MAX for value in edit.skills):
         raise ValueError("인물 입력값을 확인해 주세요.")
     current = _read_person_records_from_data(bytes(data))[edit.identifier]
-    if (current.face_code, current.gender, current.age_at_1480, current.nation_id, current.job_id, current.fame, current.infamy, current.employment_state, current.city_id, current.building_id, current.blood_id, current.vitality, current.hire_cost, current.abilities, current.skills) == (edit.face_code, edit.gender, edit.age_at_1480, edit.nation_id, edit.job_id, edit.fame, edit.infamy, edit.employment_state, edit.city_id, edit.building_id, edit.blood_id, edit.vitality, edit.hire_cost, edit.abilities, edit.skills):
+    if (current.face_code, current.gender, current.age_at_1480, current.nation_id, current.job_id, current.fame, current.infamy, current.employment_state, current.city_id, current.building_id, current.blood_id, current.vitality, current.hire_cost_coefficient, current.abilities, current.skills) == (edit.face_code, edit.gender, edit.age_at_1480, edit.nation_id, edit.job_id, edit.fame, edit.infamy, edit.employment_state, edit.city_id, edit.building_id, edit.blood_id, edit.vitality, edit.hire_cost_coefficient, edit.abilities, edit.skills):
         return False
     offset = PERSON_TABLE_FILE_OFFSET + edit.identifier * PERSON_RECORD_SIZE
     face_raw = 0xFFFFFFFF if edit.face_code < 0 else edit.face_code
@@ -3395,7 +3803,7 @@ def apply_person_edit(data: bytearray, edit: PersonEdit | None) -> bool:
     struct.pack_into("<iii", data, offset + PERSON_CITY_ID_OFFSET, edit.city_id, edit.building_id, edit.blood_id)
     struct.pack_into("<I", data, offset + PERSON_VITALITY_OFFSET, edit.vitality)
     struct.pack_into(f"<{PERSON_ABILITY_COUNT}I", data, offset + PERSON_ABILITIES_OFFSET, *edit.abilities)
-    struct.pack_into("<I", data, offset + PERSON_HIRE_COST_OFFSET, edit.hire_cost)
+    struct.pack_into("<I", data, offset + PERSON_HIRE_COST_COEFFICIENT_OFFSET, edit.hire_cost_coefficient)
     struct.pack_into(f"<{PERSON_SKILL_COUNT}I", data, offset + PERSON_SKILLS_OFFSET, *edit.skills)
     return True
 
@@ -3993,6 +4401,10 @@ def _discovery_coordinate_offset(pe: pefile.PE, identifier: int) -> int:
     """Return the map-rectangle overlay offset for an editor discovery number."""
     if not 0 <= identifier < DISCOVERY_RECORD_COUNT:
         raise ValueError("발견물 번호가 올바르지 않습니다.")
+    if identifier == DISCOVERY_METADATA_TABLE_RECORD_COUNT:
+        return pe.get_offset_from_rva(
+            DISCOVERY_FINAL_COORDINATE_RECORD_VA - pe.OPTIONAL_HEADER.ImageBase
+        )
     return pe.get_offset_from_rva(
         DISCOVERY_COORDINATE_TABLE_VA - pe.OPTIONAL_HEADER.ImageBase
     ) + identifier * DISCOVERY_RECORD_SIZE
@@ -4023,9 +4435,14 @@ def _read_discovery_records_from_data(data: bytes) -> tuple[DiscoveryRecord, ...
         coordinate_table_offset = pe.get_offset_from_rva(
             DISCOVERY_COORDINATE_TABLE_VA - pe.OPTIONAL_HEADER.ImageBase
         )
-        coordinate_table_size = DISCOVERY_RECORD_COUNT * DISCOVERY_RECORD_SIZE
+        coordinate_table_size = DISCOVERY_METADATA_TABLE_RECORD_COUNT * DISCOVERY_RECORD_SIZE
         if coordinate_table_offset < 0 or coordinate_table_offset + coordinate_table_size > len(data):
             raise ValueError("발견물 좌표 테이블의 범위를 검증하지 못했습니다.")
+        final_coordinate_offset = pe.get_offset_from_rva(
+            DISCOVERY_FINAL_COORDINATE_RECORD_VA - pe.OPTIONAL_HEADER.ImageBase
+        )
+        if final_coordinate_offset < 0 or final_coordinate_offset + 16 > len(data):
+            raise ValueError("마지막 발견물 좌표 레코드의 범위를 검증하지 못했습니다.")
         description_table_offset = pe.get_offset_from_rva(
             DISCOVERY_DESCRIPTION_POINTER_TABLE_VA - pe.OPTIONAL_HEADER.ImageBase
         )
@@ -4041,7 +4458,10 @@ def _read_discovery_records_from_data(data: bytes) -> tuple[DiscoveryRecord, ...
                 metadata_table_offset + identifier * DISCOVERY_RECORD_SIZE
                 if identifier < DISCOVERY_METADATA_TABLE_RECORD_COUNT else final_metadata_offset
             )
-            coordinate_offset = coordinate_table_offset + identifier * DISCOVERY_RECORD_SIZE
+            coordinate_offset = (
+                coordinate_table_offset + identifier * DISCOVERY_RECORD_SIZE
+                if identifier < DISCOVERY_METADATA_TABLE_RECORD_COUNT else final_coordinate_offset
+            )
             name_va = struct.unpack_from("<I", data, metadata_offset + DISCOVERY_NAME_POINTER_OFFSET)[0]
             try:
                 name_offset = pe.get_offset_from_rva(name_va - pe.OPTIONAL_HEADER.ImageBase)
@@ -4552,6 +4972,9 @@ def _read_library_book_edit_from_data(
         author = read_text(
             record_offset + LIBRARY_BOOK_AUTHOR_POINTER_OFFSET, "저자",
         )
+        appearance_year = LIBRARY_BOOK_YEAR_BASE + struct.unpack_from(
+            "<i", data, record_offset + LIBRARY_BOOK_APPEARANCE_YEAR_OFFSET,
+        )[0]
         raw_city_ids = struct.unpack_from(
             f"<{LIBRARY_BOOK_CITY_CAPACITY}i",
             data,
@@ -4566,7 +4989,7 @@ def _read_library_book_edit_from_data(
             raise ValueError(
                 f"도서관 책 {record_number}번 출현 도시에 중복값이 있습니다."
             )
-        return LibraryBookEdit(record_number, title, author, city_ids)
+        return LibraryBookEdit(record_number, title, author, city_ids, appearance_year)
     finally:
         pe.close()
 
@@ -4580,7 +5003,7 @@ def apply_library_book_edits(
     data: bytearray,
     edits: tuple[LibraryBookEdit, ...],
 ) -> bool:
-    """Update library-book title, author and eight city slots."""
+    """Update library-book title, author, appearance year and eight city slots."""
     if not edits:
         return False
     if len({edit.record_number for edit in edits}) != len(edits):
@@ -4619,8 +5042,10 @@ def apply_library_book_edits(
             or any(not 0 <= city_id < CITY_RECORD_COUNT for city_id in city_ids)
         ):
             raise ValueError("책 출현 도시는 중복 없이 최대 8곳까지 설정할 수 있습니다.")
+        if not LIBRARY_BOOK_YEAR_BASE <= edit.appearance_year <= LIBRARY_BOOK_YEAR_MAX:
+            raise ValueError("책 출현 연도는 1480~1600 사이여야 합니다.")
         normalized_edit = LibraryBookEdit(
-            edit.record_number, title, author, city_ids,
+            edit.record_number, title, author, city_ids, edit.appearance_year,
         )
         current = _read_library_book_edit_from_data(bytes(data), edit.record_number)
         if current != normalized_edit:
@@ -4680,15 +5105,22 @@ def apply_library_book_edits(
                 record_offset + LIBRARY_BOOK_AUTHOR_POINTER_OFFSET,
                 slot_va,
             )
-        padded_city_ids = edit.city_ids + (-1,) * (
-            LIBRARY_BOOK_CITY_CAPACITY - len(edit.city_ids)
-        )
-        struct.pack_into(
-            f"<{LIBRARY_BOOK_CITY_CAPACITY}i",
-            data,
-            record_offset + LIBRARY_BOOK_CITY_LIST_OFFSET,
-            *padded_city_ids,
-        )
+        if edit.appearance_year != current.appearance_year:
+            struct.pack_into(
+                "<i", data,
+                record_offset + LIBRARY_BOOK_APPEARANCE_YEAR_OFFSET,
+                edit.appearance_year - LIBRARY_BOOK_YEAR_BASE,
+            )
+        if edit.city_ids != current.city_ids:
+            padded_city_ids = edit.city_ids + (-1,) * (
+                LIBRARY_BOOK_CITY_CAPACITY - len(edit.city_ids)
+            )
+            struct.pack_into(
+                f"<{LIBRARY_BOOK_CITY_CAPACITY}i",
+                data,
+                record_offset + LIBRARY_BOOK_CITY_LIST_OFFSET,
+                *padded_city_ids,
+            )
     for edit, _title_bytes, _author_bytes, _current in normalized:
         if _read_library_book_edit_from_data(bytes(data), edit.record_number) != edit:
             raise ValueError("도서관 책 정보의 저장 후 검증에 실패했습니다.")
@@ -5164,8 +5596,8 @@ def read_settings(
     target: Path,
 ) -> tuple[
     str, tuple[tuple[int, int], ...], int, int, bool, int, int, int, int, int,
-    int, int, int, int, int, int, bool, PirateVarietySettings, bool, Decimal, bool,
-    bool, bool, bool, bool, bool, bool, bool, bool,
+    int, int, int, int, int, int, int, bool, PirateVarietySettings, bool, Decimal, bool,
+    bool, bool, bool, bool, bool, bool, bool, bool, bool,
 ]:
     """Read the settings currently encoded in a selected executable."""
     target = target.resolve(strict=True)
@@ -5210,7 +5642,8 @@ def read_settings(
             _judgment_fix_patch_info(data),
             _cannon_accuracy_fix_patch_info(data),
             _ship_reuse_fix_patch_info(data),
-            read_knossos_hint_fix_state(data),
+            _ship_purchase_blank_selection_fix_patch_info(data),
+            read_tavern_hint_bug_fix_state(data),
             _disev_language_fix_patch_info(data),
             _history_elapsed_years_fix_patch_info(data),
             read_discover_avi_patch_state(data),
@@ -5246,6 +5679,7 @@ def apply_all(
     npc_daily_departure_enabled: bool,
     long_rest_max: int,
     exploration_preparation_days: int,
+    telescope_city_discovery_bonus: int,
     succession_min_age: int,
     cold_north_limit: int,
     cold_south_limit: int,
@@ -5266,7 +5700,8 @@ def apply_all(
     judgment_fix_enabled: bool = False,
     cannon_accuracy_fix_enabled: bool = False,
     ship_reuse_fix_enabled: bool = False,
-    knossos_hint_fix_enabled: bool = False,
+    ship_purchase_blank_selection_fix_enabled: bool = False,
+    tavern_hint_bug_fix_enabled: bool = False,
     disev_language_fix_enabled: bool = False,
     history_elapsed_years_fix_enabled: bool = False,
     discover_avi_enabled: bool = False,
@@ -5283,6 +5718,8 @@ def apply_all(
     hint_edit: HintEdit | None = None,
     discovery_hint_edit: DiscoveryHintEdit | None = None,
     library_book_edits: tuple[LibraryBookEdit, ...] = (),
+    person_ability_limit: int | None = None,
+    person_vitality_limit: int | None = None,
 ) -> Path | None:
     """Apply all selected settings atomically and create one original backup."""
     target = target.resolve(strict=True)
@@ -5291,7 +5728,8 @@ def apply_all(
     failed_pottery_was_enabled = read_failed_pottery_patch_state(original)
     judgment_fix_was_enabled = _judgment_fix_patch_info(original)
     ship_reuse_fix_was_enabled = _ship_reuse_fix_patch_info(original)
-    knossos_hint_fix_was_enabled = read_knossos_hint_fix_state(original)
+    ship_purchase_blank_selection_fix_was_enabled = _ship_purchase_blank_selection_fix_patch_info(original)
+    tavern_hint_bug_fix_was_enabled = read_tavern_hint_bug_fix_state(original)
     history_elapsed_years_fix_was_enabled = _history_elapsed_years_fix_patch_info(original)
     discover_avi_was_enabled = read_discover_avi_patch_state(original)
     # Coordinate-style restoration may clear extensions after its own payload.
@@ -5307,8 +5745,10 @@ def apply_all(
         apply_judgment_fix(before_coordinate, False)
     if ship_reuse_fix_was_enabled:
         apply_ship_reuse_fix(before_coordinate, False)
-    if knossos_hint_fix_was_enabled:
-        apply_knossos_hint_fix(before_coordinate, False)
+    if ship_purchase_blank_selection_fix_was_enabled:
+        apply_ship_purchase_blank_selection_fix(before_coordinate, False)
+    if tavern_hint_bug_fix_was_enabled:
+        apply_tavern_hint_bug_fix(before_coordinate, False)
     if history_elapsed_years_fix_was_enabled:
         apply_history_elapsed_years_fix(before_coordinate, False)
     if _eclipse_patch_info(bytes(before_coordinate))[0]:
@@ -5323,12 +5763,14 @@ def apply_all(
     apply_judgment_fix(updated, judgment_fix_enabled)
     apply_cannon_accuracy_fix(updated, cannon_accuracy_fix_enabled)
     apply_ship_reuse_fix(updated, ship_reuse_fix_enabled)
+    apply_ship_purchase_blank_selection_fix(updated, ship_purchase_blank_selection_fix_enabled)
     apply_disev_language_fix(updated, disev_language_fix_enabled)
     apply_history_elapsed_years_fix(updated, history_elapsed_years_fix_enabled)
     apply_gameplay_options(
         updated,
         long_rest_max,
         exploration_preparation_days,
+        telescope_city_discovery_bonus,
         succession_min_age,
         cold_north_limit,
         cold_south_limit,
@@ -5337,6 +5779,10 @@ def apply_all(
         fame_limit,
         infamy_limit,
     )
+    if person_ability_limit is not None or person_vitality_limit is not None:
+        if person_ability_limit is None or person_vitality_limit is None:
+            raise ValueError("능력치·생명력 상한은 함께 지정해야 합니다.")
+        apply_person_stat_limits(updated, person_ability_limit, person_vitality_limit)
     apply_npc_activity_ages(updated, npc_activity_min_age, npc_activity_max_age)
     apply_combat_encounter_denominators(
         updated,
@@ -5363,8 +5809,8 @@ def apply_all(
     # so a checked feature can never be saved half-applied.
     if failed_pottery_enabled or failed_pottery_was_enabled:
         apply_failed_pottery_patch(updated, failed_pottery_enabled)
-    if knossos_hint_fix_enabled or knossos_hint_fix_was_enabled:
-        apply_knossos_hint_fix(updated, knossos_hint_fix_enabled)
+    if tavern_hint_bug_fix_enabled or tavern_hint_bug_fix_was_enabled:
+        apply_tavern_hint_bug_fix(updated, tavern_hint_bug_fix_enabled)
     if discover_avi_enabled or discover_avi_was_enabled:
         apply_discover_avi_patch(updated, discover_avi_enabled)
     if bytes(updated) == original:

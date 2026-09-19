@@ -86,6 +86,15 @@ SHIP_REUSE_FIX_SLOT_SIZE = 0x100
 # changing subcondition 17 in the same handler.
 HISTORY_ELAPSED_YEARS_FIX_SLOT_OFFSET = 0x14300
 HISTORY_ELAPSED_YEARS_FIX_SLOT_SIZE = 0x100
+# The player fame and infamy share one original clamp.  This wrapper selects
+# an independent maximum for each field without touching voyage provisions.
+PLAYER_FAME_LIMIT_SLOT_OFFSET = 0x14400
+PLAYER_FAME_LIMIT_SLOT_SIZE = 0x100
+# The ship-purchase list returns an index even when a blank row is clicked.
+# Keep a small guard wrapper in its own slot so the invalid index can return
+# to the list instead of indexing past the temporary candidate array.
+SHIP_PURCHASE_BLANK_SELECTION_FIX_SLOT_OFFSET = 0x14500
+SHIP_PURCHASE_BLANK_SELECTION_FIX_SLOT_SIZE = 0x100
 # Discovery descriptions are independent pointer strings.  A fixed 512-byte
 # row leaves room beyond every original Korean description while keeping each
 # discovery edit isolated from its neighbours.
@@ -118,6 +127,8 @@ PATCH_SECTION_NPC_DAILY_DEPARTURE_SIZE = 0x15000
 PATCH_SECTION_JUDGMENT_FIX_SIZE = 0x14200
 PATCH_SECTION_SHIP_REUSE_FIX_SIZE = 0x14300
 PATCH_SECTION_HISTORY_ELAPSED_YEARS_FIX_SIZE = 0x14400
+PATCH_SECTION_PLAYER_FAME_LIMIT_SIZE = 0x15000
+PATCH_SECTION_SHIP_PURCHASE_BLANK_SELECTION_FIX_SIZE = 0x14600
 PATCH_SECTION_DISCOVERY_DESCRIPTIONS_SIZE = 0x32000
 PATCH_SECTION_LIBRARY_HINT_NAMES_SIZE = 0x37000
 PATCH_SECTION_LIBRARY_BOOKS_SIZE = 0x41000

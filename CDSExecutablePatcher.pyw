@@ -8,7 +8,7 @@ import threading
 import tkinter as tk
 import ctypes
 from pathlib import Path
-from tkinter import filedialog, ttk
+from tkinter import filedialog, font as tkfont, ttk
 
 from PIL import Image, ImageTk
 
@@ -47,6 +47,11 @@ from avi_preview import AviPreview
 from city_reader import CityImageReadError, read_city_image
 from discover_animation_preview import DiscoverAnimationPreview
 from discover_avi_assets import DiscoverAviAssetError, install_discover_avi_assets
+from discover_avi_event_patch import (
+    DiscoverAviEventPatchError,
+    apply as apply_discover_avi_event_patch,
+    is_enabled as is_discover_avi_event_patch_enabled,
+)
 from discovery_hint_links import (
     DiscoveryHintBookSource,
     DiscoveryHintLink,
@@ -66,6 +71,9 @@ from patch_cds_integrated import (
     SponsorRecord,
     PersonEdit,
     PersonRecord,
+    PERSON_ABILITY_MAX,
+    PERSON_HIRE_COST_COEFFICIENT_MAX,
+    PERSON_VITALITY_MAX,
     ShipTypeEdit,
     ShipTypeRecord,
     CityEdit,
@@ -102,6 +110,7 @@ from patch_cds_integrated import (
     read_barmaid_records,
     read_sponsor_records,
     read_person_records,
+    read_person_stat_limits,
     read_ship_type_records,
     read_city_records,
     read_trade_good_names,
@@ -133,6 +142,7 @@ MISTRANSLATION_DETAILS = """by kseokjung, 오쌍, ladyous
 예하 → 성하
 웅변 → 변론
 규칙 → 규율
+주인공 정보의 빚 → 계약금
 깨진 일본어 문장 → 그런 말도 안되는…이 자식 그거 누구한테 들었어！
 
 [지명]
@@ -191,9 +201,20 @@ SHIP_REUSE_FIX_DETAILS = """선박 슬롯 재사용 중량 버그 수정
 체크 해제 시 위 수정 사항을 원본 상태로 복원합니다.
 """
 
-KNOSSOS_HINT_FIX_DETAILS = """크노소스 주점 힌트 수정
+SHIP_PURCHASE_BLANK_SELECTION_FIX_DETAILS = """선박 구입 빈 슬롯 종료 버그 수정
 
-- 주점 힌트 ID 88의 잘못된 대상 코드 302를 크노소스 발견물 코드 112로 수정합니다.
+- 도크 후 해당 도시에서 판매 가능한 선종이 줄어든 상태로 선박 구입 목록의 빈 줄을 누르면 게임이 종료되는 문제를 수정합니다.
+- 선종 후보 개수를 벗어난 선택값은 선박 구입 목록을 다시 표시하도록 처리합니다.
+- 취소와 정상적인 선박 선택·구입 흐름은 변경하지 않습니다.
+
+체크 해제 시 위 수정 사항을 원본 상태로 복원합니다.
+"""
+
+TAVERN_HINT_BUG_FIX_DETAILS = """주점 힌트 버그 수정
+
+- 크노소스 주점 힌트(ID 88)의 잘못된 대상 코드 302를 크노소스 발견물 코드 112로 수정합니다.
+- 카카오 주점 힌트(ID 152)의 제공 도시를 메리다에서 미틀라로 수정합니다.
+- 이전 버전에서 크노소스 수정만 적용한 EXE도 이 항목이 선택된 상태로 읽어, 다음 저장 시 함께 보정합니다.
 
 체크 해제 시 위 수정 사항을 원본 상태로 복원합니다.
 """
@@ -231,10 +252,11 @@ DISCOVER_AVI_DETAILS = """DISCOVER 대신 AVI 사용
 
 - DISCOVER.CDS의 29개 스프라이트 애니메이션을 Cinepak AVI로 재생합니다.
 - 내장된 I70_0000.AVI~I98_0000.AVI를 선택한 EXE의 AVI 폴더에 복사합니다.
-- 각 발견물은 원래 사용하던 DISCOVER 파트와 같은 내용의 AVI로 연결됩니다.
+- EXE 발견물 레코드를 바꿔 백과사전 삽화도 같은 AVI를 사용하게 합니다.
+- DISEV.CDS의 실제 발견 이벤트 14개도 `CG 재생` 명령에서 대응 `AVI 재생` 명령으로 바꿉니다.
 - 영상은 원본 240×176 이미지를 확대하지 않고 320×240 화면 중앙에 배치한 15fps 영상입니다.
 
-체크 해제 시 EXE의 발견물 미디어 연결을 원래 DISCOVER 파트로 복원합니다.
+체크 해제 시 EXE 미디어 연결과 DISEV.CDS 발견 이벤트 명령을 원래 DISCOVER 재생으로 복원합니다.
 복사된 AVI 파일은 다시 적용할 수 있도록 게임의 AVI 폴더에 유지합니다.
 """
 
@@ -636,7 +658,8 @@ class CDSExecutablePatcher(tk.Tk):
         self.judgment_fix_enabled = tk.BooleanVar(value=False)
         self.cannon_accuracy_fix_enabled = tk.BooleanVar(value=False)
         self.ship_reuse_fix_enabled = tk.BooleanVar(value=False)
-        self.knossos_hint_fix_enabled = tk.BooleanVar(value=False)
+        self.ship_purchase_blank_selection_fix_enabled = tk.BooleanVar(value=False)
+        self.tavern_hint_bug_fix_enabled = tk.BooleanVar(value=False)
         self.disev_language_fix_enabled = tk.BooleanVar(value=False)
         self.history_elapsed_years_fix_enabled = tk.BooleanVar(value=False)
         self.geographic_discovery_still_fix_enabled = tk.BooleanVar(value=False)
@@ -660,11 +683,12 @@ class CDSExecutablePatcher(tk.Tk):
         self.pirate_pursuit_high_threshold = tk.StringVar(value="0")
         self.long_rest_max = tk.StringVar(value="0")
         self.exploration_days = tk.StringVar(value="0")
+        self.telescope_city_discovery_bonus = tk.StringVar(value="0")
         self.succession_age = tk.StringVar(value="0")
-        self.cash_limit = tk.StringVar(value="0")
-        self.deposit_limit = tk.StringVar(value="0")
-        self.fame_limit = tk.StringVar(value="0")
-        self.infamy_limit = tk.StringVar(value="0")
+        self.money_limit = tk.StringVar(value="0")
+        self.reputation_limit = tk.StringVar(value="0")
+        self.person_ability_limit = tk.StringVar(value="100")
+        self.person_vitality_limit = tk.StringVar(value="2000")
         self.cold_north_latitude = tk.StringVar(value="0")
         self.cold_south_latitude = tk.StringVar(value="0")
         self.cold_north_unlocked = tk.BooleanVar(value=False)
@@ -703,7 +727,7 @@ class CDSExecutablePatcher(tk.Tk):
         self.person_city = tk.StringVar()
         self.person_building = tk.StringVar()
         self.person_blood = tk.StringVar()
-        self.person_hire_cost = tk.StringVar()
+        self.person_hire_cost_coefficient = tk.StringVar()
         self.person_abilities = [tk.StringVar() for _ in PERSON_ABILITY_NAMES]
         self.person_vitality = tk.StringVar()
         self.person_skill_levels = [tk.StringVar() for _ in (*PERSON_SKILL_NAMES, *BARMAID_LANGUAGE_NAMES)]
@@ -855,6 +879,7 @@ class CDSExecutablePatcher(tk.Tk):
         self._mughal_was_enabled = False
         self._sea_monster_patch_was_enabled = False
         self._geographic_discovery_still_fix_was_enabled = False
+        self._discover_avi_event_was_enabled = False
         self._update_checking = False
         self._menu_bar: tk.Menu | None = None
         self._update_menu_index: int | None = None
@@ -1253,11 +1278,12 @@ class CDSExecutablePatcher(tk.Tk):
         gameplay_rows = (
             ("장기 휴양 최대 기간", self.long_rest_max, "개월 (1~127)", 1, 127),
             ("탐험 준비 기간", self.exploration_days, "일 (1~127, 원본 10일)", 1, 127),
+            ("망원경 도시 발견 보정", self.telescope_city_discovery_bonus, "칸 (0~32, 원본 +2)", 0, 32),
             ("세대교체 가능 나이", self.succession_age, "세 (1~127)", 1, 127),
-            ("소지금 상한", self.cash_limit, "두캇 (1~99,999,999)", 1, 99_999_999),
-            ("저금 상한", self.deposit_limit, "두캇 (1~99,999,999)", 1, 99_999_999),
-            ("명성 상한", self.fame_limit, "(1~99,999,999)", 1, 99_999_999),
-            ("악명 상한", self.infamy_limit, "(1~99,999,999)", 1, 99_999_999),
+            ("소지금·저금 공통 상한", self.money_limit, "두캇 (1~99,999,999)", 1, 99_999_999),
+            ("명성·악명 공통 상한", self.reputation_limit, "(1~99,999,999)", 1, 99_999_999),
+            ("능력치 상한 (6종 공통)", self.person_ability_limit, "(0~255, 원본 100)", 0, PERSON_ABILITY_MAX),
+            ("생명력 상한", self.person_vitality_limit, "(0~9999, 원본 2000)", 0, PERSON_VITALITY_MAX),
         )
         for row, (label, variable, suffix, minimum, maximum) in enumerate(gameplay_rows):
             ttk.Label(gameplay_box, text=f"{label}:").grid(row=row, column=0, pady=2, sticky="w")
@@ -1267,9 +1293,10 @@ class CDSExecutablePatcher(tk.Tk):
             entry.pack(side=tk.LEFT)
             self._limit_integer_input(entry, minimum, maximum)
             ttk.Label(value_row, text=suffix).pack(side=tk.LEFT, padx=(5, 0))
-        ttk.Label(gameplay_box, text="인물 활동 가능 나이:").grid(row=7, column=0, pady=2, sticky="w")
+        activity_age_row = len(gameplay_rows)
+        ttk.Label(gameplay_box, text="인물 활동 가능 나이:").grid(row=activity_age_row, column=0, pady=2, sticky="w")
         activity_age_frame = ttk.Frame(gameplay_box)
-        activity_age_frame.grid(row=7, column=1, columnspan=2, padx=(6, 0), pady=2, sticky="w")
+        activity_age_frame.grid(row=activity_age_row, column=1, columnspan=2, padx=(6, 0), pady=2, sticky="w")
         activity_minimum_entry = ttk.Entry(activity_age_frame, textvariable=self.npc_activity_min_age, width=6)
         activity_minimum_entry.grid(row=0, column=0)
         self._limit_integer_input(activity_minimum_entry, 0, 127)
@@ -1449,19 +1476,6 @@ class CDSExecutablePatcher(tk.Tk):
             row=1, column=1, padx=(10, 0), pady=(6, 0), sticky="e",
         )
         self._update_bug_fix_control_states()
-        ttk.Checkbutton(
-            translation_box,
-            text="DISCOVER 대신 AVI 사용",
-            variable=self.discover_avi_enabled,
-        ).grid(row=2, column=0, pady=(6, 0), sticky="w")
-        ttk.Button(
-            translation_box,
-            text="내용…",
-            command=lambda: self.show_patch_details(
-                "DISCOVER 대신 AVI 사용", DISCOVER_AVI_DETAILS,
-            ),
-        ).grid(row=2, column=1, padx=(10, 0), pady=(6, 0), sticky="e")
-
         discovery_box = ttk.LabelFrame(additional_left_column, text="발견물", padding=10)
         discovery_box.grid(row=0, column=0, sticky="ew")
 
@@ -1519,6 +1533,18 @@ class CDSExecutablePatcher(tk.Tk):
                 "지리 발견 정지 이미지 추가", GEOGRAPHIC_DISCOVERY_STILL_FIX_DETAILS,
             ),
         ).grid(row=4, column=1, padx=(10, 0), pady=(6, 0), sticky="e")
+        ttk.Checkbutton(
+            discovery_box,
+            text="DISCOVER 대신 AVI 사용",
+            variable=self.discover_avi_enabled,
+        ).grid(row=5, column=0, pady=(6, 0), sticky="w")
+        ttk.Button(
+            discovery_box,
+            text="내용…",
+            command=lambda: self.show_patch_details(
+                "DISCOVER 대신 AVI 사용", DISCOVER_AVI_DETAILS,
+            ),
+        ).grid(row=5, column=1, padx=(10, 0), pady=(6, 0), sticky="e")
 
         person_list_box = ttk.LabelFrame(person_tab, text="인물 목록", padding=10)
         person_list_box.grid(row=0, column=0, rowspan=2, sticky="nsew")
@@ -1570,7 +1596,7 @@ class CDSExecutablePatcher(tk.Tk):
         preview_box = tk.Frame(person_box, width=84, height=100, bg="#222222", relief="ridge", bd=2)
         preview_box.grid(row=0, column=4, rowspan=6, padx=(14, 0), sticky="n"); preview_box.grid_propagate(False)
         self.person_image_preview = tk.Label(preview_box, bg="#222222", fg="#DDDDDD", text="이미지 없음"); self.person_image_preview.pack(fill=tk.BOTH, expand=True)
-        person_rows = (("얼굴 코드", self.person_face_code, -1, 413), ("1480년 나이", self.person_age, -100, 100), ("초기 명성", self.person_fame, 0, 65535), ("초기 악명", self.person_infamy, 0, 65535), ("고용비 계수", self.person_hire_cost, 0, 2000))
+        person_rows = (("얼굴 코드", self.person_face_code, -1, 413), ("1480년 나이", self.person_age, -100, 100), ("초기 명성", self.person_fame, 0, 65535), ("초기 악명", self.person_infamy, 0, 65535), ("고용비 계수", self.person_hire_cost_coefficient, 0, PERSON_HIRE_COST_COEFFICIENT_MAX))
         for row, (label, variable, low, high) in enumerate(person_rows, start=1):
             ttk.Label(person_box, text=f"{label}:").grid(row=row, column=0, pady=2, sticky="w")
             entry = ttk.Spinbox(person_box, from_=low, to=high, textvariable=variable, width=7, state="disabled")
@@ -1595,13 +1621,13 @@ class CDSExecutablePatcher(tk.Tk):
         for index, (name, variable) in enumerate(zip(PERSON_ABILITY_NAMES, self.person_abilities)):
             row, column = index % 2, (index // 2) * 2
             ttk.Label(ability_box, text=f"{name}:").grid(row=row, column=column, padx=(12, 0) if column else 0, pady=3, sticky="w")
-            entry = ttk.Spinbox(ability_box, from_=0, to=255, textvariable=variable, width=6, state="disabled")
+            entry = ttk.Spinbox(ability_box, from_=0, to=PERSON_ABILITY_MAX, textvariable=variable, width=6, state="disabled")
             entry.grid(row=row, column=column + 1, padx=(6, 0), pady=3, sticky="w")
-            self._limit_integer_input(entry, 0, 255); self._person_controls.append(entry)
+            self._limit_integer_input(entry, 0, PERSON_ABILITY_MAX); self._person_controls.append(entry)
         ttk.Label(ability_box, text="생명력:").grid(row=2, column=0, pady=(8, 0), sticky="w")
-        vitality_entry = ttk.Spinbox(ability_box, from_=0, to=2000, textvariable=self.person_vitality, width=6, state="disabled")
+        vitality_entry = ttk.Spinbox(ability_box, from_=0, to=PERSON_VITALITY_MAX, textvariable=self.person_vitality, width=6, state="disabled")
         vitality_entry.grid(row=2, column=1, padx=(6, 0), pady=(8, 0), sticky="w")
-        self._limit_integer_input(vitality_entry, 0, 2000); self._person_controls.append(vitality_entry)
+        self._limit_integer_input(vitality_entry, 0, PERSON_VITALITY_MAX); self._person_controls.append(vitality_entry)
 
         skill_box = ttk.LabelFrame(person_skill_tab, text="기술", padding=10)
         skill_box.grid(row=0, column=0, sticky="nw")
@@ -3167,7 +3193,7 @@ class CDSExecutablePatcher(tk.Tk):
                         tree.selection_remove(*other_selection)
         record = self._selected_person_record()
         if not record: return
-        self.person_name.set(record.name); self.person_gender.set(SPONSOR_GENDER_NAMES[record.gender]); self.person_face_code.set(str(record.face_code)); self.person_age.set(str(record.age_at_1480)); self.person_nation.set(SPONSOR_NATION_NAMES[record.nation_id]); self.person_job.set(PERSON_JOB_NAMES[record.job_id]); self.person_fame.set(str(record.fame)); self.person_infamy.set(str(record.infamy)); self.person_employment_state.set(PERSON_EMPLOYMENT_STATE_NAMES[record.employment_state]); self.person_city.set("도시 없음" if record.city_id < 0 else BARMAID_CITY_NAMES[record.city_id]); self.person_building.set(SPONSOR_BUILDING_NAMES[record.building_id]); self.person_blood.set(PERSON_BLOOD_NAMES[record.blood_id]); self.person_hire_cost.set(str(record.hire_cost))
+        self.person_name.set(record.name); self.person_gender.set(SPONSOR_GENDER_NAMES[record.gender]); self.person_face_code.set(str(record.face_code)); self.person_age.set(str(record.age_at_1480)); self.person_nation.set(SPONSOR_NATION_NAMES[record.nation_id]); self.person_job.set(PERSON_JOB_NAMES[record.job_id]); self.person_fame.set(str(record.fame)); self.person_infamy.set(str(record.infamy)); self.person_employment_state.set(PERSON_EMPLOYMENT_STATE_NAMES[record.employment_state]); self.person_city.set("도시 없음" if record.city_id < 0 else BARMAID_CITY_NAMES[record.city_id]); self.person_building.set(SPONSOR_BUILDING_NAMES[record.building_id]); self.person_blood.set(PERSON_BLOOD_NAMES[record.blood_id]); self.person_hire_cost_coefficient.set(str(record.hire_cost_coefficient))
         for variable, value in zip(self.person_abilities, record.abilities): variable.set(str(value))
         self.person_vitality.set(str(record.vitality))
         for variable, value in zip(self.person_skill_levels, record.skills): variable.set(str(value))
@@ -3208,7 +3234,7 @@ class CDSExecutablePatcher(tk.Tk):
             skills = tuple(int(variable.get()) for variable in self.person_skill_levels)
             if not -1 <= face_code <= self._portrait_max_code(female=gender == 1):
                 raise ValueError("인물 얼굴 코드가 선택한 성별의 이미지 범위를 벗어났습니다.")
-            return PersonEdit(record.identifier, face_code, gender, int(self.person_age.get()), SPONSOR_NATION_NAMES.index(self.person_nation.get()), PERSON_JOB_NAMES.index(self.person_job.get()), int(self.person_fame.get()), int(self.person_infamy.get()), PERSON_EMPLOYMENT_STATE_NAMES.index(self.person_employment_state.get()), city, SPONSOR_BUILDING_NAMES.index(self.person_building.get()), PERSON_BLOOD_NAMES.index(self.person_blood.get()), int(self.person_vitality.get()), int(self.person_hire_cost.get()), abilities, skills)
+            return PersonEdit(record.identifier, face_code, gender, int(self.person_age.get()), SPONSOR_NATION_NAMES.index(self.person_nation.get()), PERSON_JOB_NAMES.index(self.person_job.get()), int(self.person_fame.get()), int(self.person_infamy.get()), PERSON_EMPLOYMENT_STATE_NAMES.index(self.person_employment_state.get()), city, SPONSOR_BUILDING_NAMES.index(self.person_building.get()), PERSON_BLOOD_NAMES.index(self.person_blood.get()), int(self.person_vitality.get()), int(self.person_hire_cost_coefficient.get()), abilities, skills)
         except (ValueError, IndexError) as error: raise ValueError("인물 입력값을 확인해 주세요.") from error
 
     def _set_ship_type_controls_enabled(self, enabled: bool) -> None:
@@ -4524,11 +4550,11 @@ class CDSExecutablePatcher(tk.Tk):
 
     def _library_book_for_display(
         self, source: DiscoveryHintBookSource,
-    ) -> tuple[str, str, tuple[int, ...]]:
+    ) -> tuple[str, str, tuple[int, ...], int]:
         pending = self._library_book_edits.get(source.record_number)
         if pending is not None:
-            return pending.title, pending.author, pending.city_ids
-        return source.title, source.author, source.city_ids
+            return pending.title, pending.author, pending.city_ids, pending.appearance_year
+        return source.title, source.author, source.city_ids, source.appearance_year
 
     def _refresh_discovery_hint_list(self) -> None:
         tree = self.discovery_hint_list
@@ -4767,7 +4793,7 @@ class CDSExecutablePatcher(tk.Tk):
         source_tree = ttk.Treeview(
             source_box,
             columns=(
-                "kind", "source_id", "title", "author",
+                "kind", "source_id", "title", "author", "year",
                 *(f"city{index}" for index in range(1, 9)),
             ),
             show="headings",
@@ -4777,10 +4803,12 @@ class CDSExecutablePatcher(tk.Tk):
         source_tree.heading("source_id", text="ID")
         source_tree.heading("title", text="책 제목")
         source_tree.heading("author", text="저자")
+        source_tree.heading("year", text="출현 연도")
         self._enable_treeview_text_sort(source_tree, "kind", "구분")
         self._enable_treeview_text_sort(source_tree, "source_id", "ID")
         self._enable_treeview_text_sort(source_tree, "title", "책 제목")
         self._enable_treeview_text_sort(source_tree, "author", "저자")
+        self._enable_treeview_text_sort(source_tree, "year", "출현 연도")
         for index in range(1, 9):
             column = f"city{index}"
             self._enable_treeview_text_sort(source_tree, column, f"도시 {index}")
@@ -4789,6 +4817,7 @@ class CDSExecutablePatcher(tk.Tk):
         source_tree.column("source_id", width=50, anchor="center", stretch=False)
         source_tree.column("title", width=150, anchor="w", stretch=False)
         source_tree.column("author", width=150, anchor="w", stretch=False)
+        source_tree.column("year", width=80, anchor="center", stretch=False)
         source_scroll = ttk.Scrollbar(
             source_box, orient="vertical", command=source_tree.yview,
         )
@@ -4805,7 +4834,7 @@ class CDSExecutablePatcher(tk.Tk):
         book_sources_by_row: dict[str, DiscoveryHintBookSource] = {}
         if link.book_sources or link.item_sources:
             for source in link.book_sources:
-                title, author, city_ids = self._library_book_for_display(source)
+                title, author, city_ids, appearance_year = self._library_book_for_display(source)
                 cities = tuple(
                     BARMAID_CITY_NAMES[city_id]
                     if 0 <= city_id < len(BARMAID_CITY_NAMES)
@@ -4819,7 +4848,7 @@ class CDSExecutablePatcher(tk.Tk):
                     "", "end", iid=row_identifier,
                     values=(
                         "도서관", f"{source.record_number:03d}",
-                        title, author, *city_columns,
+                        title, author, appearance_year, *city_columns,
                     ),
                 )
             for source in link.item_sources:
@@ -4827,13 +4856,13 @@ class CDSExecutablePatcher(tk.Tk):
                     "", "end", iid=f"item:{source.record_number}",
                     values=(
                         "서적 아이템", f"{source.record_number:03d}",
-                        source.name, "-", *("-",) * 8,
+                        source.name, "-", "-", *("-",) * 8,
                     ),
                 )
         else:
             source_tree.insert(
                 "", "end",
-                values=("-", "-", "출처 연결 없음", "-", *("-",) * 8),
+                values=("-", "-", "출처 연결 없음", "-", "-", *("-",) * 8),
             )
 
         def edit_book_source(event: tk.Event) -> None:
@@ -4853,7 +4882,7 @@ class CDSExecutablePatcher(tk.Tk):
                     row_identifier,
                     values=(
                         "도서관", f"{edit.record_number:03d}",
-                        edit.title, edit.author, *city_columns,
+                        edit.title, edit.author, edit.appearance_year, *city_columns,
                     ),
                 )
                 self._reapply_treeview_text_sort(source_tree, "title")
@@ -4911,11 +4940,11 @@ class CDSExecutablePatcher(tk.Tk):
         parent: tk.Toplevel,
         on_saved,
     ) -> None:
-        title, author, city_ids = self._library_book_for_display(source)
+        title, author, city_ids, appearance_year = self._library_book_for_display(source)
         window = tk.Toplevel(self)
         window.withdraw()
         window.title("도서관 책 정보")
-        window.geometry("570x390")
+        window.geometry("570x425")
         window.resizable(False, False)
         window.transient(parent)
 
@@ -4949,6 +4978,19 @@ class CDSExecutablePatcher(tk.Tk):
         )
         author_editor.max_characters = LIBRARY_BOOK_AUTHOR_MAX_CHARACTERS
         author_editor.max_bytes = LIBRARY_BOOK_AUTHOR_MAX_BYTES
+
+        ttk.Label(basic_box, text="출현 연도:").grid(
+            row=3, column=0, pady=(8, 0), sticky="w",
+        )
+        appearance_year_var = tk.StringVar(value=str(appearance_year))
+        appearance_year_entry = ttk.Spinbox(
+            basic_box, from_=1480, to=1600,
+            textvariable=appearance_year_var, width=7,
+        )
+        appearance_year_entry.grid(
+            row=3, column=1, padx=(8, 0), pady=(8, 0), sticky="w",
+        )
+        self._limit_integer_input(appearance_year_entry, 1480, 1600)
 
         city_box = ttk.LabelFrame(frame, text="출현 도시", padding=10)
         city_box.pack(fill=tk.X, pady=(10, 0))
@@ -5008,6 +5050,16 @@ class CDSExecutablePatcher(tk.Tk):
                     "저자 필요", "저자를 입력해 주세요.", kind="warning", parent=window,
                 )
                 return
+            try:
+                edited_appearance_year = int(appearance_year_var.get())
+            except ValueError:
+                edited_appearance_year = -1
+            if not 1480 <= edited_appearance_year <= 1600:
+                self._show_centered_popup(
+                    "출현 연도 오류", "책 출현 연도는 1480~1600 사이여야 합니다.",
+                    kind="warning", parent=window,
+                )
+                return
             edited_city_ids = tuple(
                 BARMAID_CITY_NAMES.index(variable.get())
                 for variable in city_variables
@@ -5025,9 +5077,11 @@ class CDSExecutablePatcher(tk.Tk):
                 edited_title,
                 edited_author,
                 edited_city_ids,
+                edited_appearance_year,
             )
             original = LibraryBookEdit(
-                source.record_number, source.title, source.author, source.city_ids,
+                source.record_number, source.title, source.author,
+                source.city_ids, source.appearance_year,
             )
             if edit == original:
                 self._library_book_edits.pop(source.record_number, None)
@@ -5510,9 +5564,14 @@ class CDSExecutablePatcher(tk.Tk):
                 SHIP_REUSE_FIX_DETAILS,
             ),
             (
-                "크노소스 주점 힌트 수정",
-                self.knossos_hint_fix_enabled,
-                KNOSSOS_HINT_FIX_DETAILS,
+                "선박 구입 빈 슬롯 종료 버그 수정",
+                self.ship_purchase_blank_selection_fix_enabled,
+                SHIP_PURCHASE_BLANK_SELECTION_FIX_DETAILS,
+            ),
+            (
+                "주점 힌트 버그 수정",
+                self.tavern_hint_bug_fix_enabled,
+                TAVERN_HINT_BUG_FIX_DETAILS,
             ),
             (
                 "모뉴멘트밸리 언어 판정 수정",
@@ -5527,11 +5586,11 @@ class CDSExecutablePatcher(tk.Tk):
         )
 
     def show_bug_fix_details(self) -> None:
-        """Select individual bug fixes while retaining the main enable switch."""
+        """Select individual fixes and open their descriptions on demand."""
         window = tk.Toplevel(self)
         window.title("버그 수정 내역")
-        window.geometry("680x620")
-        window.minsize(560, 440)
+        window.geometry("680x430")
+        window.minsize(560, 360)
         window.transient(self)
 
         ttk.Label(
@@ -5540,44 +5599,21 @@ class CDSExecutablePatcher(tk.Tk):
             wraplength=640,
         ).pack(anchor="w", padx=12, pady=(12, 8))
 
-        body = ttk.Frame(window)
-        body.pack(fill=tk.BOTH, expand=True, padx=12)
-        canvas = tk.Canvas(body, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(body, orient=tk.VERTICAL, command=canvas.yview)
-        canvas.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        content = ttk.Frame(canvas, padding=(8, 4))
-        content_window = canvas.create_window((0, 0), window=content, anchor="nw")
-        content.bind(
-            "<Configure>",
-            lambda _event: canvas.configure(scrollregion=canvas.bbox("all")),
-        )
-        canvas.bind(
-            "<Configure>",
-            lambda event: canvas.itemconfigure(content_window, width=event.width),
-        )
-
         options = self._bug_fix_options()
         for row, (title, variable, details) in enumerate(options):
-            item = ttk.Frame(content)
-            item.grid(row=row * 2, column=0, sticky="ew", pady=(4, 7))
+            item = ttk.Frame(window, padding=(20, 4))
+            item.pack(fill=tk.X, padx=12)
             item.columnconfigure(0, weight=1)
             ttk.Checkbutton(item, text=title, variable=variable).grid(
                 row=0, column=0, sticky="w",
             )
-            description = "\n".join(details.splitlines()[1:]).strip()
-            ttk.Label(
+            ttk.Button(
                 item,
-                text=description,
-                justify=tk.LEFT,
-                wraplength=590,
-            ).grid(row=1, column=0, padx=(24, 0), pady=(3, 0), sticky="w")
-            if row + 1 < len(options):
-                ttk.Separator(content, orient=tk.HORIZONTAL).grid(
-                    row=row * 2 + 1, column=0, sticky="ew",
-                )
-        content.columnconfigure(0, weight=1)
+                text="내용 보기",
+                command=lambda detail_title=title, detail_text=details: self.show_patch_details(
+                    detail_title, detail_text,
+                ),
+            ).grid(row=0, column=1, sticky="e")
 
         buttons = ttk.Frame(window)
         buttons.pack(fill=tk.X, padx=12, pady=10)
@@ -5605,9 +5641,8 @@ class CDSExecutablePatcher(tk.Tk):
 
     def show_patch_details(self, title: str, details: str, first_line_color: str | None = None) -> None:
         window = tk.Toplevel(self)
+        window.withdraw()
         window.title(title)
-        window.geometry("620x520")
-        window.minsize(500, 380)
         window.transient(self)
 
         frame = ttk.Frame(window, padding=10)
@@ -5626,7 +5661,32 @@ class CDSExecutablePatcher(tk.Tk):
             text.tag_configure("first_line", foreground=first_line_color)
         text.configure(state=tk.DISABLED)
         ttk.Button(window, text="닫기", command=window.destroy).pack(pady=(0, 10))
+
+        # Keep short patch notes compact while giving long notes enough room to
+        # read without wrapping every sentence.  The text widget remains
+        # scrollable when its natural height would become too tall.
+        text_font = tkfont.nametofont(text.cget("font"))
+        widest_line = max(
+            (text_font.measure(line) for line in details.splitlines()), default=0,
+        )
+        content_width = min(720, max(320, widest_line + 24))
+        character_width = max(1, text_font.measure("0"))
+        display_lines = sum(
+            max(1, -(-text_font.measure(line) // max(1, content_width - 20)))
+            for line in details.splitlines()
+        ) or 1
+        text.configure(
+            width=max(28, -(-content_width // character_width)),
+            height=min(24, max(4, display_lines)),
+        )
+        window.update_idletasks()
+        maximum_width = min(900, window.winfo_screenwidth() - 80)
+        maximum_height = min(760, window.winfo_screenheight() - 80)
+        width = min(maximum_width, window.winfo_reqwidth())
+        height = min(maximum_height, window.winfo_reqheight())
+        window.geometry(f"{width}x{height}")
         self._center_dialog(window)
+        window.deiconify()
         window.grab_set()
 
     def _update_pirate_control_states(self) -> None:
@@ -5728,7 +5788,7 @@ class CDSExecutablePatcher(tk.Tk):
                 (
                     coordinate, presets, departure, arrival_wait,
                     npc_daily_departure_enabled,
-                    long_rest_max, exploration_days, succession_age,
+                    long_rest_max, exploration_days, telescope_city_discovery_bonus, succession_age,
                     cold_north_limit, cold_south_limit,
                     cash_limit, deposit_limit,
                     fame_limit, infamy_limit,
@@ -5743,11 +5803,13 @@ class CDSExecutablePatcher(tk.Tk):
                     judgment_fix_enabled,
                     cannon_accuracy_fix_enabled,
                     ship_reuse_fix_enabled,
-                    knossos_hint_fix_enabled,
+                    ship_purchase_blank_selection_fix_enabled,
+                    tavern_hint_bug_fix_enabled,
                     disev_language_fix_enabled,
                     history_elapsed_years_fix_enabled,
                     discover_avi_enabled,
                 ) = read_settings(target)
+                ability_limit, vitality_limit = read_person_stat_limits(target)
                 barmaid_records = read_barmaid_records(target)
                 barmaid_child_aptitudes = read_barmaid_child_aptitudes(target)
                 sponsor_records = read_sponsor_records(target)
@@ -5816,7 +5878,10 @@ class CDSExecutablePatcher(tk.Tk):
             self.judgment_fix_enabled.set(judgment_fix_enabled)
             self.cannon_accuracy_fix_enabled.set(cannon_accuracy_fix_enabled)
             self.ship_reuse_fix_enabled.set(ship_reuse_fix_enabled)
-            self.knossos_hint_fix_enabled.set(knossos_hint_fix_enabled)
+            self.ship_purchase_blank_selection_fix_enabled.set(
+                ship_purchase_blank_selection_fix_enabled,
+            )
+            self.tavern_hint_bug_fix_enabled.set(tavern_hint_bug_fix_enabled)
             self.disev_language_fix_enabled.set(disev_language_fix_enabled)
             self.history_elapsed_years_fix_enabled.set(history_elapsed_years_fix_enabled)
             self.bug_fixes_enabled.set(any((
@@ -5824,12 +5889,12 @@ class CDSExecutablePatcher(tk.Tk):
                 judgment_fix_enabled,
                 cannon_accuracy_fix_enabled,
                 ship_reuse_fix_enabled,
-                knossos_hint_fix_enabled,
+                ship_purchase_blank_selection_fix_enabled,
+                tavern_hint_bug_fix_enabled,
                 disev_language_fix_enabled,
                 history_elapsed_years_fix_enabled,
             )))
             self._update_bug_fix_control_states()
-            self.discover_avi_enabled.set(discover_avi_enabled)
             discovery_errors: list[str] = []
             try:
                 self.kaaba_enabled.set(is_kaaba_enabled(target))
@@ -5875,6 +5940,23 @@ class CDSExecutablePatcher(tk.Tk):
             except GeographicDiscoveryStillPatchError as exc:
                 self.geographic_discovery_still_fix_enabled.set(False)
                 self._geographic_discovery_still_fix_was_enabled = False
+                discovery_errors.append(str(exc))
+            try:
+                discover_avi_events_enabled = is_discover_avi_event_patch_enabled(target)
+                self._discover_avi_event_was_enabled = discover_avi_events_enabled
+                # Earlier versions changed only the EXE.  Keep the checkbox
+                # selected for either half-state so the next save repairs it.
+                self.discover_avi_enabled.set(
+                    discover_avi_enabled or discover_avi_events_enabled,
+                )
+                if discover_avi_enabled != discover_avi_events_enabled:
+                    discovery_errors.append(
+                        "DISCOVER 대신 AVI 사용의 EXE와 DISEV.CDS 적용 상태가 다릅니다. "
+                        "체크를 유지한 채 저장하면 두 경로를 같은 AVI 재생으로 맞춥니다."
+                    )
+            except DiscoverAviEventPatchError as exc:
+                self._discover_avi_event_was_enabled = False
+                self.discover_avi_enabled.set(discover_avi_enabled)
                 discovery_errors.append(str(exc))
             self._update_bug_fix_control_states()
             if discovery_errors:
@@ -5923,11 +6005,16 @@ class CDSExecutablePatcher(tk.Tk):
             self._update_pirate_control_states()
             self.long_rest_max.set(str(long_rest_max))
             self.exploration_days.set(str(exploration_days))
+            self.telescope_city_discovery_bonus.set(str(telescope_city_discovery_bonus))
             self.succession_age.set(str(succession_age))
-            self.cash_limit.set(str(cash_limit))
-            self.deposit_limit.set(str(deposit_limit))
-            self.fame_limit.set(str(fame_limit))
-            self.infamy_limit.set(str(infamy_limit))
+            # The editor deliberately exposes one shared limit.  If an older
+            # EXE used separate values, applying the current value unifies it.
+            self.money_limit.set(str(cash_limit))
+            # The editor exposes one shared limit.  Applying a value also
+            # consolidates an EXE that was previously patched independently.
+            self.reputation_limit.set(str(fame_limit))
+            self.person_ability_limit.set(str(ability_limit))
+            self.person_vitality_limit.set(str(vitality_limit))
             self.cold_north_latitude.set(f"{cold_limit_to_latitude(cold_north_limit):.3f}")
             self.cold_south_latitude.set(f"{cold_limit_to_latitude(cold_south_limit):.3f}")
             self.cold_north_unlocked.set(cold_north_limit > 10000)
@@ -6261,10 +6348,11 @@ class CDSExecutablePatcher(tk.Tk):
                 int(self.departure.get()), int(self.arrival_wait.get()),
                 self.npc_daily_departure_enabled.get(),
                 int(self.long_rest_max.get()), int(self.exploration_days.get()),
+                int(self.telescope_city_discovery_bonus.get()),
                 int(self.succession_age.get()), cold_north_limit,
                 cold_south_limit,
-                int(self.cash_limit.get()), int(self.deposit_limit.get()),
-                int(self.fame_limit.get()), int(self.infamy_limit.get()),
+                int(self.money_limit.get()), int(self.money_limit.get()),
+                int(self.reputation_limit.get()), int(self.reputation_limit.get()),
                 int(self.npc_activity_min_age.get()), int(self.npc_activity_max_age.get()),
                 int(self.western_encounter_denominator.get()),
                 int(self.islamic_encounter_denominator.get()),
@@ -6277,7 +6365,8 @@ class CDSExecutablePatcher(tk.Tk):
                 self.bug_fixes_enabled.get() and self.judgment_fix_enabled.get(),
                 self.bug_fixes_enabled.get() and self.cannon_accuracy_fix_enabled.get(),
                 self.bug_fixes_enabled.get() and self.ship_reuse_fix_enabled.get(),
-                self.bug_fixes_enabled.get() and self.knossos_hint_fix_enabled.get(),
+                self.bug_fixes_enabled.get() and self.ship_purchase_blank_selection_fix_enabled.get(),
+                self.bug_fixes_enabled.get() and self.tavern_hint_bug_fix_enabled.get(),
                 self.bug_fixes_enabled.get() and self.disev_language_fix_enabled.get(),
                 self.bug_fixes_enabled.get() and self.history_elapsed_years_fix_enabled.get(),
                 self.discover_avi_enabled.get(),
@@ -6294,6 +6383,8 @@ class CDSExecutablePatcher(tk.Tk):
                 hint_edit,
                 discovery_hint_edit,
                 library_book_edits,
+                person_ability_limit=int(self.person_ability_limit.get()),
+                person_vitality_limit=int(self.person_vitality_limit.get()),
             )
             if backup is not None:
                 backed_up_paths.add(target.resolve())
@@ -6329,12 +6420,17 @@ class CDSExecutablePatcher(tk.Tk):
                 geographic_discovery_still_backups = apply_geographic_discovery_still_patch(
                     target, geographic_discovery_still_enabled, backed_up_paths,
                 )
+            discover_avi_event_backups: tuple[Path, ...] = ()
+            if self.discover_avi_enabled.get() or self._discover_avi_event_was_enabled:
+                discover_avi_event_backups = apply_discover_avi_event_patch(
+                    target, self.discover_avi_enabled.get(), backed_up_paths,
+                )
             self.cold_north_latitude.set(f"{cold_limit_to_latitude(cold_north_limit):.3f}")
             self.cold_south_latitude.set(f"{cold_limit_to_latitude(cold_south_limit):.3f}")
         except (
             ValueError, DiscoverAviAssetError, KaabaPatchError, KaabaSavePatchError,
             SlavePatchError, MughalPatchError, SeaMonsterPatchError,
-            GeographicDiscoveryStillPatchError,
+            GeographicDiscoveryStillPatchError, DiscoverAviEventPatchError,
         ) as exc:
             self._show_centered_popup("입력 또는 패치 오류", str(exc), kind="error")
             return
@@ -6344,6 +6440,7 @@ class CDSExecutablePatcher(tk.Tk):
         if (backup is None and not kaaba_backups and kaaba_save_backup is None
                 and not slave_library_backups and not slave_dialogue_backups and not mughal_backups
                 and not sea_monster_backups and not geographic_discovery_still_backups
+                and not discover_avi_event_backups
                 and not discover_avi_installed):
             self._show_centered_popup("완료", "선택한 설정이 이미 적용되어 있습니다.")
         else:
@@ -6351,6 +6448,7 @@ class CDSExecutablePatcher(tk.Tk):
                 backup, *kaaba_backups, kaaba_save_backup,
                 *slave_library_backups, *slave_dialogue_backups, *mughal_backups,
                 *sea_monster_backups, *geographic_discovery_still_backups,
+                *discover_avi_event_backups,
             ]
             backup_text = "\n".join(str(path) for path in backups if path is not None)
             details = ["선택한 설정을 적용했습니다."]
@@ -6403,6 +6501,7 @@ class CDSExecutablePatcher(tk.Tk):
         self._geographic_discovery_still_fix_was_enabled = (
             self.geographic_discovery_still_fix_enabled.get()
         )
+        self._discover_avi_event_was_enabled = self.discover_avi_enabled.get()
 
 
 if __name__ == "__main__":

@@ -30,6 +30,8 @@ BOOK_RECORD_COUNT = 257
 BOOK_RECORD_SIZE = 0x58
 BOOK_TITLE_POINTER_OFFSET = 0x00
 BOOK_AUTHOR_POINTER_OFFSET = 0x04
+BOOK_APPEARANCE_YEAR_OFFSET = 0x10
+BOOK_YEAR_BASE = 1480
 BOOK_CITY_LIST_OFFSET = 0x18
 BOOK_HINT_LIST_OFFSET = 0x38
 BOOK_LIST_CAPACITY = 8
@@ -59,6 +61,7 @@ class DiscoveryHintBookSource:
     title: str
     author: str
     city_ids: tuple[int, ...]
+    appearance_year: int
 
 
 @dataclass(frozen=True)
@@ -230,6 +233,9 @@ def read_discovery_hint_links(
                     "<i", data, record_offset + BOOK_CITY_LIST_OFFSET + index * 4,
                 )[0]) >= 0
             )
+            appearance_year = BOOK_YEAR_BASE + struct.unpack_from(
+                "<i", data, record_offset + BOOK_APPEARANCE_YEAR_OFFSET,
+            )[0]
             hint_ids = tuple(
                 hint_id
                 for index in range(BOOK_LIST_CAPACITY)
@@ -238,7 +244,7 @@ def read_discovery_hint_links(
                 )[0]) >= 0
             )
             source = DiscoveryHintBookSource(
-                record_number, title, author, city_ids,
+                record_number, title, author, city_ids, appearance_year,
             )
             for hint_id in hint_ids:
                 if hint_id >= HINT_MASTER_RECORD_COUNT:
