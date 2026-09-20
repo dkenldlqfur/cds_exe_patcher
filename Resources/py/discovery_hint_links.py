@@ -25,6 +25,9 @@ HINT_REQUIRED_LANGUAGE_OFFSET = 0x1C
 HINT_REQUIRED_LEVEL_OFFSET = 0x20
 HINT_PREREQUISITE_DISCOVERY_LIST_OFFSET = 0x28
 HINT_PREREQUISITE_DISCOVERY_CAPACITY = 8
+HINT_TEXT_ID_OFFSET = 0x14
+HINT_TEXT_POINTER_TABLE_VA = 0x543FA0
+HINT_TEXT_POINTER_COUNT = 186
 BOOK_TABLE_VA = 0x4C4748
 BOOK_RECORD_COUNT = 257
 BOOK_RECORD_SIZE = 0x58
@@ -82,6 +85,8 @@ class DiscoveryHintLink:
     required_skill_id: int
     required_language_id: int
     required_level: int
+    text_id: int
+    text: str
     prerequisite_discoveries: tuple[DiscoveryHintTarget, ...]
     targets: tuple[DiscoveryHintTarget, ...]
     book_sources: tuple[DiscoveryHintBookSource, ...]
@@ -121,6 +126,30 @@ def _read_cp949_text(
     if not name:
         raise ValueError(f"{description}이 비어 있습니다.")
     return name
+
+
+def _read_cp949_body(
+    data: bytes,
+    pe: pefile.PE,
+    pointer_offset: int,
+    description: str,
+) -> str:
+    """Read one complete library-hint page body from a pointer field."""
+    text_va = struct.unpack_from("<I", data, pointer_offset)[0]
+    try:
+        text_offset = pe.get_offset_from_rva(text_va - pe.OPTIONAL_HEADER.ImageBase)
+    except pefile.PEFormatError as error:
+        raise ValueError(f"{description} 주소를 검증하지 못했습니다.") from error
+    text_end = data.find(b"\0", text_offset, min(text_offset + 256, len(data)))
+    if not 0 <= text_offset < len(data) or text_end < 0:
+        raise ValueError(f"{description} 주소를 검증하지 못했습니다.")
+    try:
+        text = data[text_offset:text_end].decode("cp949")
+    except UnicodeDecodeError as error:
+        raise ValueError(f"{description}을 읽지 못했습니다.") from error
+    if not text:
+        raise ValueError(f"{description}이 비어 있습니다.")
+    return text
 
 
 def _read_discovery_hint_targets_from_data(
@@ -192,6 +221,9 @@ def read_discovery_hint_links(
         item_offset = pe.get_offset_from_rva(
             ITEM_TABLE_VA - pe.OPTIONAL_HEADER.ImageBase
         )
+        hint_text_pointer_table_offset = pe.get_offset_from_rva(
+            HINT_TEXT_POINTER_TABLE_VA - pe.OPTIONAL_HEADER.ImageBase
+        )
         hint_size = HINT_MASTER_RECORD_COUNT * HINT_MASTER_RECORD_SIZE
         book_size = BOOK_RECORD_COUNT * BOOK_RECORD_SIZE
         item_size = ITEM_RECORD_COUNT * ITEM_RECORD_SIZE
@@ -201,6 +233,11 @@ def read_discovery_hint_links(
             raise ValueError("도서관 책 테이블의 범위를 검증하지 못했습니다.")
         if item_offset < 0 or item_offset + item_size > len(data):
             raise ValueError("아이템 테이블의 범위를 검증하지 못했습니다.")
+        if (
+            hint_text_pointer_table_offset < 0
+            or hint_text_pointer_table_offset + HINT_TEXT_POINTER_COUNT * 4 > len(data)
+        ):
+            raise ValueError("도서관 힌트 본문 포인터 테이블의 범위를 검증하지 못했습니다.")
 
         targets_by_id: defaultdict[int, list[DiscoveryHintTarget]] = defaultdict(list)
         all_targets = _read_discovery_hint_targets_from_data(data, pe)
@@ -297,6 +334,17 @@ def read_discovery_hint_links(
             required_level = struct.unpack_from(
                 "<i", data, record_offset + HINT_REQUIRED_LEVEL_OFFSET,
             )[0]
+            text_id = struct.unpack_from(
+                "<i", data, record_offset + HINT_TEXT_ID_OFFSET,
+            )[0]
+            if not 0 <= text_id < HINT_TEXT_POINTER_COUNT:
+                raise ValueError(f"힌트 {hint_id}번 본문 ID를 검증하지 못했습니다.")
+            text = _read_cp949_body(
+                data,
+                pe,
+                hint_text_pointer_table_offset + text_id * 4,
+                f"힌트 {hint_id}번 본문",
+            )
             prerequisite_discovery_ids = tuple(
                 prerequisite_id
                 for index in range(HINT_PREREQUISITE_DISCOVERY_CAPACITY)
@@ -321,6 +369,7 @@ def read_discovery_hint_links(
             links.append(DiscoveryHintLink(
                 hint_id, hint_name, target_id,
                 required_skill_id, required_language_id, required_level,
+                text_id, text,
                 prerequisite_discoveries, targets,
                 tuple(books_by_hint.get(hint_id, ())),
                 tuple(items_by_hint.get(hint_id, ())),

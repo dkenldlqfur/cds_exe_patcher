@@ -38,6 +38,7 @@ class AviPreview:
         self._photo = None
         self._render_job = None
         self._end_callback = None
+        self._restart_requested = False
 
     def show(self, video_path: str | Path) -> bool:
         """Start (or replace) the looping video; return False when unavailable."""
@@ -50,6 +51,7 @@ class AviPreview:
                 self._create_player()
             assert self._player is not None and self._instance is not None
             self._frame_ready = False
+            self._restart_requested = False
             self._player.set_media(self._instance.media_new(path))
             self._path = path
             self._label.configure(image=self._photo, text="")
@@ -98,16 +100,25 @@ class AviPreview:
         )
         self._player.video_set_format("RV32", self._width, self._height, pitch)
         self._photo = tk.PhotoImage(width=self._width, height=self._height)
-        # libVLC invokes events on its decoder thread.  Hand the replay back
-        # to Tk's main thread before changing the media object.
-        self._end_callback = lambda _event: self._owner.after(150, self._restart)
+        # libVLC invokes events on its decoder thread.  That thread must never
+        # call Tk directly: closing the main window while it is scheduling an
+        # ``after`` callback can leave the interpreter unresponsive.  The Tk
+        # render loop notices this flag and restarts playback on its own thread.
+        self._end_callback = self._request_restart
         self._player.event_manager().event_attach(
             _vlc.EventType.MediaPlayerEndReached, self._end_callback,
         )
 
+    def _request_restart(self, _event) -> None:
+        """Receive a VLC-thread event without making a Tk call."""
+        self._restart_requested = True
+
     def _render(self) -> None:
         if self._player is None or not self._owner.winfo_exists():
             return
+        if self._restart_requested:
+            self._restart_requested = False
+            self._restart()
         if self._frame_ready and self._buffer is not None and self._photo is not None:
             self._frame_ready = False
             source = bytes(self._buffer)
@@ -138,6 +149,10 @@ class AviPreview:
             self._render_job = None
         if self._player is not None:
             try:
+                if _vlc is not None:
+                    self._player.event_manager().event_detach(
+                        _vlc.EventType.MediaPlayerEndReached,
+                    )
                 self._player.stop()
                 self._player.release()
             except Exception:
@@ -158,3 +173,4 @@ class AviPreview:
         self._path = self._buffer = self._photo = None
         self._lock_callback = self._display_callback = self._end_callback = None
         self._frame_ready = False
+        self._restart_requested = False

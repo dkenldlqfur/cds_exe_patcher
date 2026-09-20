@@ -64,8 +64,11 @@ from pe_patch_section import (
     LIBRARY_BOOK_TITLE_SLOT_STRIDE,
     LIBRARY_HINT_NAME_SLOT_OFFSET,
     LIBRARY_HINT_NAME_SLOT_STRIDE,
+    LIBRARY_HINT_TEXT_SLOT_OFFSET,
+    LIBRARY_HINT_TEXT_SLOT_STRIDE,
     PATCH_SECTION_LIBRARY_BOOKS_SIZE,
     PATCH_SECTION_LIBRARY_HINT_NAMES_SIZE,
+    PATCH_SECTION_LIBRARY_HINT_TEXTS_SIZE,
     PIRATE_SLOT_OFFSET,
     PIRATE_SLOT_SIZE,
     PLAYER_FAME_LIMIT_SLOT_OFFSET,
@@ -587,7 +590,7 @@ class HintEdit:
 
 @dataclass(frozen=True)
 class DiscoveryHintEdit:
-    """Editable name, target, and reading requirements of one library hint."""
+    """Editable metadata, requirements, and reading-page text of one library hint."""
 
     hint_id: int
     name: str
@@ -596,6 +599,7 @@ class DiscoveryHintEdit:
     required_language_id: int
     required_level: int
     prerequisite_discovery_ids: tuple[int, ...]
+    text: str
 
 
 @dataclass(frozen=True)
@@ -1053,6 +1057,10 @@ LIBRARY_HINT_REQUIRED_LANGUAGE_OFFSET = 0x1C
 LIBRARY_HINT_REQUIRED_LEVEL_OFFSET = 0x20
 LIBRARY_HINT_PREREQUISITE_LIST_OFFSET = 0x28
 LIBRARY_HINT_PREREQUISITE_CAPACITY = 8
+LIBRARY_HINT_TEXT_ID_OFFSET = 0x14
+LIBRARY_HINT_TEXT_POINTER_TABLE_VA = 0x543FA0
+LIBRARY_HINT_TEXT_POINTER_COUNT = 186
+LIBRARY_HINT_TEXT_MAX_BYTES = LIBRARY_HINT_TEXT_SLOT_STRIDE - 1
 LIBRARY_HINT_SKILL_MIN = -1
 LIBRARY_HINT_SKILL_MAX = 12
 LIBRARY_HINT_LANGUAGE_MIN = -1
@@ -1317,6 +1325,45 @@ MISTRANSLATION_RETIRED_REPLACEMENTS = (
     (0x1664A5, "중단", "계속"),
     (0x17A214, "항주", "남경"),
 )
+# `EXE_LOCALIZATION_ANALYSIS.md` verifies that these CP932 strings reach live
+# dialogue/UI output paths.  Each Korean replacement fits in the original
+# NUL-terminated byte field, so no code pointer or adjacent string moves.
+MISTRANSLATION_UNTRANSLATED_REPLACEMENTS = (
+    (
+        0x1655F4,
+        "おい、あんた聞いたかい？  %sが滅ぼされたって噂だぜ".encode("cp932"),
+        "이봐, 들었어?  %s가 멸망했다는 소문이야.",
+    ),
+    (
+        0x165584,
+        "あんた達と同じ船乗りさ、ウソだと思うなら自分で確かめな！".encode("cp932"),
+        "당신들과 같은 뱃사람이야. 거짓말 같으면 직접 확인해 봐!",
+    ),
+    (
+        0x165558,
+        "なんてこった。これじゃ、契約はご破算ですね".encode("cp932"),
+        "이런, 이러면 계약은 파기군요.",
+    ),
+    (
+        0x165538,
+        "%sとの契約は破棄されました！".encode("cp932"),
+        "%s와의 계약이 파기됐습니다!",
+    ),
+    (0x16690C, "危険なエラー".encode("cp932"), "치명적 오류"),
+    (
+        0x16689C,
+        (
+            "サーフェスの固定に失敗しました。\n"
+            "システムの異常だと思われます。直ちにゲームを終了して、ＯＳを再起動してください"
+        ).encode("cp932"),
+        (
+            "서피스 고정에 실패했습니다.\n"
+            "시스템에 이상이 있습니다. 즉시 게임을 종료하고 운영 체제를 다시 시작하십시오."
+        ),
+    ),
+    (0x166940, "エラー".encode("cp932"), "오류"),
+    (0x166920, "ファイルの作成に失敗しました".encode("cp932"), "파일 생성에 실패했습니다"),
+)
 MISTRANSLATION_CONTRACT_LABEL_OFFSET = 0x16E7F8
 MISTRANSLATION_SWORD_TEXT_OFFSET = 0x156080
 MISTRANSLATION_SWORD_TEXT_CAPACITY = 16
@@ -1369,6 +1416,15 @@ def _validate_mistranslation_layout(data: bytes | bytearray) -> None:
         if current not in (original_bytes, corrected_bytes):
             raise ValueError(f"오역 수정 위치 0x{offset:X}의 문자열을 검증하지 못했습니다.")
 
+    for offset, original_bytes, corrected in MISTRANSLATION_UNTRANSLATED_REPLACEMENTS:
+        corrected_bytes = _translation_bytes(corrected)
+        if len(corrected_bytes) > len(original_bytes):
+            raise AssertionError(f"미번역 수정 문자열이 원본 영역을 초과합니다: 0x{offset:X}")
+        corrected_field = corrected_bytes.ljust(len(original_bytes), b"\0")
+        current = bytes(data[offset:offset + len(original_bytes)])
+        if current not in (original_bytes, corrected_field):
+            raise ValueError(f"미번역 수정 위치 0x{offset:X}의 문자열을 검증하지 못했습니다.")
+
     sword_field = bytes(data[
         MISTRANSLATION_SWORD_TEXT_OFFSET:
         MISTRANSLATION_SWORD_TEXT_OFFSET + MISTRANSLATION_SWORD_TEXT_CAPACITY
@@ -1397,6 +1453,12 @@ def read_mistranslation_patch_state(data: bytes) -> bool:
         data[offset:offset + len(_translation_bytes(corrected))] != _translation_bytes(corrected)
         for offset, _, corrected in MISTRANSLATION_REPLACEMENTS
         if offset != MISTRANSLATION_CONTRACT_LABEL_OFFSET
+    ):
+        return False
+    if any(
+        data[offset:offset + len(original_bytes)]
+        != _translation_bytes(corrected).ljust(len(original_bytes), b"\0")
+        for offset, original_bytes, corrected in MISTRANSLATION_UNTRANSLATED_REPLACEMENTS
     ):
         return False
 
@@ -1428,6 +1490,15 @@ def apply_mistranslation_fixes(data: bytearray, enabled: bool) -> bool:
         replacement = _translation_bytes(original)
         if data[offset:offset + len(replacement)] != replacement:
             data[offset:offset + len(replacement)] = replacement
+            changed = True
+
+    for offset, original_bytes, corrected in MISTRANSLATION_UNTRANSLATED_REPLACEMENTS:
+        replacement = (
+            _translation_bytes(corrected).ljust(len(original_bytes), b"\0")
+            if enabled else original_bytes
+        )
+        if data[offset:offset + len(original_bytes)] != replacement:
+            data[offset:offset + len(original_bytes)] = replacement
             changed = True
 
     original_sword = _translation_bytes(MISTRANSLATION_SWORD_ORIGINAL)
@@ -4774,6 +4845,15 @@ def _read_discovery_hint_edit_from_data(
         if pe.FILE_HEADER.Machine != 0x14C or pe.OPTIONAL_HEADER.ImageBase != 0x400000:
             raise ValueError("지원하는 32비트 CDS III 실행 파일이 아닙니다.")
         offset = _library_hint_condition_offset(pe, hint_id, len(data))
+        text_pointer_table_offset = pe.get_offset_from_rva(
+            LIBRARY_HINT_TEXT_POINTER_TABLE_VA - pe.OPTIONAL_HEADER.ImageBase
+        )
+        text_pointer_table_size = LIBRARY_HINT_TEXT_POINTER_COUNT * 4
+        if (
+            text_pointer_table_offset < 0
+            or text_pointer_table_offset + text_pointer_table_size > len(data)
+        ):
+            raise ValueError("도서관 힌트 본문 포인터 테이블의 범위를 검증하지 못했습니다.")
         name_va = struct.unpack_from(
             "<I", data, offset + LIBRARY_HINT_NAME_POINTER_OFFSET,
         )[0]
@@ -4809,6 +4889,28 @@ def _read_discovery_hint_edit_from_data(
             )
             if prerequisite_id >= 0
         )
+        text_id = struct.unpack_from(
+            "<i", data, offset + LIBRARY_HINT_TEXT_ID_OFFSET,
+        )[0]
+        if not 0 <= text_id < LIBRARY_HINT_TEXT_POINTER_COUNT:
+            raise ValueError(f"도서관 힌트 {hint_id}번 본문 ID를 검증하지 못했습니다.")
+        text_va = struct.unpack_from(
+            "<I", data, text_pointer_table_offset + text_id * 4,
+        )[0]
+        try:
+            text_offset = pe.get_offset_from_rva(text_va - pe.OPTIONAL_HEADER.ImageBase)
+        except pefile.PEFormatError as error:
+            raise ValueError(f"도서관 힌트 {hint_id}번 본문 주소를 검증하지 못했습니다.") from error
+        text_end = data.find(
+            b"\0", text_offset,
+            min(text_offset + LIBRARY_HINT_TEXT_SLOT_STRIDE, len(data)),
+        )
+        if not 0 <= text_offset < len(data) or text_end < 0:
+            raise ValueError(f"도서관 힌트 {hint_id}번 본문 주소를 검증하지 못했습니다.")
+        try:
+            text = data[text_offset:text_end].decode("cp949")
+        except UnicodeDecodeError as error:
+            raise ValueError(f"도서관 힌트 {hint_id}번 본문을 읽지 못했습니다.") from error
         return DiscoveryHintEdit(
             hint_id,
             name,
@@ -4817,6 +4919,7 @@ def _read_discovery_hint_edit_from_data(
             required_language_id,
             required_level,
             prerequisite_discovery_ids,
+            text,
         )
     finally:
         pe.close()
@@ -4843,6 +4946,17 @@ def apply_discovery_hint_edit(
         raise ValueError(
             "힌트 이름은 최대 18자·CP949 36바이트까지 입력할 수 있습니다."
         )
+    text = edit.text.strip()
+    if not text:
+        raise ValueError("힌트 본문을 입력해 주세요.")
+    try:
+        text_bytes = text.encode("cp949")
+    except UnicodeEncodeError as error:
+        raise ValueError("힌트 본문은 CP949에서 사용할 수 있는 문자만 입력할 수 있습니다.") from error
+    if len(text_bytes) > LIBRARY_HINT_TEXT_MAX_BYTES:
+        raise ValueError(
+            f"힌트 본문은 최대 {LIBRARY_HINT_TEXT_MAX_BYTES}바이트까지 입력할 수 있습니다."
+        )
     prerequisites = tuple(edit.prerequisite_discovery_ids)
     if (
         not 0 <= edit.hint_id < LIBRARY_HINT_RECORD_COUNT
@@ -4866,6 +4980,7 @@ def apply_discovery_hint_edit(
         edit.required_language_id,
         edit.required_level,
         prerequisites,
+        text,
     )
     current = _read_discovery_hint_edit_from_data(bytes(data), edit.hint_id)
     if current == normalized:
@@ -4873,6 +4988,14 @@ def apply_discovery_hint_edit(
     pe = pefile.PE(data=bytes(data), fast_load=True)
     try:
         offset = _library_hint_condition_offset(pe, edit.hint_id, len(data))
+        text_pointer_table_offset = pe.get_offset_from_rva(
+            LIBRARY_HINT_TEXT_POINTER_TABLE_VA - pe.OPTIONAL_HEADER.ImageBase
+        )
+        text_id = struct.unpack_from(
+            "<i", data, offset + LIBRARY_HINT_TEXT_ID_OFFSET,
+        )[0]
+        if not 0 <= text_id < LIBRARY_HINT_TEXT_POINTER_COUNT:
+            raise ValueError("도서관 힌트 본문 ID를 검증하지 못했습니다.")
     finally:
         pe.close()
     if current.name != name:
@@ -4890,6 +5013,21 @@ def apply_discovery_hint_edit(
         data[slot_offset:slot_offset + len(name_bytes) + 1] = name_bytes + b"\0"
         struct.pack_into(
             "<I", data, offset + LIBRARY_HINT_NAME_POINTER_OFFSET, slot_va,
+        )
+    if current.text != text:
+        section, _created = ensure_patch_section(
+            data, PATCH_SECTION_LIBRARY_HINT_TEXTS_SIZE,
+        )
+        slot_offset, slot_va = section.slot(
+            LIBRARY_HINT_TEXT_SLOT_OFFSET + text_id * LIBRARY_HINT_TEXT_SLOT_STRIDE,
+            LIBRARY_HINT_TEXT_SLOT_STRIDE,
+        )
+        data[slot_offset:slot_offset + LIBRARY_HINT_TEXT_SLOT_STRIDE] = (
+            b"\0" * LIBRARY_HINT_TEXT_SLOT_STRIDE
+        )
+        data[slot_offset:slot_offset + len(text_bytes) + 1] = text_bytes + b"\0"
+        struct.pack_into(
+            "<I", data, text_pointer_table_offset + text_id * 4, slot_va,
         )
     struct.pack_into(
         "<I", data, offset + LIBRARY_HINT_TARGET_ID_OFFSET, edit.target_id,

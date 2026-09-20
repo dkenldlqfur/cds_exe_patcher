@@ -145,6 +145,11 @@ MISTRANSLATION_DETAILS = """by kseokjung, 오쌍, ladyous
 주인공 정보의 빚 → 계약금
 깨진 일본어 문장 → 그런 말도 안되는…이 자식 그거 누구한테 들었어！
 
+[미번역 대사·UI]
+멸망 세력 계약 파기 대사 4줄 → 한국어 대사
+서피스 고정 실패 오류 대화상자 → 한국어
+파일 생성 실패 오류 대화상자 → 한국어
+
 [지명]
 르완다 / 르완다항 → 루안다 / 루안다항
 
@@ -635,6 +640,9 @@ class NativeWinEdit:
 class CDSExecutablePatcher(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
+        self._closing = False
+        self._destroyed = False
+        self.protocol("WM_DELETE_WINDOW", self._request_close)
         self.withdraw()
         self.title(f"대항해시대 III EXE 패치 v{APP_VERSION}")
         self.resizable(False, False)
@@ -845,6 +853,7 @@ class CDSExecutablePatcher(tk.Tk):
         self.discovery_hint_required_level = tk.StringVar(value="0")
         self.discovery_hint_name = tk.StringVar()
         self.discovery_hint_target_id = tk.StringVar(value="0")
+        self.discovery_hint_text = tk.StringVar()
         self.discovery_hint_prerequisites = [
             tk.StringVar(value="없음") for _ in range(8)
         ]
@@ -919,7 +928,24 @@ class CDSExecutablePatcher(tk.Tk):
         self._show_splash()
 
     def destroy(self) -> None:
-        """Release the native AVI decoder before Tk tears down its widgets."""
+        """Release native playback and delayed UI work before Tk shuts down."""
+        if self._destroyed:
+            return
+        self._closing = True
+        self._destroyed = True
+        self._cancel_pending_after_jobs()
+        if self._splash is not None:
+            try:
+                self._splash.destroy()
+            except tk.TclError:
+                pass
+            self._splash = None
+        if self._update_prompt is not None:
+            try:
+                self._update_prompt.destroy()
+            except tk.TclError:
+                pass
+            self._update_prompt = None
         if self._ship_avi_preview is not None:
             self._ship_avi_preview.stop()
         if self._item_avi_preview is not None:
@@ -930,7 +956,36 @@ class CDSExecutablePatcher(tk.Tk):
             self._discovery_avi_preview.stop()
         if self._discover_animation_preview is not None:
             self._discover_animation_preview.stop()
-        super().destroy()
+        try:
+            super().destroy()
+        except tk.TclError:
+            pass
+
+    def _request_close(self) -> None:
+        """Handle the window close button through the Python cleanup path."""
+        if not self._closing:
+            self.destroy()
+
+    def _cancel_pending_after_jobs(self) -> None:
+        """Prevent delayed callbacks from touching widgets during teardown."""
+        try:
+            jobs = self.tk.splitlist(self.tk.call("after", "info"))
+        except tk.TclError:
+            return
+        for job in jobs:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+
+    def _post_to_ui(self, callback) -> None:
+        """Schedule worker output only while the Tk interpreter is alive."""
+        if self._closing:
+            return
+        try:
+            self.after(0, lambda: None if self._closing else callback())
+        except (RuntimeError, tk.TclError):
+            pass
 
     def _set_window_icon(self) -> None:
         """Use the bundled icon for the application window and taskbar."""
@@ -969,6 +1024,8 @@ class CDSExecutablePatcher(tk.Tk):
         self.geometry(f"{width}x{height}+{max(x, 0)}+{max(y, 0)}")
 
     def _finish_splash(self) -> None:
+        if self._closing:
+            return
         if self._splash is not None and self._splash.winfo_exists():
             self._splash.destroy()
         self._splash = None
@@ -4662,6 +4719,7 @@ class CDSExecutablePatcher(tk.Tk):
         self.discovery_hint_required_level.set(str(link.required_level))
         self.discovery_hint_name.set(link.hint_name)
         self.discovery_hint_target_id.set(str(link.target_id))
+        self.discovery_hint_text.set(link.text)
         labels_by_id = {
             record_number: label
             for label, record_number in self._discovery_hint_prerequisite_ids_by_label.items()
@@ -4727,6 +4785,16 @@ class CDSExecutablePatcher(tk.Tk):
         )
         hint_target_entry.grid(row=0, column=5, padx=(7, 0), sticky="w")
         self._limit_integer_input(hint_target_entry, 0, 0xFFFFFFFF)
+        ttk.Label(summary, text="힌트 본문:").grid(
+            row=1, column=0, pady=(10, 0), sticky="nw",
+        )
+        hint_text_editor = tk.Text(
+            summary, width=72, height=5, wrap=tk.WORD, font=("맑은 고딕", 9),
+        )
+        hint_text_editor.grid(
+            row=1, column=1, columnspan=5, pady=(10, 0), sticky="ew",
+        )
+        hint_text_editor.insert("1.0", self.discovery_hint_text.get())
 
         requirement_box = ttk.LabelFrame(frame, text="열람 조건", padding=10)
         requirement_box.pack(fill=tk.X, pady=(10, 0))
@@ -4925,6 +4993,9 @@ class CDSExecutablePatcher(tk.Tk):
 
         def close_window() -> None:
             self.discovery_hint_name.set(hint_name_entry.get_limited())
+            self.discovery_hint_text.set(
+                hint_text_editor.get("1.0", "end-1c").strip()
+            )
             window.destroy()
 
         ttk.Button(frame, text="닫기", command=close_window).pack(pady=(10, 0))
@@ -5127,6 +5198,7 @@ class CDSExecutablePatcher(tk.Tk):
                 -1 if language_name == "없음" else BARMAID_LANGUAGE_NAMES.index(language_name),
                 int(self.discovery_hint_required_level.get()),
                 prerequisites,
+                self.discovery_hint_text.get().strip(),
             )
         except (ValueError, KeyError) as error:
             raise ValueError("힌트 열람 조건 입력값을 확인해 주세요.") from error
@@ -6049,8 +6121,10 @@ class CDSExecutablePatcher(tk.Tk):
             except UpdateError:
                 history_text = self._format_single_release_note(version, notes)
             try:
-                self.after(0, lambda: self._show_update_history_dialog(version, history_text))
-            except tk.TclError:
+                self._post_to_ui(
+                    lambda: self._show_update_history_dialog(version, history_text),
+                )
+            except (RuntimeError, tk.TclError):
                 pass
 
         threading.Thread(target=worker, name="update-history", daemon=True).start()
@@ -6169,7 +6243,7 @@ class CDSExecutablePatcher(tk.Tk):
 
     def check_for_updates(self, silent: bool = False) -> None:
         """Check GitHub Releases without blocking the Tk event loop."""
-        if self._update_checking:
+        if self._closing or self._update_checking:
             return
         updater = GitHubReleaseUpdater(APP_UPDATE_CONFIG)
         if not updater.enabled:
@@ -6187,18 +6261,25 @@ class CDSExecutablePatcher(tk.Tk):
         try:
             release = updater.fetch_latest_release()
         except UpdateError as exc:
-            self.after(0, lambda: self._finish_update_check(None, None, silent, str(exc)))
+            message = str(exc)
+            self._post_to_ui(
+                lambda: self._finish_update_check(None, None, silent, message),
+            )
             return
         if release is None or not updater.is_newer_release(release):
-            self.after(0, lambda: self._finish_update_check(None, None, silent, None))
+            self._post_to_ui(
+                lambda: self._finish_update_check(None, None, silent, None),
+            )
             return
         asset = updater.release_asset(release)
         if asset is None:
-            self.after(0, lambda: self._finish_update_check(
+            self._post_to_ui(lambda: self._finish_update_check(
                 None, None, silent, "새 릴리스의 업데이트 ZIP을 찾지 못했습니다."
             ))
             return
-        self.after(0, lambda: self._finish_update_check(updater, (release, asset), silent, None))
+        self._post_to_ui(
+            lambda: self._finish_update_check(updater, (release, asset), silent, None),
+        )
 
     def _finish_update_check(
         self,
@@ -6207,6 +6288,8 @@ class CDSExecutablePatcher(tk.Tk):
         silent: bool,
         error: str | None,
     ) -> None:
+        if self._closing:
+            return
         self._set_update_checking(False)
         if error:
             if not silent:
@@ -6233,7 +6316,7 @@ class CDSExecutablePatcher(tk.Tk):
 
     def install_available_update(self, confirm: bool = True) -> None:
         """Install the available update, optionally asking for confirmation first."""
-        if self._available_update is None:
+        if self._closing or self._available_update is None:
             return
         updater, release, asset = self._available_update
         version = str(release.get("tag_name", "")).strip() or "새 버전"
@@ -6256,9 +6339,14 @@ class CDSExecutablePatcher(tk.Tk):
         try:
             replacement = updater.download_and_extract(asset)
         except UpdateError as exc:
-            self.after(0, lambda: self._finish_update_download(None, updater, release, str(exc)))
+            message = str(exc)
+            self._post_to_ui(
+                lambda: self._finish_update_download(None, updater, release, message),
+            )
             return
-        self.after(0, lambda: self._finish_update_download(replacement, updater, release, None))
+        self._post_to_ui(
+            lambda: self._finish_update_download(replacement, updater, release, None),
+        )
 
     def _finish_update_download(
         self,
@@ -6267,6 +6355,8 @@ class CDSExecutablePatcher(tk.Tk):
         release: dict,
         error: str | None,
     ) -> None:
+        if self._closing:
+            return
         self._set_update_checking(False)
         if error:
             if self._menu_bar is not None and self._update_menu_index is not None:
