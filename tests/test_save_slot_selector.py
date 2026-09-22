@@ -20,6 +20,8 @@ from patch_cds_integrated import (  # noqa: E402
     SAVE_SLOT_SELECTOR_LABEL_STRIDE,
     SAVE_SLOT_SELECTOR_MENU_ITEMS_OFFSET,
     SAVE_SLOT_SELECTOR_PREVIOUS_MAGIC,
+    SAVE_SLOT_SELECTOR_EMPTY_SLOT_BRANCH_LEGACY_MAGIC,
+    SAVE_SLOT_SELECTOR_SAVE_TRAMPOLINE_V2_LEGACY_MAGIC,
     SAVE_SLOT_SELECTOR_HEADER_BUFFER_LEGACY_MAGIC,
     SAVE_SLOT_SELECTOR_HEADER_COUNT_LEGACY_MAGIC,
     SAVE_SLOT_SELECTOR_SAVE_NAMES_OFFSET,
@@ -84,6 +86,15 @@ class SaveSlotSelectorTests(unittest.TestCase):
             slot_offset + SAVE_SLOT_SELECTOR_WRAPPER_OFFSET + 0x185
         ])
         self.assertEqual(_relative_target(wrapper, wrapper_va, 0x130), SAVE_SLOT_SELECTOR_CONFIRM_ROUTINE_VA)
+        self.assertEqual(_relative_target(wrapper, wrapper_va, 0x145), 0x478E80)
+        # A missing slot bypasses overwrite confirmation and must land on the
+        # stack restore at 0x141, never inside the preceding `jne` immediate.
+        self.assertEqual(wrapper[0x120:0x122], bytes.fromhex("74 1F"))
+        self.assertEqual(
+            wrapper_va + 0x122 + struct.unpack_from("<b", wrapper, 0x121)[0],
+            wrapper_va + 0x141,
+        )
+        self.assertEqual(wrapper[0x141:0x145], bytes.fromhex("83 C4 68 61"))
         self.assertEqual(_relative_target(wrapper, wrapper_va, 0x15E), SAVE_SLOT_SELECTOR_SUCCESS_VA)
         self.assertEqual(_relative_target(wrapper, wrapper_va, 0x17B), SAVE_SLOT_SELECTOR_CANCEL_VA)
         self.assertEqual(
@@ -194,6 +205,22 @@ class SaveSlotSelectorTests(unittest.TestCase):
         self.assertFalse(_save_slot_selector_patch_info(v7))
         self.assertTrue(apply_save_slot_selector_patch(v7, True))
         self.assertTrue(_save_slot_selector_patch_info(v7))
+
+        v9 = bytearray(edited)
+        v9[slot_offset:slot_offset + len(SAVE_SLOT_SELECTOR_SAVE_TRAMPOLINE_V2_LEGACY_MAGIC)] = (
+            SAVE_SLOT_SELECTOR_SAVE_TRAMPOLINE_V2_LEGACY_MAGIC
+        )
+        self.assertFalse(_save_slot_selector_patch_info(v9))
+        self.assertTrue(apply_save_slot_selector_patch(v9, True))
+        self.assertTrue(_save_slot_selector_patch_info(v9))
+
+        v10 = bytearray(edited)
+        v10[slot_offset:slot_offset + len(SAVE_SLOT_SELECTOR_EMPTY_SLOT_BRANCH_LEGACY_MAGIC)] = (
+            SAVE_SLOT_SELECTOR_EMPTY_SLOT_BRANCH_LEGACY_MAGIC
+        )
+        self.assertFalse(_save_slot_selector_patch_info(v10))
+        self.assertTrue(apply_save_slot_selector_patch(v10, True))
+        self.assertTrue(_save_slot_selector_patch_info(v10))
 
         self.assertTrue(apply_save_slot_selector_patch(edited, False))
         self.assertFalse(_save_slot_selector_patch_info(edited))

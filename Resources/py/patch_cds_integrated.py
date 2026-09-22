@@ -200,8 +200,16 @@ SAVE_SLOT_SELECTOR_HEADER_BUFFER_LEGACY_MAGIC = b"SAVESLT6"
 # v8 checks the actual ReadFile byte-count slot.  v7 still compared an
 # unrelated buffer offset, so every existing save retained the empty label.
 SAVE_SLOT_SELECTOR_HEADER_COUNT_LEGACY_MAGIC = b"SAVESLT7"
-SAVE_SLOT_SELECTOR_MAGIC = b"SAVESLT8"
-SAVE_SLOT_SELECTOR_VERSION = 8
+SAVE_SLOT_SELECTOR_SAVE_TRAMPOLINE_LEGACY_MAGIC = b"SAVESLT8"
+# v9 added a save trampoline.  It changes no feature behaviour, but is
+# deliberately replaced with the original direct serializer call in v10.
+SAVE_SLOT_SELECTOR_SAVE_TRAMPOLINE_V2_LEGACY_MAGIC = b"SAVESLT9"
+# v10's missing-file branch landed inside the overwrite-decline jump.  It
+# consequently executed instruction-immediate bytes when saving to an empty
+# slot.  Keep it as an upgradeable legacy payload.
+SAVE_SLOT_SELECTOR_EMPTY_SLOT_BRANCH_LEGACY_MAGIC = b"SAVESL10"
+SAVE_SLOT_SELECTOR_MAGIC = b"SAVESL11"
+SAVE_SLOT_SELECTOR_VERSION = 11
 SAVE_SLOT_SELECTOR_WRAPPER_OFFSET = 0x20
 # Keep all data after the wrapper.  The direct read-only file calls make the
 # wrapper larger than the old 0x180 menu-table position.
@@ -2692,7 +2700,7 @@ def _build_save_slot_selector_payload(slot_va: int) -> bytes:
         "E8 00 00 00 00 83 C4 04 "  # make full path
         "6A 00 68 80 00 00 00 6A 03 6A 00 6A 03 "
         "68 00 00 00 80 50 FF 15 44 F4 62 00 "  # CreateFileA read-only
-        "83 F8 FF 74 1B "           # absent -> save without overwrite prompt
+        "83 F8 FF 74 1F "           # absent -> restore stack, then save
         "50 FF 15 24 F4 62 00 "     # CloseHandle
         "68 B8 8C 56 00 6A 02 "     # existing game overwrite confirmation
         "E8 00 00 00 00 83 C4 08 "
@@ -2851,6 +2859,9 @@ def _is_legacy_save_slot_selector_patch(
         SAVE_SLOT_SELECTOR_TITLE_LEGACY_MAGIC,
         SAVE_SLOT_SELECTOR_HEADER_BUFFER_LEGACY_MAGIC,
         SAVE_SLOT_SELECTOR_HEADER_COUNT_LEGACY_MAGIC,
+        SAVE_SLOT_SELECTOR_SAVE_TRAMPOLINE_LEGACY_MAGIC,
+        SAVE_SLOT_SELECTOR_SAVE_TRAMPOLINE_V2_LEGACY_MAGIC,
+        SAVE_SLOT_SELECTOR_EMPTY_SLOT_BRANCH_LEGACY_MAGIC,
     ):
         return False
     if hook_offset is None:
