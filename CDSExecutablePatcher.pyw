@@ -284,10 +284,10 @@ KAABA_DETAILS = """by 히소카
 - 발견물 ID 672와 카바신전 설명을 활성화합니다.
 - DSTILL.CDS에 카바신전 내장 정지 이미지 1개를 추가합니다.
 - DISEV.CDS의 이벤트 파트 63을 카바신전 발견 이벤트·대사로 교체합니다.
-- SAVEDATA.CDS에서 카바신전이 미등록(00)인 경우, 발견·보고 날짜에 맞춰 미발견·발견·보고 완료 상태로 보정합니다.
+- 존재하는 `SAVEDATA.CDS`와 `SAVEDATA01.CDS`~`SAVEDATA10.CDS`에서 카바신전이 미등록(00)인 경우, 발견·보고 날짜에 맞춰 미발견·발견·보고 완료 상태로 보정합니다.
 
 체크 해제 시 EXE, DSTILL.CDS, DISEV.CDS는 주입 전 상태로 복원합니다.
-이미 진행에 영향을 줄 수 있는 SAVEDATA.CDS의 상태는 해제해도 유지합니다.
+이미 진행에 영향을 줄 수 있는 세이브 파일의 상태는 해제해도 유지합니다.
 """
 
 SLAVE_DETAILS = """by ladyous
@@ -295,11 +295,11 @@ SLAVE_DETAILS = """by ladyous
 노예 발견물
 
 - EXE의 도서관 힌트 조건 두 곳을 수정해 노예 힌트를 열람할 수 있게 합니다.
-- SAVEDATA.CDS의 도서관 힌트 상태를 함께 설정합니다.
-- SAVEDATA.CDS의 노예 발견물 상태가 미등록(00)이면 발견·보고 날짜에 맞춰 미발견·발견·보고 완료 상태로 보정합니다.
+- 존재하는 `SAVEDATA.CDS`와 `SAVEDATA01.CDS`~`SAVEDATA10.CDS`의 도서관 힌트 상태를 함께 설정합니다.
+- 각 세이브의 노예 발견물 상태가 미등록(00)이면 발견·보고 날짜에 맞춰 미발견·발견·보고 완료 상태로 보정합니다.
 - DISEV.CDS의 이벤트 파트 229에 노예 발견 대사·분기를 추가합니다.
 
-체크 해제 시 위 EXE·SAVEDATA.CDS·DISEV.CDS 변경을 패치 전 값으로 복원합니다.
+체크 해제 시 위 EXE·기존 세이브 슬롯·DISEV.CDS 변경을 패치 전 값으로 복원합니다.
 이미 발견 또는 보고 상태가 된 노예 발견물은 변경하지 않습니다.
 """
 
@@ -6511,8 +6511,8 @@ class CDSExecutablePatcher(tk.Tk):
             if backup is not None:
                 backed_up_paths.add(target.resolve())
             kaaba_backups = apply_kaaba_patch(target, self.kaaba_enabled.get(), backed_up_paths)
-            kaaba_save_backup = (
-                promote_game_savedata(target, backed_up_paths) if self.kaaba_enabled.get() else None
+            kaaba_save_backups = (
+                promote_game_savedata(target, backed_up_paths) if self.kaaba_enabled.get() else ()
             )
             slave_library_backups: tuple[Path, ...] = ()
             slave_dialogue_backups: tuple[Path, ...] = ()
@@ -6559,7 +6559,7 @@ class CDSExecutablePatcher(tk.Tk):
         except Exception as exc:
             self._show_centered_popup("패치 실패", str(exc), kind="error")
             return
-        if (backup is None and not kaaba_backups and kaaba_save_backup is None
+        if (backup is None and not kaaba_backups and not kaaba_save_backups
                 and not slave_library_backups and not slave_dialogue_backups and not mughal_backups
                 and not sea_monster_backups and not geographic_discovery_still_backups
                 and not discover_avi_event_backups
@@ -6567,7 +6567,7 @@ class CDSExecutablePatcher(tk.Tk):
             self._show_centered_popup("완료", "선택한 설정이 이미 적용되어 있습니다.")
         else:
             backups = [
-                backup, *kaaba_backups, kaaba_save_backup,
+                backup, *kaaba_backups, *kaaba_save_backups,
                 *slave_library_backups, *slave_dialogue_backups, *mughal_backups,
                 *sea_monster_backups, *geographic_discovery_still_backups,
                 *discover_avi_event_backups,

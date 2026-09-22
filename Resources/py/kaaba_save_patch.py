@@ -1,9 +1,11 @@
-"""Minimal, backup-first Kaaba Temple state repair for CDS III SAVEDATA.CDS.
+"""Minimal, backup-first Kaaba Temple state repair for CDS III save slots.
 
 The Kaaba event can be injected into game data after a save already exists.
-The built-in SAVEDATA.CDS template can retain the old ``unspawned`` marker,
-so the discovery cannot be found.  This module changes only that marker to
-``undiscovered``.  It never downgrades it when the game-data patch is removed.
+The built-in ``SAVEDATA.CDS`` template can retain the old ``unspawned``
+marker, so the discovery cannot be found.  A slot-enabled installation may
+instead contain only ``SAVEDATA01.CDS`` through ``SAVEDATA10.CDS``.  This
+module updates every existing supported save and never downgrades one when
+the game-data patch is removed.
 """
 
 from __future__ import annotations
@@ -26,10 +28,28 @@ DISCOVERY_DATE_OFFSET = 0x28
 REPORT_DATE_OFFSET = 0x86
 DATE_FIELD_SIZE = 8
 MINIMUM_SAVE_SIZE = KAABA_SAVE_OFFSET + 164
+SAVE_SLOT_COUNT = 10
 
 
 class KaabaSavePatchError(ValueError):
-    """The game-folder SAVEDATA.CDS cannot safely be repaired."""
+    """The game-folder save data cannot safely be repaired."""
+
+
+def game_savedata_paths(exe_path: Path) -> tuple[Path, ...]:
+    """Return the base save and every existing ten-slot save, in order."""
+    exe_path = exe_path.resolve(strict=True)
+    candidates = [exe_path.with_name("SAVEDATA.CDS")]
+    candidates.extend(
+        exe_path.with_name(f"SAVEDATA{index:02d}.CDS")
+        for index in range(1, SAVE_SLOT_COUNT + 1)
+    )
+    paths = tuple(path for path in candidates if path.is_file())
+    if not paths:
+        raise KaabaSavePatchError(
+            "선택한 EXE와 같은 폴더에 SAVEDATA.CDS 또는 "
+            "SAVEDATA01.CDS~SAVEDATA10.CDS가 필요합니다."
+        )
+    return paths
 
 
 def _validate_save(data: bytes, path: Path) -> None:
@@ -113,9 +133,10 @@ def promote_unspawned_to_undiscovered(
 
 def promote_game_savedata(
     exe_path: Path, backed_up_paths: set[Path] | None = None,
-) -> Path | None:
-    """Promote the game folder's SAVEDATA.CDS if its Kaaba entry is unspawned."""
-    savedata = exe_path.resolve(strict=True).with_name("SAVEDATA.CDS")
-    if not savedata.is_file():
-        raise KaabaSavePatchError("선택한 EXE와 같은 폴더에 SAVEDATA.CDS가 필요합니다.")
-    return promote_unspawned_to_undiscovered(savedata, backed_up_paths)
+) -> tuple[Path, ...]:
+    """Promote the Kaaba entry in every existing supported game save."""
+    return tuple(
+        backup
+        for path in game_savedata_paths(exe_path)
+        if (backup := promote_unspawned_to_undiscovered(path, backed_up_paths)) is not None
+    )

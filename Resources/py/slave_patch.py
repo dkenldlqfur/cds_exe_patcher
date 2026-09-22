@@ -1,9 +1,10 @@
 """Reversible Slave discovery patches for CDS III game data.
 
-The library hint is blocked by two EXE conditions and existing SAVEDATA.CDS
-templates need two companion fields adjusted.  The missing dialogue belongs to
-DISEV.CDS part 229.  Each option is independent and restores only bytes that
-match the patcher's own, verified values.
+The library hint is blocked by two EXE conditions and existing save templates
+need two companion fields adjusted.  Both the legacy ``SAVEDATA.CDS`` and the
+ten-slot ``SAVEDATA01.CDS``~``SAVEDATA10.CDS`` layout are supported.  The
+missing dialogue belongs to DISEV.CDS part 229.  Each option is independent
+and restores only bytes that match the patcher's own, verified values.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ import tempfile
 
 from app_update import bundled_resource_path
 from kaaba_patch import _parse_ls12, _rebuild_ls12
-from kaaba_save_patch import marker_from_record_dates
+from kaaba_save_patch import game_savedata_paths, marker_from_record_dates
 
 
 LIBRARY_BRANCH_OFFSET = 0x2C0A9
@@ -130,17 +131,15 @@ def _back_up_and_replace(
 def apply_library_hint(
     exe_path: Path, enabled: bool, backed_up_paths: set[Path] | None = None,
 ) -> tuple[Path, ...]:
-    """Toggle library-hint access and its SAVEDATA.CDS companion fields."""
+    """Toggle library-hint access and companion fields in every game save."""
     exe_path = exe_path.resolve(strict=True)
-    savedata_path = exe_path.with_name("SAVEDATA.CDS")
-    if not savedata_path.is_file():
-        raise SlavePatchError("선택한 EXE와 같은 폴더에 SAVEDATA.CDS가 필요합니다.")
-    exe, savedata = exe_path.read_bytes(), savedata_path.read_bytes()
-    if len(savedata) <= SLAVE_DISCOVERY_SAVE_OFFSET + 142:
-        raise SlavePatchError("SAVEDATA.CDS가 노예 발견물 상태를 포함하지 않습니다.")
+    try:
+        savedata_paths = game_savedata_paths(exe_path)
+    except ValueError as exc:
+        raise SlavePatchError(str(exc)) from exc
+    exe = exe_path.read_bytes()
     was_enabled = _library_state(exe)
     updated_exe = bytearray(exe)
-    updated_savedata = bytearray(savedata)
     if was_enabled != enabled:
         updated_exe[LIBRARY_BRANCH_OFFSET:LIBRARY_BRANCH_OFFSET + 1] = (
             LIBRARY_BRANCH_PATCHED if enabled else LIBRARY_BRANCH_ORIGINAL
@@ -148,31 +147,36 @@ def apply_library_hint(
         updated_exe[LIBRARY_VALUE_OFFSET:LIBRARY_VALUE_OFFSET + 4] = (
             LIBRARY_VALUE_PATCHED if enabled else LIBRARY_VALUE_ORIGINAL
         )
-
-    library_value = bytes(savedata[SAVEDATA_LIBRARY_OFFSET:SAVEDATA_LIBRARY_OFFSET + 2])
-    if library_value not in (SAVEDATA_LIBRARY_ORIGINAL, SAVEDATA_LIBRARY_PATCHED):
-        raise SlavePatchError("SAVEDATA.CDS의 노예 도서관 힌트 상태가 예상과 다릅니다.")
-    updated_savedata[SAVEDATA_LIBRARY_OFFSET:SAVEDATA_LIBRARY_OFFSET + 2] = (
-        SAVEDATA_LIBRARY_PATCHED if enabled else SAVEDATA_LIBRARY_ORIGINAL
-    )
-
-    hint_state = savedata[SAVEDATA_SLAVE_HINT_OFFSET]
-    if hint_state == UNSPAWNED_STATE and enabled:
-        updated_savedata[SAVEDATA_SLAVE_HINT_OFFSET] = UNDISCOVERED_STATE
-    elif hint_state == UNDISCOVERED_STATE and not enabled:
-        updated_savedata[SAVEDATA_SLAVE_HINT_OFFSET] = UNSPAWNED_STATE
-
-    discovery_state = savedata[SLAVE_DISCOVERY_MARKER_OFFSET]
-    if discovery_state == UNSPAWNED_STATE and enabled:
-        updated_savedata[SLAVE_DISCOVERY_MARKER_OFFSET] = marker_from_record_dates(
-            savedata, SLAVE_DISCOVERY_SAVE_OFFSET
+    changes: dict[Path, bytes] = {exe_path: bytes(updated_exe)}
+    for savedata_path in savedata_paths:
+        savedata = savedata_path.read_bytes()
+        if len(savedata) <= SLAVE_DISCOVERY_SAVE_OFFSET + 142:
+            raise SlavePatchError(f"{savedata_path.name}가 노예 발견물 상태를 포함하지 않습니다.")
+        updated_savedata = bytearray(savedata)
+        library_value = bytes(savedata[SAVEDATA_LIBRARY_OFFSET:SAVEDATA_LIBRARY_OFFSET + 2])
+        if library_value not in (SAVEDATA_LIBRARY_ORIGINAL, SAVEDATA_LIBRARY_PATCHED):
+            raise SlavePatchError(
+                f"{savedata_path.name}의 노예 도서관 힌트 상태가 예상과 다릅니다."
+            )
+        updated_savedata[SAVEDATA_LIBRARY_OFFSET:SAVEDATA_LIBRARY_OFFSET + 2] = (
+            SAVEDATA_LIBRARY_PATCHED if enabled else SAVEDATA_LIBRARY_ORIGINAL
         )
-    elif discovery_state == UNDISCOVERED_STATE and not enabled:
-        updated_savedata[SLAVE_DISCOVERY_MARKER_OFFSET] = UNSPAWNED_STATE
 
-    return _back_up_and_replace(
-        {exe_path: bytes(updated_exe), savedata_path: bytes(updated_savedata)}, "slave_library", backed_up_paths
-    )
+        hint_state = savedata[SAVEDATA_SLAVE_HINT_OFFSET]
+        if hint_state == UNSPAWNED_STATE and enabled:
+            updated_savedata[SAVEDATA_SLAVE_HINT_OFFSET] = UNDISCOVERED_STATE
+        elif hint_state == UNDISCOVERED_STATE and not enabled:
+            updated_savedata[SAVEDATA_SLAVE_HINT_OFFSET] = UNSPAWNED_STATE
+
+        discovery_state = savedata[SLAVE_DISCOVERY_MARKER_OFFSET]
+        if discovery_state == UNSPAWNED_STATE and enabled:
+            updated_savedata[SLAVE_DISCOVERY_MARKER_OFFSET] = marker_from_record_dates(
+                savedata, SLAVE_DISCOVERY_SAVE_OFFSET
+            )
+        elif discovery_state == UNDISCOVERED_STATE and not enabled:
+            updated_savedata[SLAVE_DISCOVERY_MARKER_OFFSET] = UNSPAWNED_STATE
+        changes[savedata_path] = bytes(updated_savedata)
+    return _back_up_and_replace(changes, "slave_library", backed_up_paths)
 
 
 def apply_dialogue(

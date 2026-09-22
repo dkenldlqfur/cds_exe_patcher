@@ -188,9 +188,20 @@ SAVE_SLOT_SELECTOR_DEFAULT_TMP_NAME_VA = 0x537644
 # Version 3 used direct read-only Win32 calls, but incorrectly created one TMP
 # file per slot.  The game has one shared temporary file, SAVEDATA.TMP.
 SAVE_SLOT_SELECTOR_LEGACY_MAGIC = b"SAVESLT2"
-SAVE_SLOT_SELECTOR_PREVIOUS_MAGIC = b"SAVESLT3"
-SAVE_SLOT_SELECTOR_MAGIC = b"SAVESLT4"
-SAVE_SLOT_SELECTOR_VERSION = 4
+SAVE_SLOT_SELECTOR_OLDER_MAGIC = b"SAVESLT3"
+SAVE_SLOT_SELECTOR_PREVIOUS_MAGIC = b"SAVESLT4"
+# v5 added the selector title but still showed the date alone.  v6 reads the
+# saved current-city field too, so old v5 payloads must be rebuilt.
+SAVE_SLOT_SELECTOR_TITLE_LEGACY_MAGIC = b"SAVESLT5"
+# v7 fixes the save selector's ReadFile destination.  v6 read into the saved
+# register area above its local buffer, which could corrupt the return state
+# after selecting an empty destination.  It also labels empty rows explicitly.
+SAVE_SLOT_SELECTOR_HEADER_BUFFER_LEGACY_MAGIC = b"SAVESLT6"
+# v8 checks the actual ReadFile byte-count slot.  v7 still compared an
+# unrelated buffer offset, so every existing save retained the empty label.
+SAVE_SLOT_SELECTOR_HEADER_COUNT_LEGACY_MAGIC = b"SAVESLT7"
+SAVE_SLOT_SELECTOR_MAGIC = b"SAVESLT8"
+SAVE_SLOT_SELECTOR_VERSION = 8
 SAVE_SLOT_SELECTOR_WRAPPER_OFFSET = 0x20
 # Keep all data after the wrapper.  The direct read-only file calls make the
 # wrapper larger than the old 0x180 menu-table position.
@@ -201,6 +212,9 @@ SAVE_SLOT_SELECTOR_LABELS_OFFSET = 0x300
 SAVE_SLOT_SELECTOR_SAVE_NAMES_OFFSET = 0x500
 SAVE_SLOT_SELECTOR_TMP_NAMES_OFFSET = 0x640
 SAVE_SLOT_SELECTOR_DATE_FORMAT_OFFSET = 0x780
+SAVE_SLOT_SELECTOR_TITLE_OFFSET = 0x7A0
+SAVE_SLOT_SELECTOR_OUTSIDE_LABEL_OFFSET = 0x7D0
+SAVE_SLOT_SELECTOR_LABEL_HELPER_OFFSET = 0x800
 SAVE_SLOT_SELECTOR_SAVE_COUNT = 10
 SAVE_SLOT_SELECTOR_MENU_COUNT = 11
 SAVE_SLOT_SELECTOR_LABEL_STRIDE = 0x20
@@ -227,6 +241,12 @@ LOAD_SLOT_SELECTOR_TITLE_CONTINUATION_VA = 0x45ED45
 LOAD_SLOT_SELECTOR_SESSION_FILE_HOOK_VA = 0x41ABE2
 LOAD_SLOT_SELECTOR_SESSION_FILE_HOOK_ORIGINAL = bytes.fromhex("68 54 76 53 00")
 LOAD_SLOT_SELECTOR_SESSION_FILE_CONTINUATION_VA = 0x41AC0E
+# The title menu constructs its enabled/disabled state before its load
+# callback.  It originally probes only SAVEDATA.CDS here, so a slot-only save
+# installation leaves the patched loader inaccessible.
+LOAD_SLOT_SELECTOR_TITLE_AVAILABILITY_HOOK_VA = 0x45F58C
+LOAD_SLOT_SELECTOR_TITLE_AVAILABILITY_HOOK_ORIGINAL = bytes.fromhex("68 54 76 53 00")
+LOAD_SLOT_SELECTOR_TITLE_AVAILABILITY_CONTINUATION_VA = 0x45F5BC
 LOAD_SLOT_SELECTOR_MENU_ROUTINE_VA = 0x469A70
 LOAD_SLOT_SELECTOR_PATH_ROUTINE_VA = 0x425220
 LOAD_SLOT_SELECTOR_LEGACY_MAGIC = b"LOADSLT1"
@@ -270,8 +290,60 @@ LOAD_SLOT_SELECTOR_DIALOG_STACK_LEGACY_MAGIC = b"LOADSL19"
 # title screen.  v21 selects first and preserves the original order: prepare
 # the load only after a slot was actually chosen.
 LOAD_SLOT_SELECTOR_COMMAND_PREPARATION_LEGACY_MAGIC = b"LOADSL20"
-LOAD_SLOT_SELECTOR_MAGIC = b"LOADSL21"
-LOAD_SLOT_SELECTOR_VERSION = 21
+LOAD_SLOT_SELECTOR_MENU_TITLE_LEGACY_MAGIC = b"LOADSL21"
+# v22 added selector titles.  v23 adds the saved city name to each label.
+LOAD_SLOT_SELECTOR_LOCATION_LEGACY_MAGIC = b"LOADSL22"
+# v24 additionally makes the title-screen Load command available when any
+# numbered slot exists, even if the obsolete SAVEDATA.CDS file does not.
+LOAD_SLOT_SELECTOR_TITLE_AVAILABILITY_LEGACY_MAGIC = b"LOADSL23"
+# v25 fixes v24's title availability loop: 45F58A has already pushed an
+# argument for the original one-shot check, so each replacement iteration must
+# discard it once and provide its own complete argument pair.
+LOAD_SLOT_SELECTOR_TITLE_AVAILABILITY_STACK_LEGACY_MAGIC = b"LOADSL24"
+# v26 also supplies the original title routine's EBP-local string object to
+# 425280 for every check.  v25 left ECX as the title object's stale value,
+# causing 425280 to write into unrelated state before the first screen.
+LOAD_SLOT_SELECTOR_TITLE_AVAILABILITY_CONTEXT_LEGACY_MAGIC = b"LOADSL25"
+# v27 removes the C++ title helper from the repeated probe entirely.  It uses
+# the same direct read-only CreateFileA path as the working slot menu, leaving
+# the title routine's local object and exception state untouched.
+LOAD_SLOT_SELECTOR_TITLE_AVAILABILITY_DIRECT_IO_LEGACY_MAGIC = b"LOADSL26"
+# v28 deliberately removes the title screen's file-existence gate.  The
+# native slot list already handles empty slots and cancellation, so Load stays
+# available even before any SAVEDATA*.CDS file exists.
+LOAD_SLOT_SELECTOR_TITLE_AVAILABILITY_ALWAYS_LEGACY_MAGIC = b"LOADSL27"
+# v29 keeps the title command always available, but makes the numbered load
+# rows themselves reflect whether each slot file contains a readable header.
+LOAD_SLOT_SELECTOR_EMPTY_ROWS_LEGACY_MAGIC = b"LOADSL28"
+# v30 writes the menu row's actual third-field input flag.  v29 changed the
+# second field, which controls whether a visual row is created at all.
+LOAD_SLOT_SELECTOR_EMPTY_ROWS_FLAG_LEGACY_MAGIC = b"LOADSL29"
+# v31 corrects the native menu bit direction: a non-zero third field sets the
+# control's disabled bit, while zero permits input.
+LOAD_SLOT_SELECTOR_EMPTY_ROWS_POLARITY_LEGACY_MAGIC = b"LOADSL30"
+# v32 fixes the load-label ReadFile buffer/count locations.  v31 read into a
+# stack area that the later date checks did not inspect, so every real slot
+# was treated as empty.
+LOAD_SLOT_SELECTOR_HEADER_BUFFER_LEGACY_MAGIC = b"LOADSL31"
+# v33 uses separate bare filenames for label/existence checks.  The selected
+# loader path retains its C: prefix for the game's path helper, but CreateFile
+# must receive the real relative SAVEDATA##.CDS filename.
+LOAD_SLOT_SELECTOR_EXISTENCE_NAMES_LEGACY_MAGIC = b"LOADSL32"
+# v34 removes a leftover pathname push from the direct CreateFileA existence
+# check.  It previously accumulated once per scanned slot and made every
+# valid save appear empty after the stack-local header buffer was displaced.
+LOAD_SLOT_SELECTOR_EXISTENCE_STACK_LEGACY_MAGIC = b"LOADSL33"
+# v35 restores the game's executable-directory path resolver for the file
+# check.  A bare relative filename was resolved against the launcher's working
+# directory, so valid saves beside CDS_95.EXE were all reported as empty.
+LOAD_SLOT_SELECTOR_EXISTENCE_PATH_LEGACY_MAGIC = b"LOADSL34"
+# v36 corrects the native menu input flag direction.  Zero disables a row;
+# a verified save must set that row's third menu field to one.
+LOAD_SLOT_SELECTOR_EMPTY_ROWS_DIRECTION_LEGACY_MAGIC = b"LOADSL35"
+# v37 displays a fixed empty-slot label instead of a blank disabled row.
+LOAD_SLOT_SELECTOR_EMPTY_SLOT_LABEL_LEGACY_MAGIC = b"LOADSL36"
+LOAD_SLOT_SELECTOR_MAGIC = b"LOADSL37"
+LOAD_SLOT_SELECTOR_VERSION = 37
 LOAD_SLOT_SELECTOR_WRAPPER_OFFSET = 0x20
 LOAD_SLOT_SELECTOR_MENU_ITEMS_OFFSET = 0x1C0
 LOAD_SLOT_SELECTOR_SAVE_NAME_POINTERS_OFFSET = 0x250
@@ -280,13 +352,20 @@ LOAD_SLOT_SELECTOR_LABELS_OFFSET = 0x300
 LOAD_SLOT_SELECTOR_SAVE_NAMES_OFFSET = 0x500
 LOAD_SLOT_SELECTOR_TMP_NAMES_OFFSET = 0x640
 LOAD_SLOT_SELECTOR_DATE_FORMAT_OFFSET = 0x780
+LOAD_SLOT_SELECTOR_TITLE_OFFSET = 0x7A0
 LOAD_SLOT_SELECTOR_SELECTED_INDEX_OFFSET = 0x7C0
+LOAD_SLOT_SELECTOR_OUTSIDE_LABEL_OFFSET = 0x7D0
 LOAD_SLOT_SELECTOR_COMMAND_WRAPPER_OFFSET = 0x800
 LOAD_SLOT_SELECTOR_CONFIRM_WRAPPER_OFFSET = 0x840
 LOAD_SLOT_SELECTOR_TITLE_WRAPPER_OFFSET = 0x880
 LOAD_SLOT_SELECTOR_POST_SELECTION_WRAPPER_OFFSET = 0x8C0
 LOAD_SLOT_SELECTOR_SESSION_FILE_WRAPPER_OFFSET = 0x900
 LOAD_SLOT_SELECTOR_CONFIRM_TRAMPOLINE_OFFSET = 0x940
+LOAD_SLOT_SELECTOR_LABEL_HELPER_OFFSET = 0x980
+LOAD_SLOT_SELECTOR_TITLE_AVAILABILITY_WRAPPER_OFFSET = 0xA00
+LOAD_SLOT_SELECTOR_VALID_SLOT_ENABLE_WRAPPER_OFFSET = 0xA20
+LOAD_SLOT_SELECTOR_EXISTENCE_NAME_POINTERS_OFFSET = 0xA60
+LOAD_SLOT_SELECTOR_EXISTENCE_NAMES_OFFSET = 0xA90
 LOAD_SLOT_SELECTOR_CONFIRM_PROMPT_VA = 0x568CF8
 LOAD_SLOT_SELECTOR_SAVE_COUNT = 10
 LOAD_SLOT_SELECTOR_MENU_COUNT = 11
@@ -2480,6 +2559,94 @@ def _save_slot_selector_hook(wrapper_va: int) -> bytes:
     )
 
 
+def _build_slot_selector_label_helper(
+    helper_va: int,
+    date_format_va: int,
+    outside_label_va: int,
+) -> bytes:
+    """Format one selector row as ``YYYY.MM.DD · place``.
+
+    The selector passes its read-buffer marker plus the validated date fields.
+    ``SAVEDATA.CDS + 0x5B`` is the current city ID; valid IDs index the EXE's
+    static city table, whose first field is the CP949 city-name pointer.
+    ``0xFFFF`` is the documented city-outside marker and is displayed as
+    ``해상``.  The game only exposes the save selector in general game state,
+    so it does not serialize a separate exploration/battle label here.
+    """
+    helper = bytearray(bytes.fromhex(
+        "60 "                    # preserve the selector loop registers
+        "8B 7C 24 24 "          # EDI = label destination
+        "8B 44 24 28 "          # EAX = marker (buffer address - 12)
+        "0F B7 40 67 "          # city ID at buffer + 0x5B
+        "3D E1 00 00 00 "       # valid city IDs are 0..225
+        "77 0F "                # otherwise use the outside-state label
+        "69 C0 88 00 00 00 "    # ID * static city record size
+        "05 B0 14 4D 00 "       # CITY_TABLE_VA
+        "8B 00 "                # city name pointer
+        "EB 05 "
+        "B8 11 11 11 11 "       # outside-state label pointer
+        "8B 5C 24 2C "          # saved year
+        "8B 4C 24 30 "          # saved month
+        "8B 54 24 34 "          # saved day
+        "50 52 51 53 "          # place, day, month, year
+        "68 22 22 22 22 57 "    # format, destination
+        "FF 15 94 F5 62 00 "    # wsprintfA
+        "83 C4 18 "
+        "61 C3"
+    ))
+    struct.pack_into("<I", helper, 36, outside_label_va)
+    struct.pack_into("<I", helper, 57, date_format_va)
+    return bytes(helper)
+
+
+def _build_load_slot_selector_label_helper(
+    helper_va: int,
+    date_format_va: int,
+    outside_label_va: int,
+    menu_items_va: int,
+) -> bytes:
+    """Format a verified load row and make only that row selectable.
+
+    ``0x486C85`` treats a zero third menu field as disabled.  This helper is
+    reached only after a readable, date-valid save header, so it can set the
+    current row's flag without affecting missing or corrupt slots.
+    """
+    helper = bytearray(_build_slot_selector_label_helper(
+        helper_va, date_format_va, outside_label_va,
+    ))
+    enable_current_row = bytes.fromhex("8D 04 76 C7 04 85") + struct.pack(
+        "<I", menu_items_va + 8,
+    ) + struct.pack("<I", 1)
+    # Keep the original pushad/popal envelope: the inserted code can use EAX
+    # and ESI but all caller registers are restored before returning.
+    helper[1:1] = enable_current_row
+    return bytes(helper)
+
+
+def _install_slot_selector_label_formatter(
+    wrapper: bytearray,
+    wrapper_va: int,
+    helper_va: int,
+) -> None:
+    """Replace the fixed date formatter without changing wrapper layout."""
+    wsprintf_call = bytes.fromhex("FF 15 94 F5 62 00")
+    call_offset = wrapper.index(wsprintf_call)
+    format_push = b"\x68\x33\x33\x33\x33\x57" + wsprintf_call
+    format_offset = wrapper.rfind(format_push, 0, call_offset + len(wsprintf_call))
+    if format_offset < 0:
+        raise AssertionError("저장 슬롯 날짜 포맷 호출을 찾지 못했습니다.")
+    # The helper needs a marker that identifies the original read buffer.  At
+    # this point ESP is exactly 12 bytes below that buffer, and all five call
+    # arguments retain the original wrapper's stack footprint.
+    wrapper[format_offset:format_offset + 5] = b"\x54\x90\x90\x90\x90"
+    struct.pack_into(
+        "<i", wrapper, call_offset + 1,
+        helper_va - (wrapper_va + call_offset + 5),
+    )
+    wrapper[call_offset] = 0xE8
+    wrapper[call_offset + 5] = 0x90
+
+
 def _build_save_slot_selector_payload(slot_va: int) -> bytes:
     """Build the save-only ten-slot selector and its mutable date labels."""
     wrapper_va = slot_va + SAVE_SLOT_SELECTOR_WRAPPER_OFFSET
@@ -2488,22 +2655,22 @@ def _build_save_slot_selector_payload(slot_va: int) -> bytes:
     # The game's writer helper must not be called here because it can truncate
     # an existing save before returning a handle.
     wrapper = bytearray(bytes.fromhex(
-        "60 83 EC 20 "              # pushad; reserve 32-byte read buffer
+        "60 83 EC 68 "              # buffer + separate ReadFile byte-count slot
         "31 F6 "                    # xor esi, esi (slot index)
         "89 F7 C1 E7 05 "           # mov edi, esi; shl edi, 5
         "81 C7 11 11 11 11 "        # add edi, labels
-        "C6 07 00 "                 # empty label by default
+        "90 90 90 "                 # static empty-slot label stays intact
         "8B 04 B5 22 22 22 22 "     # mov eax, [save-name pointers + esi*4]
         "50 E8 00 00 00 00 83 C4 04 "  # full path helper
         "6A 00 68 80 00 00 00 6A 03 6A 00 6A 03 "
         "68 00 00 00 80 50 FF 15 44 F4 62 00 "  # CreateFileA read-only
         "83 F8 FF 74 6F "           # missing / inaccessible -> next slot
         "89 C3 8D 0C 24 "           # handle; local buffer starts at ESP
-        "6A 00 8D 44 24 20 50 6A 1B 51 53 "
-        "FF 15 74 F4 62 00 "        # ReadFile(handle, buffer, 0x1b, &count, 0)
-        "85 C0 0F 84 19 01 00 00 "  # failed read -> close, then next slot
+        "6A 00 8D 44 24 04 50 6A 5D 51 53 "
+        "FF 15 74 F4 62 00 "        # ReadFile(handle, buffer, 0x5d, &count, 0)
+        "85 C0 0F 84 20 01 00 00 "  # failed read -> close, then next slot
         "53 FF 15 24 F4 62 00 "     # CloseHandle
-        "83 7C 24 1C 1B 75 43 "     # require full 0x1b-byte header
+        "83 3C 24 5D 90 75 43 "     # require header through current city ID
         "0F B7 44 24 15 "           # year at SAVEDATA + 0x15
         "3D 78 05 00 00 72 37 "     # 1400 <= year
         "3D 6C 07 00 00 77 30 "     # year <= 1900
@@ -2513,10 +2680,10 @@ def _build_save_slot_selector_payload(slot_va: int) -> bytes:
         "68 33 33 33 33 57 "        # format, label
         "FF 15 94 F5 62 00 83 C4 14 "  # wsprintfA(label, format, ...)
         "46 83 FE 0A 0F 8C 4B FF FF FF "  # next slot
-        "6A 00 6A 00 6A 01 6A 0B "
+        "6A 00 68 33 33 33 33 6A 01 6A 0B "
         "68 44 44 44 44 "           # ten saves plus an explicit cancel row
         "E8 00 00 00 00 83 C4 14 "
-        "83 F8 0A 0F 83 83 00 00 00 "  # explicit cancel row / invalid selection
+        "83 F8 0A 0F 83 87 00 00 00 "  # explicit cancel row / invalid selection
         "8B 14 85 22 22 22 22 "     # save filename by selection
         "89 15 78 87 56 00 "
         "8B 14 85 55 55 55 55 "     # temp filename by selection
@@ -2529,40 +2696,45 @@ def _build_save_slot_selector_payload(slot_va: int) -> bytes:
         "50 FF 15 24 F4 62 00 "     # CloseHandle
         "68 B8 8C 56 00 6A 02 "     # existing game overwrite confirmation
         "E8 00 00 00 00 83 C4 08 "
-        "83 F8 02 75 81 "           # no -> show slot list again
-        "83 C4 20 61 "
+        "83 F8 02 0F 85 7A FF FF FF "  # no -> show slot list again
+        "83 C4 68 61 "
         "E8 00 00 00 00 "           # original save serializer
         "C7 05 78 87 56 00 54 76 53 00 "  # restore default save path
         "C7 05 7C 87 56 00 44 76 53 00 "  # restore default temporary path
         "E9 00 00 00 00 "           # original success message
         "C7 05 78 87 56 00 54 76 53 00 "  # cancel also leaves load path unchanged
         "C7 05 7C 87 56 00 44 76 53 00 "
-        "83 C4 20 61 "
+        "83 C4 68 61 "
         "E9 00 00 00 00"            # original cancel return
         "53 FF 15 24 F4 62 00 "     # failed ReadFile: close handle
-        "E9 2C FF FF FF"            # then continue with next slot
+        "E9 25 FF FF FF"            # then continue with next slot
     ))
     # These offsets are instruction-relative and intentionally kept explicit
     # so the generated payload can be regression-tested without an assembler.
     for offset, target in (
         (0x1C, SAVE_SLOT_SELECTOR_PATH_ROUTINE_VA),
-        (0xC8, SAVE_SLOT_SELECTOR_MENU_ROUTINE_VA),
-        (0xF9, SAVE_SLOT_SELECTOR_PATH_ROUTINE_VA),
-        (0x12D, SAVE_SLOT_SELECTOR_CONFIRM_ROUTINE_VA),
-        (0x13E, SAVE_SLOT_SELECTOR_SAVE_ROUTINE_VA),
-        (0x157, SAVE_SLOT_SELECTOR_SUCCESS_VA),
-        (0x174, SAVE_SLOT_SELECTOR_CANCEL_VA),
+        (0xCB, SAVE_SLOT_SELECTOR_MENU_ROUTINE_VA),
+        (0xFC, SAVE_SLOT_SELECTOR_PATH_ROUTINE_VA),
+        (0x130, SAVE_SLOT_SELECTOR_CONFIRM_ROUTINE_VA),
+        (0x145, SAVE_SLOT_SELECTOR_SAVE_ROUTINE_VA),
+        (0x15E, SAVE_SLOT_SELECTOR_SUCCESS_VA),
+        (0x17B, SAVE_SLOT_SELECTOR_CANCEL_VA),
     ):
         struct.pack_into("<i", wrapper, offset + 1, target - (wrapper_va + offset + 5))
     for offset, value in (
         (0x0D, slot_va + SAVE_SLOT_SELECTOR_LABELS_OFFSET),
         (0x17, slot_va + SAVE_SLOT_SELECTOR_SAVE_NAME_POINTERS_OFFSET),
-        (0xA3, slot_va + SAVE_SLOT_SELECTOR_DATE_FORMAT_OFFSET),
-        (0xC4, slot_va + SAVE_SLOT_SELECTOR_MENU_ITEMS_OFFSET),
-        (0xDC, slot_va + SAVE_SLOT_SELECTOR_SAVE_NAME_POINTERS_OFFSET),
-        (0xE9, slot_va + SAVE_SLOT_SELECTOR_TMP_NAME_POINTERS_OFFSET),
+        (0xBE, slot_va + SAVE_SLOT_SELECTOR_TITLE_OFFSET),
+        (0xC7, slot_va + SAVE_SLOT_SELECTOR_MENU_ITEMS_OFFSET),
+        (0xDF, slot_va + SAVE_SLOT_SELECTOR_SAVE_NAME_POINTERS_OFFSET),
+        (0xEC, slot_va + SAVE_SLOT_SELECTOR_TMP_NAME_POINTERS_OFFSET),
     ):
         struct.pack_into("<I", wrapper, offset, value)
+    _install_slot_selector_label_formatter(
+        wrapper,
+        wrapper_va,
+        slot_va + SAVE_SLOT_SELECTOR_LABEL_HELPER_OFFSET,
+    )
     if SAVE_SLOT_SELECTOR_WRAPPER_OFFSET + len(wrapper) > SAVE_SLOT_SELECTOR_SLOT_SIZE:
         raise AssertionError("저장 슬롯 선택 래퍼가 예약 공간을 초과했습니다.")
 
@@ -2573,6 +2745,15 @@ def _build_save_slot_selector_payload(slot_va: int) -> bytes:
         SAVE_SLOT_SELECTOR_WRAPPER_OFFSET:
         SAVE_SLOT_SELECTOR_WRAPPER_OFFSET + len(wrapper)
     ] = wrapper
+    empty_slot_label = ("빈 슬롯".encode("cp949") + b"\0").ljust(
+        SAVE_SLOT_SELECTOR_LABEL_STRIDE, b"\0",
+    )
+    for index in range(SAVE_SLOT_SELECTOR_SAVE_COUNT):
+        label_offset = (
+            SAVE_SLOT_SELECTOR_LABELS_OFFSET
+            + index * SAVE_SLOT_SELECTOR_LABEL_STRIDE
+        )
+        payload[label_offset:label_offset + SAVE_SLOT_SELECTOR_LABEL_STRIDE] = empty_slot_label
     for index in range(SAVE_SLOT_SELECTOR_MENU_COUNT):
         label_va = (
             slot_va + SAVE_SLOT_SELECTOR_LABELS_OFFSET
@@ -2609,11 +2790,30 @@ def _build_save_slot_selector_payload(slot_va: int) -> bytes:
     payload[cancel_label_offset:cancel_label_offset + SAVE_SLOT_SELECTOR_LABEL_STRIDE] = (
         "취소".encode("cp949") + b"\0"
     ).ljust(SAVE_SLOT_SELECTOR_LABEL_STRIDE, b"\0")
-    date_format = "%d년 %d월 %d일".encode("cp949") + b"\0"
+    date_format = "%04d.%02d.%02d · %s".encode("cp949") + b"\0"
     payload[
         SAVE_SLOT_SELECTOR_DATE_FORMAT_OFFSET:
         SAVE_SLOT_SELECTOR_DATE_FORMAT_OFFSET + len(date_format)
     ] = date_format
+    title = "저장할 데이터를 선택하세요".encode("cp949") + b"\0"
+    payload[
+        SAVE_SLOT_SELECTOR_TITLE_OFFSET:
+        SAVE_SLOT_SELECTOR_TITLE_OFFSET + len(title)
+    ] = title
+    outside_label = "해상".encode("cp949") + b"\0"
+    payload[
+        SAVE_SLOT_SELECTOR_OUTSIDE_LABEL_OFFSET:
+        SAVE_SLOT_SELECTOR_OUTSIDE_LABEL_OFFSET + len(outside_label)
+    ] = outside_label
+    label_helper = _build_slot_selector_label_helper(
+        slot_va + SAVE_SLOT_SELECTOR_LABEL_HELPER_OFFSET,
+        slot_va + SAVE_SLOT_SELECTOR_DATE_FORMAT_OFFSET,
+        slot_va + SAVE_SLOT_SELECTOR_OUTSIDE_LABEL_OFFSET,
+    )
+    payload[
+        SAVE_SLOT_SELECTOR_LABEL_HELPER_OFFSET:
+        SAVE_SLOT_SELECTOR_LABEL_HELPER_OFFSET + len(label_helper)
+    ] = label_helper
     return bytes(payload)
 
 
@@ -2646,7 +2846,11 @@ def _is_legacy_save_slot_selector_patch(
     ])
     if magic not in (
         SAVE_SLOT_SELECTOR_LEGACY_MAGIC,
+        SAVE_SLOT_SELECTOR_OLDER_MAGIC,
         SAVE_SLOT_SELECTOR_PREVIOUS_MAGIC,
+        SAVE_SLOT_SELECTOR_TITLE_LEGACY_MAGIC,
+        SAVE_SLOT_SELECTOR_HEADER_BUFFER_LEGACY_MAGIC,
+        SAVE_SLOT_SELECTOR_HEADER_COUNT_LEGACY_MAGIC,
     ):
         return False
     if hook_offset is None:
@@ -2784,6 +2988,13 @@ def _load_slot_selector_session_file_hook(wrapper_va: int) -> bytes:
     )
 
 
+def _load_slot_selector_title_availability_hook(wrapper_va: int) -> bytes:
+    """Return the title Load availability redirection."""
+    return b"\xE9" + struct.pack(
+        "<i", wrapper_va - (LOAD_SLOT_SELECTOR_TITLE_AVAILABILITY_HOOK_VA + 5),
+    )
+
+
 def _load_slot_selector_hook_offset(data: bytes | bytearray) -> int:
     pe = pefile.PE(data=bytes(data), fast_load=True)
     try:
@@ -2822,6 +3033,62 @@ def _load_slot_selector_session_file_hook_offset(data: bytes | bytearray) -> int
         )
     finally:
         pe.close()
+
+
+def _load_slot_selector_title_availability_hook_offset(data: bytes | bytearray) -> int:
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        return pe.get_offset_from_rva(
+            LOAD_SLOT_SELECTOR_TITLE_AVAILABILITY_HOOK_VA - pe.OPTIONAL_HEADER.ImageBase,
+        )
+    finally:
+        pe.close()
+
+
+def _build_load_slot_selector_title_availability_wrapper(slot_va: int) -> bytes:
+    """Always enable the title-screen Load command.
+
+    The slot selector itself presents empty slots safely and owns cancellation.
+    There is no need for the title UI to inspect SAVEDATA.CDS or any numbered
+    slot before displaying its Load command.
+    """
+    wrapper_va = slot_va + LOAD_SLOT_SELECTOR_TITLE_AVAILABILITY_WRAPPER_OFFSET
+    wrapper = bytearray(bytes.fromhex(
+        "83 C4 04 "                   # discard 45F58A's original push 4
+        "C7 05 84 27 55 00 01 00 00 00 "  # title Load enabled
+        "E9 00 00 00 00"              # resume original continuation
+    ))
+    struct.pack_into(
+        "<i", wrapper, 14,
+        LOAD_SLOT_SELECTOR_TITLE_AVAILABILITY_CONTINUATION_VA - (wrapper_va + 18),
+    )
+    return bytes(wrapper)
+
+
+def _build_load_slot_selector_valid_slot_enable_wrapper(slot_va: int) -> bytes:
+    """Enable exactly the current numbered row after its header is verified."""
+    helper_va = slot_va + LOAD_SLOT_SELECTOR_VALID_SLOT_ENABLE_WRAPPER_OFFSET
+    wrapper_va = slot_va + LOAD_SLOT_SELECTOR_WRAPPER_OFFSET
+    helper = bytearray(bytes.fromhex(
+        "8D 04 76 "                    # eax = esi * 3 (12-byte menu rows)
+        "C7 04 85 11 11 11 11 00 00 00 00 "  # row.input_disabled = 0
+        "46 83 FE 0A "                 # original: next slot
+        "0F 8C 00 00 00 00 "           # next iteration
+        "E9 00 00 00 00"               # enter native menu once all rows read
+    ))
+    struct.pack_into(
+        "<I", helper, 6,
+        slot_va + LOAD_SLOT_SELECTOR_MENU_ITEMS_OFFSET + 8,
+    )
+    struct.pack_into(
+        "<i", helper, 20,
+        (wrapper_va + 0x06) - (helper_va + 24),
+    )
+    struct.pack_into(
+        "<i", helper, 25,
+        (wrapper_va + 0xBB) - (helper_va + 29),
+    )
+    return bytes(helper)
 
 
 def _build_load_slot_selector_command_wrapper(slot_va: int) -> bytes:
@@ -2869,7 +3136,7 @@ def _build_load_slot_selector_confirmation_wrapper(slot_va: int) -> bytes:
     ))
     for offset, target in (
         (0x07, SAVE_SLOT_SELECTOR_CONFIRM_ROUTINE_VA),
-        (0x27, slot_va + LOAD_SLOT_SELECTOR_WRAPPER_OFFSET + 0xDE),
+        (0x27, slot_va + LOAD_SLOT_SELECTOR_WRAPPER_OFFSET + 0xE1),
         (0x2C, slot_va + LOAD_SLOT_SELECTOR_WRAPPER_OFFSET + 0xBB),
     ):
         struct.pack_into("<i", wrapper, offset + 1, target - (wrapper_va + offset + 5))
@@ -2957,7 +3224,7 @@ def _build_load_slot_selector_post_selection_wrapper(slot_va: int) -> bytes:
     ))
     struct.pack_into(
         "<i", wrapper, 0x0B,
-        (slot_va + LOAD_SLOT_SELECTOR_WRAPPER_OFFSET + 0x126) - (wrapper_va + 0x0F),
+        (slot_va + LOAD_SLOT_SELECTOR_WRAPPER_OFFSET + 0x129) - (wrapper_va + 0x0F),
     )
     return bytes(wrapper)
 
@@ -2966,67 +3233,72 @@ def _build_load_slot_selector_payload(slot_va: int) -> bytes:
     """Build the load selector with read-only date and existence checks."""
     wrapper_va = slot_va + LOAD_SLOT_SELECTOR_WRAPPER_OFFSET
     wrapper = bytearray(bytes.fromhex(
-        "60 83 EC 20 31 F6 "
-        "89 F7 C1 E7 05 81 C7 11 11 11 11 C6 07 00 "
+        "60 83 EC 68 31 F6 "
+        "89 F7 C1 E7 05 81 C7 11 11 11 11 90 90 90 "
         "8B 04 B5 22 22 22 22 50 E8 00 00 00 00 83 C4 04 "
         "6A 00 68 80 00 00 00 6A 03 6A 00 6A 03 "
         "68 00 00 00 80 50 FF 15 44 F4 62 00 "
         "83 F8 FF 74 6F 89 C3 8D 0C 24 "
-        "6A 00 8D 44 24 20 50 6A 1B 51 53 FF 15 74 F4 62 00 "
+        "6A 00 8D 44 24 04 50 6A 5D 51 53 FF 15 74 F4 62 00 "
         "85 C0 0F 84 DE 00 00 00 53 FF 15 24 F4 62 00 "
-        "83 7C 24 1C 1B 75 43 "
+        "83 3C 24 5D 90 75 43 "
         "0F B7 44 24 15 3D 78 05 00 00 72 37 3D 6C 07 00 00 77 30 "
         "0F B6 4C 24 19 83 F9 01 72 26 83 F9 0C 77 21 "
         "0F B6 54 24 1A 83 FA 01 72 17 83 FA 1F 77 12 "
         "52 51 50 68 33 33 33 33 57 FF 15 94 F5 62 00 83 C4 14 "
         "46 83 FE 0A 0F 8C 4B FF FF FF "
-        "6A 00 6A 00 6A 01 6A 0B 68 44 44 44 44 E8 00 00 00 00 83 C4 14 "
+        "6A 00 68 33 33 33 33 6A 01 6A 0B 68 44 44 44 44 E8 00 00 00 00 83 C4 14 "
         "83 F8 0A 73 60 89 C5 8B 14 AD 22 22 22 22 52 "
         "E8 00 00 00 00 83 C4 04 "
         "6A 00 68 80 00 00 00 6A 03 6A 00 6A 03 "
         "68 00 00 00 80 50 FF 15 44 F4 62 00 "
-        "83 F8 FF 74 B6 50 FF 15 24 F4 62 00 "
+        "83 F8 FF 74 B3 50 FF 15 24 F4 62 00 "
         "8B 14 AD 22 22 22 22 89 15 78 87 56 00 "
         "8B 14 AD 55 55 55 55 89 15 7C 87 56 00 "
-        "83 C4 20 61 81 EC 08 01 00 00 E9 00 00 00 00 "
-        "31 C0 83 C4 20 61 31 C0 C3 "
-        "53 FF 15 24 F4 62 00 E9 67 FF FF FF"
+        "83 C4 68 61 81 EC 08 01 00 00 E9 00 00 00 00 "
+        "31 C0 83 C4 68 61 31 C0 C3 "
+        "53 FF 15 24 F4 62 00 E9 64 FF FF FF"
     ))
     for offset, target in (
         (0x1C, LOAD_SLOT_SELECTOR_PATH_ROUTINE_VA),
-        (0xC8, LOAD_SLOT_SELECTOR_MENU_ROUTINE_VA),
-        (0xDF, LOAD_SLOT_SELECTOR_PATH_ROUTINE_VA),
+        (0xCB, LOAD_SLOT_SELECTOR_MENU_ROUTINE_VA),
+        (0xE2, LOAD_SLOT_SELECTOR_PATH_ROUTINE_VA),
     ):
         struct.pack_into("<i", wrapper, offset + 1, target - (wrapper_va + offset + 5))
     for offset, value in (
         (0x0D, slot_va + LOAD_SLOT_SELECTOR_LABELS_OFFSET),
         (0x17, slot_va + LOAD_SLOT_SELECTOR_SAVE_NAME_POINTERS_OFFSET),
-        (0xA3, slot_va + LOAD_SLOT_SELECTOR_DATE_FORMAT_OFFSET),
-        (0xC4, slot_va + LOAD_SLOT_SELECTOR_MENU_ITEMS_OFFSET),
-        (0xDA, slot_va + LOAD_SLOT_SELECTOR_SAVE_NAME_POINTERS_OFFSET),
-        (0x10F, slot_va + LOAD_SLOT_SELECTOR_SAVE_NAME_POINTERS_OFFSET),
-        (0x11C, slot_va + LOAD_SLOT_SELECTOR_TMP_NAME_POINTERS_OFFSET),
+        (0xBE, slot_va + LOAD_SLOT_SELECTOR_TITLE_OFFSET),
+        (0xC7, slot_va + LOAD_SLOT_SELECTOR_MENU_ITEMS_OFFSET),
+        (0xDD, slot_va + LOAD_SLOT_SELECTOR_SAVE_NAME_POINTERS_OFFSET),
+        (0x112, slot_va + LOAD_SLOT_SELECTOR_SAVE_NAME_POINTERS_OFFSET),
+        (0x11F, slot_va + LOAD_SLOT_SELECTOR_TMP_NAME_POINTERS_OFFSET),
     ):
         struct.pack_into("<I", wrapper, offset, value)
+    _install_slot_selector_label_formatter(
+        wrapper,
+        wrapper_va,
+        slot_va + LOAD_SLOT_SELECTOR_LABEL_HELPER_OFFSET,
+    )
     confirmation_wrapper_va = slot_va + LOAD_SLOT_SELECTOR_CONFIRM_WRAPPER_OFFSET
     # The confirmation dialog clobbers both EBP and stack locals.  Save the
     # row through a trampoline in .patch data, then enter that dialog wrapper.
     trampoline_va = slot_va + LOAD_SLOT_SELECTOR_CONFIRM_TRAMPOLINE_OFFSET
-    wrapper[0xD5] = 0xE9
+    wrapper[0xD8] = 0xE9
     struct.pack_into(
-        "<i", wrapper, 0xD6,
-        trampoline_va - (wrapper_va + 0xDA),
+        "<i", wrapper, 0xD9,
+        trampoline_va - (wrapper_va + 0xDD),
     )
     post_selection_wrapper_va = slot_va + LOAD_SLOT_SELECTOR_POST_SELECTION_WRAPPER_OFFSET
-    wrapper[0x10C] = 0xE9
+    wrapper[0x10F] = 0xE9
     struct.pack_into(
-        "<i", wrapper, 0x10D,
-        post_selection_wrapper_va - (wrapper_va + 0x111),
+        "<i", wrapper, 0x110,
+        post_selection_wrapper_va - (wrapper_va + 0x114),
     )
     # A chosen slot now returns success to its specific caller.  The title and
     # in-game command wrappers then invoke the untouched original loader.
-    wrapper[0x126:0x135] = bytes.fromhex(
-        "83 C4 20 61 B8 01 00 00 00 C3 90 90 90 90 90"
+    wrapper[0x129:0x138] = bytes.fromhex(
+        "83 C4 68 61 B8 01 00 00 00 C3 90 90 90 90 90"
     )
     if LOAD_SLOT_SELECTOR_WRAPPER_OFFSET + len(wrapper) > LOAD_SLOT_SELECTOR_SLOT_SIZE:
         raise AssertionError("불러오기 슬롯 선택 래퍼가 예약 공간을 초과했습니다.")
@@ -3038,6 +3310,15 @@ def _build_load_slot_selector_payload(slot_va: int) -> bytes:
         LOAD_SLOT_SELECTOR_WRAPPER_OFFSET:
         LOAD_SLOT_SELECTOR_WRAPPER_OFFSET + len(wrapper)
     ] = wrapper
+    empty_slot_label = ("빈 슬롯".encode("cp949") + b"\0").ljust(
+        LOAD_SLOT_SELECTOR_LABEL_STRIDE, b"\0",
+    )
+    for index in range(LOAD_SLOT_SELECTOR_SAVE_COUNT):
+        label_offset = (
+            LOAD_SLOT_SELECTOR_LABELS_OFFSET
+            + index * LOAD_SLOT_SELECTOR_LABEL_STRIDE
+        )
+        payload[label_offset:label_offset + LOAD_SLOT_SELECTOR_LABEL_STRIDE] = empty_slot_label
     for index in range(LOAD_SLOT_SELECTOR_MENU_COUNT):
         label_va = (
             slot_va + LOAD_SLOT_SELECTOR_LABELS_OFFSET
@@ -3046,15 +3327,11 @@ def _build_load_slot_selector_payload(slot_va: int) -> bytes:
         struct.pack_into(
             "<III", payload,
             LOAD_SLOT_SELECTOR_MENU_ITEMS_OFFSET + index * 12,
-            label_va, 1, 1,
+            label_va, 1, int(index == LOAD_SLOT_SELECTOR_SAVE_COUNT),
         )
     for index in range(LOAD_SLOT_SELECTOR_SAVE_COUNT):
         name_offset = (
             LOAD_SLOT_SELECTOR_SAVE_NAMES_OFFSET
-            + index * LOAD_SLOT_SELECTOR_LABEL_STRIDE
-        )
-        tmp_offset = (
-            LOAD_SLOT_SELECTOR_TMP_NAMES_OFFSET
             + index * LOAD_SLOT_SELECTOR_LABEL_STRIDE
         )
         struct.pack_into(
@@ -3065,14 +3342,26 @@ def _build_load_slot_selector_payload(slot_va: int) -> bytes:
         struct.pack_into(
             "<I", payload,
             LOAD_SLOT_SELECTOR_TMP_NAME_POINTERS_OFFSET + index * 4,
-            slot_va + tmp_offset,
+            SAVE_SLOT_SELECTOR_DEFAULT_TMP_NAME_VA,
         )
         slot_number = index + 1
         payload[name_offset:name_offset + LOAD_SLOT_SELECTOR_LABEL_STRIDE] = (
             f"C:SAVEDATA{slot_number:02d}.CDS".encode("ascii") + b"\0"
         ).ljust(LOAD_SLOT_SELECTOR_LABEL_STRIDE, b"\0")
-        payload[tmp_offset:tmp_offset + LOAD_SLOT_SELECTOR_LABEL_STRIDE] = (
-            f"C:SAVEDATA{slot_number:02d}.TMP".encode("ascii") + b"\0"
+        existence_name_offset = (
+            LOAD_SLOT_SELECTOR_EXISTENCE_NAMES_OFFSET
+            + index * LOAD_SLOT_SELECTOR_LABEL_STRIDE
+        )
+        struct.pack_into(
+            "<I", payload,
+            LOAD_SLOT_SELECTOR_EXISTENCE_NAME_POINTERS_OFFSET + index * 4,
+            slot_va + existence_name_offset,
+        )
+        payload[
+            existence_name_offset:
+            existence_name_offset + LOAD_SLOT_SELECTOR_LABEL_STRIDE
+        ] = (
+            f"SAVEDATA{slot_number:02d}.CDS".encode("ascii") + b"\0"
         ).ljust(LOAD_SLOT_SELECTOR_LABEL_STRIDE, b"\0")
     cancel_offset = (
         LOAD_SLOT_SELECTOR_LABELS_OFFSET
@@ -3081,11 +3370,21 @@ def _build_load_slot_selector_payload(slot_va: int) -> bytes:
     payload[cancel_offset:cancel_offset + LOAD_SLOT_SELECTOR_LABEL_STRIDE] = (
         "취소".encode("cp949") + b"\0"
     ).ljust(LOAD_SLOT_SELECTOR_LABEL_STRIDE, b"\0")
-    date_format = "%d년 %d월 %d일".encode("cp949") + b"\0"
+    date_format = "%04d.%02d.%02d · %s".encode("cp949") + b"\0"
     payload[
         LOAD_SLOT_SELECTOR_DATE_FORMAT_OFFSET:
         LOAD_SLOT_SELECTOR_DATE_FORMAT_OFFSET + len(date_format)
     ] = date_format
+    title = "불러올 데이터를 선택하세요".encode("cp949") + b"\0"
+    payload[
+        LOAD_SLOT_SELECTOR_TITLE_OFFSET:
+        LOAD_SLOT_SELECTOR_TITLE_OFFSET + len(title)
+    ] = title
+    outside_label = "해상".encode("cp949") + b"\0"
+    payload[
+        LOAD_SLOT_SELECTOR_OUTSIDE_LABEL_OFFSET:
+        LOAD_SLOT_SELECTOR_OUTSIDE_LABEL_OFFSET + len(outside_label)
+    ] = outside_label
     command_wrapper = _build_load_slot_selector_command_wrapper(slot_va)
     command_wrapper_offset = LOAD_SLOT_SELECTOR_COMMAND_WRAPPER_OFFSET
     payload[
@@ -3117,6 +3416,22 @@ def _build_load_slot_selector_payload(slot_va: int) -> bytes:
         post_selection_wrapper_offset:
         post_selection_wrapper_offset + len(post_selection_wrapper)
     ] = post_selection_wrapper
+    label_helper = _build_load_slot_selector_label_helper(
+        slot_va + LOAD_SLOT_SELECTOR_LABEL_HELPER_OFFSET,
+        slot_va + LOAD_SLOT_SELECTOR_DATE_FORMAT_OFFSET,
+        slot_va + LOAD_SLOT_SELECTOR_OUTSIDE_LABEL_OFFSET,
+        slot_va + LOAD_SLOT_SELECTOR_MENU_ITEMS_OFFSET,
+    )
+    payload[
+        LOAD_SLOT_SELECTOR_LABEL_HELPER_OFFSET:
+        LOAD_SLOT_SELECTOR_LABEL_HELPER_OFFSET + len(label_helper)
+    ] = label_helper
+    title_availability_wrapper = _build_load_slot_selector_title_availability_wrapper(slot_va)
+    title_availability_wrapper_offset = LOAD_SLOT_SELECTOR_TITLE_AVAILABILITY_WRAPPER_OFFSET
+    payload[
+        title_availability_wrapper_offset:
+        title_availability_wrapper_offset + len(title_availability_wrapper)
+    ] = title_availability_wrapper
     return bytes(payload)
 
 
@@ -3131,6 +3446,7 @@ def _is_legacy_load_slot_selector_patch(data: bytes | bytearray) -> bool:
     command_hook_offset = _load_slot_selector_command_hook_offset(data)
     title_hook_offset = _load_slot_selector_title_hook_offset(data)
     session_file_hook_offset = _load_slot_selector_session_file_hook_offset(data)
+    title_availability_hook_offset = _load_slot_selector_title_availability_hook_offset(data)
     hook = bytes(data[hook_offset:hook_offset + len(LOAD_SLOT_SELECTOR_HOOK_ORIGINAL)])
     command_hook = bytes(data[
         command_hook_offset:
@@ -3168,6 +3484,22 @@ def _is_legacy_load_slot_selector_patch(data: bytes | bytearray) -> bool:
         (LOAD_SLOT_SELECTOR_DIALOG_REGISTER_LEGACY_MAGIC, 18),
         (LOAD_SLOT_SELECTOR_DIALOG_STACK_LEGACY_MAGIC, 19),
         (LOAD_SLOT_SELECTOR_COMMAND_PREPARATION_LEGACY_MAGIC, 20),
+        (LOAD_SLOT_SELECTOR_MENU_TITLE_LEGACY_MAGIC, 21),
+        (LOAD_SLOT_SELECTOR_LOCATION_LEGACY_MAGIC, 22),
+        (LOAD_SLOT_SELECTOR_TITLE_AVAILABILITY_LEGACY_MAGIC, 23),
+        (LOAD_SLOT_SELECTOR_TITLE_AVAILABILITY_STACK_LEGACY_MAGIC, 24),
+        (LOAD_SLOT_SELECTOR_TITLE_AVAILABILITY_CONTEXT_LEGACY_MAGIC, 25),
+        (LOAD_SLOT_SELECTOR_TITLE_AVAILABILITY_DIRECT_IO_LEGACY_MAGIC, 26),
+        (LOAD_SLOT_SELECTOR_TITLE_AVAILABILITY_ALWAYS_LEGACY_MAGIC, 27),
+        (LOAD_SLOT_SELECTOR_EMPTY_ROWS_LEGACY_MAGIC, 28),
+        (LOAD_SLOT_SELECTOR_EMPTY_ROWS_FLAG_LEGACY_MAGIC, 29),
+        (LOAD_SLOT_SELECTOR_EMPTY_ROWS_POLARITY_LEGACY_MAGIC, 30),
+        (LOAD_SLOT_SELECTOR_HEADER_BUFFER_LEGACY_MAGIC, 31),
+        (LOAD_SLOT_SELECTOR_EXISTENCE_NAMES_LEGACY_MAGIC, 32),
+        (LOAD_SLOT_SELECTOR_EXISTENCE_STACK_LEGACY_MAGIC, 33),
+        (LOAD_SLOT_SELECTOR_EXISTENCE_PATH_LEGACY_MAGIC, 34),
+        (LOAD_SLOT_SELECTOR_EMPTY_ROWS_DIRECTION_LEGACY_MAGIC, 35),
+        (LOAD_SLOT_SELECTOR_EMPTY_SLOT_LABEL_LEGACY_MAGIC, 36),
     ):
         return (
             hook != LOAD_SLOT_SELECTOR_HOOK_ORIGINAL
@@ -3183,6 +3515,7 @@ def _load_slot_selector_patch_info(data: bytes | bytearray) -> bool:
     command_hook_offset = _load_slot_selector_command_hook_offset(data)
     title_hook_offset = _load_slot_selector_title_hook_offset(data)
     session_file_hook_offset = _load_slot_selector_session_file_hook_offset(data)
+    title_availability_hook_offset = _load_slot_selector_title_availability_hook_offset(data)
     hook = bytes(data[hook_offset:hook_offset + len(LOAD_SLOT_SELECTOR_HOOK_ORIGINAL)])
     command_hook = bytes(data[
         command_hook_offset:
@@ -3196,12 +3529,17 @@ def _load_slot_selector_patch_info(data: bytes | bytearray) -> bool:
         session_file_hook_offset:
         session_file_hook_offset + len(LOAD_SLOT_SELECTOR_SESSION_FILE_HOOK_ORIGINAL)
     ])
+    title_availability_hook = bytes(data[
+        title_availability_hook_offset:
+        title_availability_hook_offset + len(LOAD_SLOT_SELECTOR_TITLE_AVAILABILITY_HOOK_ORIGINAL)
+    ])
     section = find_patch_section(data)
     if (
         hook == LOAD_SLOT_SELECTOR_HOOK_ORIGINAL
         and command_hook == LOAD_SLOT_SELECTOR_COMMAND_HOOK_ORIGINAL
         and title_hook == LOAD_SLOT_SELECTOR_TITLE_HOOK_ORIGINAL
         and session_file_hook == LOAD_SLOT_SELECTOR_SESSION_FILE_HOOK_ORIGINAL
+        and title_availability_hook == LOAD_SLOT_SELECTOR_TITLE_AVAILABILITY_HOOK_ORIGINAL
     ):
         if section is not None and section.raw_size >= (
             LOAD_SLOT_SELECTOR_SLOT_OFFSET + LOAD_SLOT_SELECTOR_SLOT_SIZE
@@ -3233,6 +3571,9 @@ def _load_slot_selector_patch_info(data: bytes | bytearray) -> bool:
         or session_file_hook != _load_slot_selector_session_file_hook(
             slot_va + LOAD_SLOT_SELECTOR_SESSION_FILE_WRAPPER_OFFSET,
         )
+        or title_availability_hook != _load_slot_selector_title_availability_hook(
+            slot_va + LOAD_SLOT_SELECTOR_TITLE_AVAILABILITY_WRAPPER_OFFSET,
+        )
         or bytes(data[slot_offset:slot_offset + LOAD_SLOT_SELECTOR_SLOT_SIZE])
         != _build_load_slot_selector_payload(slot_va)
     ):
@@ -3250,6 +3591,7 @@ def apply_load_slot_selector_patch(data: bytearray, enabled: bool) -> bool:
     command_hook_offset = _load_slot_selector_command_hook_offset(data)
     title_hook_offset = _load_slot_selector_title_hook_offset(data)
     session_file_hook_offset = _load_slot_selector_session_file_hook_offset(data)
+    title_availability_hook_offset = _load_slot_selector_title_availability_hook_offset(data)
     if current_enabled or legacy_enabled:
         section = find_patch_section(data)
         if section is None:
@@ -3269,6 +3611,10 @@ def apply_load_slot_selector_patch(data: bytearray, enabled: bool) -> bool:
             session_file_hook_offset:
             session_file_hook_offset + len(LOAD_SLOT_SELECTOR_SESSION_FILE_HOOK_ORIGINAL)
         ] = LOAD_SLOT_SELECTOR_SESSION_FILE_HOOK_ORIGINAL
+        data[
+            title_availability_hook_offset:
+            title_availability_hook_offset + len(LOAD_SLOT_SELECTOR_TITLE_AVAILABILITY_HOOK_ORIGINAL)
+        ] = LOAD_SLOT_SELECTOR_TITLE_AVAILABILITY_HOOK_ORIGINAL
         clear_slot(
             data, section, LOAD_SLOT_SELECTOR_SLOT_OFFSET, LOAD_SLOT_SELECTOR_SLOT_SIZE,
         )
@@ -3312,6 +3658,12 @@ def apply_load_slot_selector_patch(data: bytearray, enabled: bool) -> bool:
         ] = _load_slot_selector_session_file_hook(
             slot_va + LOAD_SLOT_SELECTOR_SESSION_FILE_WRAPPER_OFFSET,
         )
+        data[
+            title_availability_hook_offset:
+            title_availability_hook_offset + len(LOAD_SLOT_SELECTOR_TITLE_AVAILABILITY_HOOK_ORIGINAL)
+        ] = _load_slot_selector_title_availability_hook(
+            slot_va + LOAD_SLOT_SELECTOR_TITLE_AVAILABILITY_WRAPPER_OFFSET,
+        )
     else:
         section = find_patch_section(data)
         if section is None:
@@ -3331,6 +3683,10 @@ def apply_load_slot_selector_patch(data: bytearray, enabled: bool) -> bool:
             session_file_hook_offset:
             session_file_hook_offset + len(LOAD_SLOT_SELECTOR_SESSION_FILE_HOOK_ORIGINAL)
         ] = LOAD_SLOT_SELECTOR_SESSION_FILE_HOOK_ORIGINAL
+        data[
+            title_availability_hook_offset:
+            title_availability_hook_offset + len(LOAD_SLOT_SELECTOR_TITLE_AVAILABILITY_HOOK_ORIGINAL)
+        ] = LOAD_SLOT_SELECTOR_TITLE_AVAILABILITY_HOOK_ORIGINAL
         clear_slot(
             data, section, LOAD_SLOT_SELECTOR_SLOT_OFFSET, LOAD_SLOT_SELECTOR_SLOT_SIZE,
         )
