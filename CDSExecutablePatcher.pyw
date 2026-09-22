@@ -265,6 +265,18 @@ DISCOVER_AVI_DETAILS = """DISCOVER 대신 AVI 사용
 복사된 AVI 파일은 다시 적용할 수 있도록 게임의 AVI 폴더에 유지합니다.
 """
 
+SAVE_SLOT_SELECTOR_DETAILS = """10개 슬롯 저장/불러오기
+
+- 게임 안에서 저장 또는 불러오기를 선택하면 기존 목록 팝업으로 10개 저장 슬롯과 마지막 `취소` 항목을 표시합니다.
+- 저장 대상은 `SAVEDATA01.CDS`부터 `SAVEDATA10.CDS`까지입니다.
+- 이미 저장된 슬롯에는 저장 시점의 `1494년 1월 9일` 형식 날짜가 표시되고, 없는 슬롯은 빈 줄로 표시됩니다.
+- 이미 저장된 슬롯을 고르면 기존의 덮어쓰기 Yes/No 확인을 표시하며, 아니오를 누르면 슬롯 목록으로 돌아갑니다.
+- 비어 있는 슬롯은 확인 없이 바로 저장합니다.
+- 불러오기에서 빈 슬롯을 누르면 파일을 읽지 않고 목록으로 돌아갑니다.
+
+체크 해제 시 저장·불러오기 모두 원래 단일 `SAVEDATA.CDS` 방식으로 복원합니다.
+"""
+
 KAABA_DETAILS = """by 히소카
 
 카바신전 발견물
@@ -672,6 +684,7 @@ class CDSExecutablePatcher(tk.Tk):
         self.history_elapsed_years_fix_enabled = tk.BooleanVar(value=False)
         self.geographic_discovery_still_fix_enabled = tk.BooleanVar(value=False)
         self.discover_avi_enabled = tk.BooleanVar(value=False)
+        self.save_slot_selector_enabled = tk.BooleanVar(value=False)
         self.pirate_fame_middle = tk.StringVar(value="0")
         self.pirate_fame_high = tk.StringVar(value="0")
         self.pirate_western_stage2_first_probability = tk.StringVar(value="0")
@@ -1533,6 +1546,18 @@ class CDSExecutablePatcher(tk.Tk):
             row=1, column=1, padx=(10, 0), pady=(6, 0), sticky="e",
         )
         self._update_bug_fix_control_states()
+        ttk.Checkbutton(
+            translation_box,
+            text="10개 슬롯 저장/불러오기",
+            variable=self.save_slot_selector_enabled,
+        ).grid(row=2, column=0, pady=(6, 0), sticky="w")
+        ttk.Button(
+            translation_box,
+            text="내용…",
+            command=lambda: self.show_patch_details(
+                "10개 슬롯 저장/불러오기", SAVE_SLOT_SELECTOR_DETAILS,
+            ),
+        ).grid(row=2, column=1, padx=(10, 0), pady=(6, 0), sticky="e")
         discovery_box = ttk.LabelFrame(additional_left_column, text="발견물", padding=10)
         discovery_box.grid(row=0, column=0, sticky="ew")
 
@@ -5880,6 +5905,8 @@ class CDSExecutablePatcher(tk.Tk):
                     disev_language_fix_enabled,
                     history_elapsed_years_fix_enabled,
                     discover_avi_enabled,
+                    save_slot_selector_enabled,
+                    load_slot_selector_enabled,
                 ) = read_settings(target)
                 ability_limit, vitality_limit = read_person_stat_limits(target)
                 barmaid_records = read_barmaid_records(target)
@@ -5956,6 +5983,9 @@ class CDSExecutablePatcher(tk.Tk):
             self.tavern_hint_bug_fix_enabled.set(tavern_hint_bug_fix_enabled)
             self.disev_language_fix_enabled.set(disev_language_fix_enabled)
             self.history_elapsed_years_fix_enabled.set(history_elapsed_years_fix_enabled)
+            self.save_slot_selector_enabled.set(
+                save_slot_selector_enabled or load_slot_selector_enabled,
+            )
             self.bug_fixes_enabled.set(any((
                 failed_pottery_enabled,
                 judgment_fix_enabled,
@@ -6460,6 +6490,8 @@ class CDSExecutablePatcher(tk.Tk):
                 self.bug_fixes_enabled.get() and self.disev_language_fix_enabled.get(),
                 self.bug_fixes_enabled.get() and self.history_elapsed_years_fix_enabled.get(),
                 self.discover_avi_enabled.get(),
+                self.save_slot_selector_enabled.get(),
+                self.save_slot_selector_enabled.get(),
                 figurehead_effect_settings,
                 barmaid_edit,
                 sponsor_edit,

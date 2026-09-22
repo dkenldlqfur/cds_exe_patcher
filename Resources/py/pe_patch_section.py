@@ -139,6 +139,15 @@ PATCH_SECTION_DISCOVERY_DESCRIPTIONS_SIZE = 0x32000
 PATCH_SECTION_LIBRARY_HINT_NAMES_SIZE = 0x37000
 PATCH_SECTION_LIBRARY_BOOKS_SIZE = 0x41000
 PATCH_SECTION_LIBRARY_HINT_TEXTS_SIZE = 0x4D000
+# The save-slot selector needs writable label rows because it reads each slot's
+# date immediately before showing the game's native selection list.
+SAVE_SLOT_SELECTOR_SLOT_OFFSET = 0x4D000
+SAVE_SLOT_SELECTOR_SLOT_SIZE = 0x1000
+PATCH_SECTION_SAVE_SLOT_SELECTOR_SIZE = 0x4E000
+# Load selection has an independent runtime label table and entry wrapper.
+LOAD_SLOT_SELECTOR_SLOT_OFFSET = 0x4E000
+LOAD_SLOT_SELECTOR_SLOT_SIZE = 0x1000
+PATCH_SECTION_LOAD_SLOT_SELECTOR_SIZE = 0x4F000
 
 
 @dataclass(frozen=True)

@@ -69,6 +69,12 @@ from pe_patch_section import (
     PATCH_SECTION_LIBRARY_BOOKS_SIZE,
     PATCH_SECTION_LIBRARY_HINT_NAMES_SIZE,
     PATCH_SECTION_LIBRARY_HINT_TEXTS_SIZE,
+    PATCH_SECTION_SAVE_SLOT_SELECTOR_SIZE,
+    SAVE_SLOT_SELECTOR_SLOT_OFFSET,
+    SAVE_SLOT_SELECTOR_SLOT_SIZE,
+    PATCH_SECTION_LOAD_SLOT_SELECTOR_SIZE,
+    LOAD_SLOT_SELECTOR_SLOT_OFFSET,
+    LOAD_SLOT_SELECTOR_SLOT_SIZE,
     PIRATE_SLOT_OFFSET,
     PIRATE_SLOT_SIZE,
     PLAYER_FAME_LIMIT_SLOT_OFFSET,
@@ -157,6 +163,134 @@ HISTORY_ELAPSED_DISCOVERY_LOOKUP_VA = 0x4AAE40
 HISTORY_ELAPSED_YEARS_FIX_MAGIC = b"HISTYR1\0"
 HISTORY_ELAPSED_YEARS_FIX_VERSION = 1
 HISTORY_ELAPSED_YEARS_FIX_WRAPPER_OFFSET = 0x10
+
+# The original save handler asks for confirmation before it writes.  Replace
+# its first instruction so a slot is selected first and overwrite confirmation
+# is asked only for an existing destination.
+SAVE_SLOT_SELECTOR_HOOK_VA = 0x4A2800
+SAVE_SLOT_SELECTOR_HOOK_ORIGINAL = bytes.fromhex("68 B8 8C 56 00")
+SAVE_SLOT_SELECTOR_SAVE_ROUTINE_VA = 0x478E80
+SAVE_SLOT_SELECTOR_SUCCESS_VA = 0x4A2819
+SAVE_SLOT_SELECTOR_CANCEL_VA = 0x4A2828
+SAVE_SLOT_SELECTOR_MENU_ROUTINE_VA = 0x469A70
+SAVE_SLOT_SELECTOR_CONFIRM_ROUTINE_VA = 0x469060
+SAVE_SLOT_SELECTOR_OVERWRITE_PROMPT_VA = 0x568CB8
+SAVE_SLOT_SELECTOR_PATH_ROUTINE_VA = 0x425220
+SAVE_SLOT_SELECTOR_CREATE_FILE_IAT_VA = 0x62F444
+SAVE_SLOT_SELECTOR_READ_FILE_IAT_VA = 0x62F474
+SAVE_SLOT_SELECTOR_CLOSE_HANDLE_IAT_VA = 0x62F424
+SAVE_SLOT_SELECTOR_WSPRINTF_IAT_VA = 0x62F594
+SAVE_SLOT_SELECTOR_SAVE_NAME_POINTER_VA = 0x568778
+SAVE_SLOT_SELECTOR_TMP_NAME_POINTER_VA = 0x56877C
+SAVE_SLOT_SELECTOR_DEFAULT_SAVE_NAME_VA = 0x537654
+SAVE_SLOT_SELECTOR_DEFAULT_TMP_NAME_VA = 0x537644
+# Version 2 used the game's create/truncate helper while reading labels.
+# Version 3 used direct read-only Win32 calls, but incorrectly created one TMP
+# file per slot.  The game has one shared temporary file, SAVEDATA.TMP.
+SAVE_SLOT_SELECTOR_LEGACY_MAGIC = b"SAVESLT2"
+SAVE_SLOT_SELECTOR_PREVIOUS_MAGIC = b"SAVESLT3"
+SAVE_SLOT_SELECTOR_MAGIC = b"SAVESLT4"
+SAVE_SLOT_SELECTOR_VERSION = 4
+SAVE_SLOT_SELECTOR_WRAPPER_OFFSET = 0x20
+# Keep all data after the wrapper.  The direct read-only file calls make the
+# wrapper larger than the old 0x180 menu-table position.
+SAVE_SLOT_SELECTOR_MENU_ITEMS_OFFSET = 0x1C0
+SAVE_SLOT_SELECTOR_SAVE_NAME_POINTERS_OFFSET = 0x250
+SAVE_SLOT_SELECTOR_TMP_NAME_POINTERS_OFFSET = 0x280
+SAVE_SLOT_SELECTOR_LABELS_OFFSET = 0x300
+SAVE_SLOT_SELECTOR_SAVE_NAMES_OFFSET = 0x500
+SAVE_SLOT_SELECTOR_TMP_NAMES_OFFSET = 0x640
+SAVE_SLOT_SELECTOR_DATE_FORMAT_OFFSET = 0x780
+SAVE_SLOT_SELECTOR_SAVE_COUNT = 10
+SAVE_SLOT_SELECTOR_MENU_COUNT = 11
+SAVE_SLOT_SELECTOR_LABEL_STRIDE = 0x20
+
+# The original loader remains unmodified.  Both game command paths select a
+# slot first, then call the original loader.  The title-session initializer is
+# redirected separately because it otherwise reopens SAVEDATA.CDS by name.
+LOAD_SLOT_SELECTOR_HOOK_VA = 0x478A60
+LOAD_SLOT_SELECTOR_HOOK_ORIGINAL = bytes.fromhex("81 EC 08 01 00 00")
+LOAD_SLOT_SELECTOR_CONTINUATION_VA = 0x478A66
+LOAD_SLOT_SELECTOR_COMMAND_HOOK_VA = 0x4A2830
+LOAD_SLOT_SELECTOR_COMMAND_HOOK_ORIGINAL = bytes.fromhex("68 F8 8C 56 00")
+LOAD_SLOT_SELECTOR_COMMAND_CONTINUATION_VA = 0x44AF70
+# The title screen uses a separate load callback and must remain on its own
+# callback path; it does not use the in-game command transition.
+LOAD_SLOT_SELECTOR_TITLE_HOOK_VA = 0x45ED1F
+LOAD_SLOT_SELECTOR_TITLE_HOOK_ORIGINAL = bytes.fromhex("68 88 1A 57 00")
+LOAD_SLOT_SELECTOR_TITLE_SUCCESS_VA = 0x45ED3B
+LOAD_SLOT_SELECTOR_TITLE_CANCEL_VA = 0x45ED65
+# The title wrapper prepares its state itself, so success must resume at the
+# original loader call, not at the instruction after that call.
+LOAD_SLOT_SELECTOR_TITLE_LOADER_VA = 0x45ED40
+LOAD_SLOT_SELECTOR_TITLE_CONTINUATION_VA = 0x45ED45
+LOAD_SLOT_SELECTOR_SESSION_FILE_HOOK_VA = 0x41ABE2
+LOAD_SLOT_SELECTOR_SESSION_FILE_HOOK_ORIGINAL = bytes.fromhex("68 54 76 53 00")
+LOAD_SLOT_SELECTOR_SESSION_FILE_CONTINUATION_VA = 0x41AC0E
+LOAD_SLOT_SELECTOR_MENU_ROUTINE_VA = 0x469A70
+LOAD_SLOT_SELECTOR_PATH_ROUTINE_VA = 0x425220
+LOAD_SLOT_SELECTOR_LEGACY_MAGIC = b"LOADSLT1"
+LOAD_SLOT_SELECTOR_INTERMEDIATE_MAGIC = b"LOADSLT2"
+LOAD_SLOT_SELECTOR_OLDER_MAGIC = b"LOADSLT3"
+LOAD_SLOT_SELECTOR_PREVIOUS_MAGIC = b"LOADSLT4"
+LOAD_SLOT_SELECTOR_LATEST_LEGACY_MAGIC = b"LOADSLT5"
+LOAD_SLOT_SELECTOR_NEWEST_LEGACY_MAGIC = b"LOADSLT6"
+LOAD_SLOT_SELECTOR_FINAL_LEGACY_MAGIC = b"LOADSLT7"
+LOAD_SLOT_SELECTOR_SESSION_FILE_LEGACY_MAGIC = b"LOADSLT8"
+LOAD_SLOT_SELECTOR_TITLE_CONTEXT_LEGACY_MAGIC = b"LOADSLT9"
+LOAD_SLOT_SELECTOR_TITLE_ORDER_LEGACY_MAGIC = b"LOADSL10"
+LOAD_SLOT_SELECTOR_TITLE_CITY_ORDER_LEGACY_MAGIC = b"LOADSL11"
+LOAD_SLOT_SELECTOR_TEMP_SLOT_LEGACY_MAGIC = b"LOADSL12"
+# v13 overwrote the post-selection wrapper's ``jmp`` opcode while writing its
+# relative operand.  The selector then fell through into empty .patch data as
+# soon as a slot was chosen.  v14 writes the operand after the opcode.
+LOAD_SLOT_SELECTOR_POST_SELECTION_LEGACY_MAGIC = b"LOADSL13"
+# The title path originally selected a slot before game-state preparation,
+# unlike the working in-game path.  v15 prepares first, then selects, before
+# rejoining the title callback at its original loader call.  v16 corrects the
+# second call's instruction-end address (v15 entered five bytes into selector).
+LOAD_SLOT_SELECTOR_TITLE_PREPARATION_ORDER_LEGACY_MAGIC = b"LOADSL14"
+LOAD_SLOT_SELECTOR_TITLE_SELECTOR_CALL_LEGACY_MAGIC = b"LOADSL15"
+# v16 fixes the title selector call target.  v17 also stops storing the
+# selected row in an unprotected stack scratch slot across the confirmation
+# dialog; use EBP, which that dialog preserves by calling convention.
+LOAD_SLOT_SELECTOR_CONFIRM_STACK_INDEX_LEGACY_MAGIC = b"LOADSL16"
+# v17 accidentally rejoined after the title loader call.  v18 re-enters at
+# the native loader call itself, so the selected data is actually deserialized.
+LOAD_SLOT_SELECTOR_TITLE_LOADER_SKIP_LEGACY_MAGIC = b"LOADSL17"
+# The game's confirmation dialog clobbers EBP and its caller-stack scratch
+# area.  v19 keeps the row on the stack only for the dialog call, then writes
+# the resolved selected path directly to the normal save-name pointer.
+LOAD_SLOT_SELECTOR_DIALOG_REGISTER_LEGACY_MAGIC = b"LOADSL18"
+# v19 still depends on the confirmation dialog's stack layout.  v20 stores
+# the chosen row in dedicated .patch data before showing that dialog.
+LOAD_SLOT_SELECTOR_DIALOG_STACK_LEGACY_MAGIC = b"LOADSL19"
+# v20 ran the in-game load preparation before the slot menu.  That preparation
+# changes the active UI state, so cancelling the menu could return to the
+# title screen.  v21 selects first and preserves the original order: prepare
+# the load only after a slot was actually chosen.
+LOAD_SLOT_SELECTOR_COMMAND_PREPARATION_LEGACY_MAGIC = b"LOADSL20"
+LOAD_SLOT_SELECTOR_MAGIC = b"LOADSL21"
+LOAD_SLOT_SELECTOR_VERSION = 21
+LOAD_SLOT_SELECTOR_WRAPPER_OFFSET = 0x20
+LOAD_SLOT_SELECTOR_MENU_ITEMS_OFFSET = 0x1C0
+LOAD_SLOT_SELECTOR_SAVE_NAME_POINTERS_OFFSET = 0x250
+LOAD_SLOT_SELECTOR_TMP_NAME_POINTERS_OFFSET = 0x280
+LOAD_SLOT_SELECTOR_LABELS_OFFSET = 0x300
+LOAD_SLOT_SELECTOR_SAVE_NAMES_OFFSET = 0x500
+LOAD_SLOT_SELECTOR_TMP_NAMES_OFFSET = 0x640
+LOAD_SLOT_SELECTOR_DATE_FORMAT_OFFSET = 0x780
+LOAD_SLOT_SELECTOR_SELECTED_INDEX_OFFSET = 0x7C0
+LOAD_SLOT_SELECTOR_COMMAND_WRAPPER_OFFSET = 0x800
+LOAD_SLOT_SELECTOR_CONFIRM_WRAPPER_OFFSET = 0x840
+LOAD_SLOT_SELECTOR_TITLE_WRAPPER_OFFSET = 0x880
+LOAD_SLOT_SELECTOR_POST_SELECTION_WRAPPER_OFFSET = 0x8C0
+LOAD_SLOT_SELECTOR_SESSION_FILE_WRAPPER_OFFSET = 0x900
+LOAD_SLOT_SELECTOR_CONFIRM_TRAMPOLINE_OFFSET = 0x940
+LOAD_SLOT_SELECTOR_CONFIRM_PROMPT_VA = 0x568CF8
+LOAD_SLOT_SELECTOR_SAVE_COUNT = 10
+LOAD_SLOT_SELECTOR_MENU_COUNT = 11
+LOAD_SLOT_SELECTOR_LABEL_STRIDE = 0x20
 
 # Recycled ship slots retain their previous cannon type/count/capacity.  The
 # constructor calls the maximum-weight setter before clearing those fields,
@@ -2337,6 +2471,878 @@ def apply_history_elapsed_years_fix(data: bytearray, enabled: bool) -> bool:
             HISTORY_ELAPSED_YEARS_FIX_SLOT_SIZE,
         )
     return True
+
+
+def _save_slot_selector_hook(wrapper_va: int) -> bytes:
+    """Return the save-command branch redirected to the selector wrapper."""
+    return b"\xE9" + struct.pack(
+        "<i", wrapper_va - (SAVE_SLOT_SELECTOR_HOOK_VA + 5),
+    )
+
+
+def _build_save_slot_selector_payload(slot_va: int) -> bytes:
+    """Build the save-only ten-slot selector and its mutable date labels."""
+    wrapper_va = slot_va + SAVE_SLOT_SELECTOR_WRAPPER_OFFSET
+    # The wrapper obtains a full path via the game's helper and uses only
+    # CreateFileA(GENERIC_READ, OPEN_EXISTING) + ReadFile for date labels.
+    # The game's writer helper must not be called here because it can truncate
+    # an existing save before returning a handle.
+    wrapper = bytearray(bytes.fromhex(
+        "60 83 EC 20 "              # pushad; reserve 32-byte read buffer
+        "31 F6 "                    # xor esi, esi (slot index)
+        "89 F7 C1 E7 05 "           # mov edi, esi; shl edi, 5
+        "81 C7 11 11 11 11 "        # add edi, labels
+        "C6 07 00 "                 # empty label by default
+        "8B 04 B5 22 22 22 22 "     # mov eax, [save-name pointers + esi*4]
+        "50 E8 00 00 00 00 83 C4 04 "  # full path helper
+        "6A 00 68 80 00 00 00 6A 03 6A 00 6A 03 "
+        "68 00 00 00 80 50 FF 15 44 F4 62 00 "  # CreateFileA read-only
+        "83 F8 FF 74 6F "           # missing / inaccessible -> next slot
+        "89 C3 8D 0C 24 "           # handle; local buffer starts at ESP
+        "6A 00 8D 44 24 20 50 6A 1B 51 53 "
+        "FF 15 74 F4 62 00 "        # ReadFile(handle, buffer, 0x1b, &count, 0)
+        "85 C0 0F 84 19 01 00 00 "  # failed read -> close, then next slot
+        "53 FF 15 24 F4 62 00 "     # CloseHandle
+        "83 7C 24 1C 1B 75 43 "     # require full 0x1b-byte header
+        "0F B7 44 24 15 "           # year at SAVEDATA + 0x15
+        "3D 78 05 00 00 72 37 "     # 1400 <= year
+        "3D 6C 07 00 00 77 30 "     # year <= 1900
+        "0F B6 4C 24 19 83 F9 01 72 26 83 F9 0C 77 21 "
+        "0F B6 54 24 1A 83 FA 01 72 17 83 FA 1F 77 12 "
+        "52 51 50 "                 # day, month, year
+        "68 33 33 33 33 57 "        # format, label
+        "FF 15 94 F5 62 00 83 C4 14 "  # wsprintfA(label, format, ...)
+        "46 83 FE 0A 0F 8C 4B FF FF FF "  # next slot
+        "6A 00 6A 00 6A 01 6A 0B "
+        "68 44 44 44 44 "           # ten saves plus an explicit cancel row
+        "E8 00 00 00 00 83 C4 14 "
+        "83 F8 0A 0F 83 83 00 00 00 "  # explicit cancel row / invalid selection
+        "8B 14 85 22 22 22 22 "     # save filename by selection
+        "89 15 78 87 56 00 "
+        "8B 14 85 55 55 55 55 "     # temp filename by selection
+        "89 15 7C 87 56 00 "
+        "FF 35 78 87 56 00 "        # push current save filename
+        "E8 00 00 00 00 83 C4 04 "  # make full path
+        "6A 00 68 80 00 00 00 6A 03 6A 00 6A 03 "
+        "68 00 00 00 80 50 FF 15 44 F4 62 00 "  # CreateFileA read-only
+        "83 F8 FF 74 1B "           # absent -> save without overwrite prompt
+        "50 FF 15 24 F4 62 00 "     # CloseHandle
+        "68 B8 8C 56 00 6A 02 "     # existing game overwrite confirmation
+        "E8 00 00 00 00 83 C4 08 "
+        "83 F8 02 75 81 "           # no -> show slot list again
+        "83 C4 20 61 "
+        "E8 00 00 00 00 "           # original save serializer
+        "C7 05 78 87 56 00 54 76 53 00 "  # restore default save path
+        "C7 05 7C 87 56 00 44 76 53 00 "  # restore default temporary path
+        "E9 00 00 00 00 "           # original success message
+        "C7 05 78 87 56 00 54 76 53 00 "  # cancel also leaves load path unchanged
+        "C7 05 7C 87 56 00 44 76 53 00 "
+        "83 C4 20 61 "
+        "E9 00 00 00 00"            # original cancel return
+        "53 FF 15 24 F4 62 00 "     # failed ReadFile: close handle
+        "E9 2C FF FF FF"            # then continue with next slot
+    ))
+    # These offsets are instruction-relative and intentionally kept explicit
+    # so the generated payload can be regression-tested without an assembler.
+    for offset, target in (
+        (0x1C, SAVE_SLOT_SELECTOR_PATH_ROUTINE_VA),
+        (0xC8, SAVE_SLOT_SELECTOR_MENU_ROUTINE_VA),
+        (0xF9, SAVE_SLOT_SELECTOR_PATH_ROUTINE_VA),
+        (0x12D, SAVE_SLOT_SELECTOR_CONFIRM_ROUTINE_VA),
+        (0x13E, SAVE_SLOT_SELECTOR_SAVE_ROUTINE_VA),
+        (0x157, SAVE_SLOT_SELECTOR_SUCCESS_VA),
+        (0x174, SAVE_SLOT_SELECTOR_CANCEL_VA),
+    ):
+        struct.pack_into("<i", wrapper, offset + 1, target - (wrapper_va + offset + 5))
+    for offset, value in (
+        (0x0D, slot_va + SAVE_SLOT_SELECTOR_LABELS_OFFSET),
+        (0x17, slot_va + SAVE_SLOT_SELECTOR_SAVE_NAME_POINTERS_OFFSET),
+        (0xA3, slot_va + SAVE_SLOT_SELECTOR_DATE_FORMAT_OFFSET),
+        (0xC4, slot_va + SAVE_SLOT_SELECTOR_MENU_ITEMS_OFFSET),
+        (0xDC, slot_va + SAVE_SLOT_SELECTOR_SAVE_NAME_POINTERS_OFFSET),
+        (0xE9, slot_va + SAVE_SLOT_SELECTOR_TMP_NAME_POINTERS_OFFSET),
+    ):
+        struct.pack_into("<I", wrapper, offset, value)
+    if SAVE_SLOT_SELECTOR_WRAPPER_OFFSET + len(wrapper) > SAVE_SLOT_SELECTOR_SLOT_SIZE:
+        raise AssertionError("저장 슬롯 선택 래퍼가 예약 공간을 초과했습니다.")
+
+    payload = bytearray(SAVE_SLOT_SELECTOR_SLOT_SIZE)
+    payload[:len(SAVE_SLOT_SELECTOR_MAGIC)] = SAVE_SLOT_SELECTOR_MAGIC
+    struct.pack_into("<I", payload, len(SAVE_SLOT_SELECTOR_MAGIC), SAVE_SLOT_SELECTOR_VERSION)
+    payload[
+        SAVE_SLOT_SELECTOR_WRAPPER_OFFSET:
+        SAVE_SLOT_SELECTOR_WRAPPER_OFFSET + len(wrapper)
+    ] = wrapper
+    for index in range(SAVE_SLOT_SELECTOR_MENU_COUNT):
+        label_va = (
+            slot_va + SAVE_SLOT_SELECTOR_LABELS_OFFSET
+            + index * SAVE_SLOT_SELECTOR_LABEL_STRIDE
+        )
+        struct.pack_into(
+            "<III", payload,
+            SAVE_SLOT_SELECTOR_MENU_ITEMS_OFFSET + index * 12,
+            label_va, 1, 1,
+        )
+    for index in range(SAVE_SLOT_SELECTOR_SAVE_COUNT):
+        name_offset = (
+            SAVE_SLOT_SELECTOR_SAVE_NAMES_OFFSET
+            + index * SAVE_SLOT_SELECTOR_LABEL_STRIDE
+        )
+        struct.pack_into(
+            "<I", payload,
+            SAVE_SLOT_SELECTOR_SAVE_NAME_POINTERS_OFFSET + index * 4,
+            slot_va + name_offset,
+        )
+        struct.pack_into(
+            "<I", payload,
+            SAVE_SLOT_SELECTOR_TMP_NAME_POINTERS_OFFSET + index * 4,
+            SAVE_SLOT_SELECTOR_DEFAULT_TMP_NAME_VA,
+        )
+        slot_number = index + 1
+        payload[name_offset:name_offset + SAVE_SLOT_SELECTOR_LABEL_STRIDE] = (
+            f"C:SAVEDATA{slot_number:02d}.CDS".encode("ascii") + b"\0"
+        ).ljust(SAVE_SLOT_SELECTOR_LABEL_STRIDE, b"\0")
+    cancel_label_offset = (
+        SAVE_SLOT_SELECTOR_LABELS_OFFSET
+        + SAVE_SLOT_SELECTOR_SAVE_COUNT * SAVE_SLOT_SELECTOR_LABEL_STRIDE
+    )
+    payload[cancel_label_offset:cancel_label_offset + SAVE_SLOT_SELECTOR_LABEL_STRIDE] = (
+        "취소".encode("cp949") + b"\0"
+    ).ljust(SAVE_SLOT_SELECTOR_LABEL_STRIDE, b"\0")
+    date_format = "%d년 %d월 %d일".encode("cp949") + b"\0"
+    payload[
+        SAVE_SLOT_SELECTOR_DATE_FORMAT_OFFSET:
+        SAVE_SLOT_SELECTOR_DATE_FORMAT_OFFSET + len(date_format)
+    ] = date_format
+    return bytes(payload)
+
+
+def _save_slot_selector_hook_offset(data: bytes | bytearray) -> int:
+    """Return the file offset of the original save-handler entry point."""
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        return pe.get_offset_from_rva(
+            SAVE_SLOT_SELECTOR_HOOK_VA - pe.OPTIONAL_HEADER.ImageBase
+        )
+    finally:
+        pe.close()
+
+
+def _is_legacy_save_slot_selector_patch(
+    data: bytes | bytearray,
+    section=None,
+    hook_offset: int | None = None,
+) -> bool:
+    """Recognize earlier selector payloads so they can be upgraded."""
+    if section is None:
+        section = find_patch_section(data)
+    if section is None or section.raw_size < (
+        SAVE_SLOT_SELECTOR_SLOT_OFFSET + SAVE_SLOT_SELECTOR_SLOT_SIZE
+    ):
+        return False
+    magic = bytes(data[
+        section.raw_offset + SAVE_SLOT_SELECTOR_SLOT_OFFSET:
+        section.raw_offset + SAVE_SLOT_SELECTOR_SLOT_OFFSET + len(SAVE_SLOT_SELECTOR_LEGACY_MAGIC)
+    ])
+    if magic not in (
+        SAVE_SLOT_SELECTOR_LEGACY_MAGIC,
+        SAVE_SLOT_SELECTOR_PREVIOUS_MAGIC,
+    ):
+        return False
+    if hook_offset is None:
+        hook_offset = _save_slot_selector_hook_offset(data)
+    hook = bytes(data[hook_offset:hook_offset + len(SAVE_SLOT_SELECTOR_HOOK_ORIGINAL)])
+    if hook[:1] != b"\xE9":
+        return False
+    destination = SAVE_SLOT_SELECTOR_HOOK_VA + 5 + struct.unpack_from("<i", hook, 1)[0]
+    return destination == section.slot(
+        SAVE_SLOT_SELECTOR_SLOT_OFFSET, SAVE_SLOT_SELECTOR_SLOT_SIZE,
+    )[1] + SAVE_SLOT_SELECTOR_WRAPPER_OFFSET
+
+
+def _save_slot_selector_patch_info(data: bytes | bytearray) -> bool:
+    """Return whether the verified v3 save-only selector is installed."""
+    hook_offset = _save_slot_selector_hook_offset(data)
+    current_hook = bytes(data[hook_offset:hook_offset + len(SAVE_SLOT_SELECTOR_HOOK_ORIGINAL)])
+    section = find_patch_section(data)
+    if _is_legacy_save_slot_selector_patch(data, section, hook_offset):
+        return False
+    if current_hook == SAVE_SLOT_SELECTOR_HOOK_ORIGINAL:
+        if section is not None and section.raw_size >= (
+            SAVE_SLOT_SELECTOR_SLOT_OFFSET + SAVE_SLOT_SELECTOR_SLOT_SIZE
+        ) and bytes(data[
+            section.raw_offset + SAVE_SLOT_SELECTOR_SLOT_OFFSET:
+            section.raw_offset + SAVE_SLOT_SELECTOR_SLOT_OFFSET + len(SAVE_SLOT_SELECTOR_MAGIC)
+        ]) == SAVE_SLOT_SELECTOR_MAGIC:
+            raise ValueError("저장 슬롯 선택 코드가 남아 있지만 저장 분기부가 원본 상태입니다.")
+        return False
+    if section is None or section.raw_size < (
+        SAVE_SLOT_SELECTOR_SLOT_OFFSET + SAVE_SLOT_SELECTOR_SLOT_SIZE
+    ) or section.virtual_size < (
+        SAVE_SLOT_SELECTOR_SLOT_OFFSET + SAVE_SLOT_SELECTOR_SLOT_SIZE
+    ):
+        raise ValueError("저장 슬롯 선택 분기가 있으나 .patch 데이터를 찾지 못했습니다.")
+    slot_offset, slot_va = section.slot(
+        SAVE_SLOT_SELECTOR_SLOT_OFFSET, SAVE_SLOT_SELECTOR_SLOT_SIZE,
+    )
+    expected_payload = _build_save_slot_selector_payload(slot_va)
+    if (
+        current_hook != _save_slot_selector_hook(
+            slot_va + SAVE_SLOT_SELECTOR_WRAPPER_OFFSET,
+        )
+        or bytes(data[slot_offset:slot_offset + SAVE_SLOT_SELECTOR_SLOT_SIZE])
+        != expected_payload
+    ):
+        raise ValueError("저장 슬롯 선택 패치 상태를 검증하지 못했습니다.")
+    return True
+
+
+def apply_save_slot_selector_patch(data: bytearray, enabled: bool) -> bool:
+    """Install or remove the native ten-slot save destination selector."""
+    hook_offset = _save_slot_selector_hook_offset(data)
+    section = find_patch_section(data)
+    if _is_legacy_save_slot_selector_patch(data, section, hook_offset):
+        assert section is not None
+        data[hook_offset:hook_offset + len(SAVE_SLOT_SELECTOR_HOOK_ORIGINAL)] = (
+            SAVE_SLOT_SELECTOR_HOOK_ORIGINAL
+        )
+        clear_slot(
+            data, section, SAVE_SLOT_SELECTOR_SLOT_OFFSET, SAVE_SLOT_SELECTOR_SLOT_SIZE,
+        )
+        if not read_load_slot_selector_patch_state(data):
+            characteristics = struct.unpack_from("<I", data, section.header_offset + 36)[0]
+            struct.pack_into("<I", data, section.header_offset + 36, characteristics & ~0x80000000)
+        if not enabled:
+            return True
+    current_enabled = _save_slot_selector_patch_info(data)
+    if current_enabled == enabled:
+        return False
+    if enabled:
+        section, _created = ensure_patch_section(
+            data, PATCH_SECTION_SAVE_SLOT_SELECTOR_SIZE,
+        )
+        slot_offset, slot_va = section.slot(
+            SAVE_SLOT_SELECTOR_SLOT_OFFSET, SAVE_SLOT_SELECTOR_SLOT_SIZE,
+        )
+        payload = _build_save_slot_selector_payload(slot_va)
+        existing = bytes(data[slot_offset:slot_offset + SAVE_SLOT_SELECTOR_SLOT_SIZE])
+        if any(existing) and existing != payload:
+            raise ValueError("저장 슬롯 선택용 .patch 슬롯이 다른 데이터로 사용 중입니다.")
+        # This payload refreshes the date labels at runtime.
+        characteristics = struct.unpack_from("<I", data, section.header_offset + 36)[0]
+        struct.pack_into("<I", data, section.header_offset + 36, characteristics | 0x80000000)
+        data[slot_offset:slot_offset + SAVE_SLOT_SELECTOR_SLOT_SIZE] = payload
+        data[hook_offset:hook_offset + len(SAVE_SLOT_SELECTOR_HOOK_ORIGINAL)] = (
+            _save_slot_selector_hook(slot_va + SAVE_SLOT_SELECTOR_WRAPPER_OFFSET)
+        )
+    else:
+        section = find_patch_section(data)
+        if section is None:
+            raise ValueError("저장 슬롯 선택의 복원 데이터를 찾지 못했습니다.")
+        data[hook_offset:hook_offset + len(SAVE_SLOT_SELECTOR_HOOK_ORIGINAL)] = (
+            SAVE_SLOT_SELECTOR_HOOK_ORIGINAL
+        )
+        clear_slot(
+            data, section, SAVE_SLOT_SELECTOR_SLOT_OFFSET, SAVE_SLOT_SELECTOR_SLOT_SIZE,
+        )
+        if not read_load_slot_selector_patch_state(data):
+            characteristics = struct.unpack_from("<I", data, section.header_offset + 36)[0]
+            struct.pack_into("<I", data, section.header_offset + 36, characteristics & ~0x80000000)
+    return True
+
+
+def read_save_slot_selector_patch_state(data: bytes | bytearray) -> bool:
+    """Public state reader for the GUI's ten-slot save checkbox."""
+    return _save_slot_selector_patch_info(data) or _is_legacy_save_slot_selector_patch(data)
+
+
+def _load_slot_selector_hook(wrapper_va: int) -> bytes:
+    """Return a six-byte entry hook which preserves the original prologue size."""
+    return b"\xE9" + struct.pack(
+        "<i", wrapper_va - (LOAD_SLOT_SELECTOR_HOOK_VA + 5),
+    ) + b"\x90"
+
+
+def _load_slot_selector_command_hook(wrapper_va: int) -> bytes:
+    """Return the five-byte main-menu load-command redirection."""
+    return b"\xE9" + struct.pack(
+        "<i", wrapper_va - (LOAD_SLOT_SELECTOR_COMMAND_HOOK_VA + 5),
+    )
+
+
+def _load_slot_selector_title_hook(wrapper_va: int) -> bytes:
+    """Return the title-screen load-command redirection."""
+    return b"\xE9" + struct.pack(
+        "<i", wrapper_va - (LOAD_SLOT_SELECTOR_TITLE_HOOK_VA + 5),
+    )
+
+
+def _load_slot_selector_session_file_hook(wrapper_va: int) -> bytes:
+    """Return the title-session file initializer redirection."""
+    return b"\xE9" + struct.pack(
+        "<i", wrapper_va - (LOAD_SLOT_SELECTOR_SESSION_FILE_HOOK_VA + 5),
+    )
+
+
+def _load_slot_selector_hook_offset(data: bytes | bytearray) -> int:
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        return pe.get_offset_from_rva(
+            LOAD_SLOT_SELECTOR_HOOK_VA - pe.OPTIONAL_HEADER.ImageBase,
+        )
+    finally:
+        pe.close()
+
+
+def _load_slot_selector_command_hook_offset(data: bytes | bytearray) -> int:
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        return pe.get_offset_from_rva(
+            LOAD_SLOT_SELECTOR_COMMAND_HOOK_VA - pe.OPTIONAL_HEADER.ImageBase,
+        )
+    finally:
+        pe.close()
+
+
+def _load_slot_selector_title_hook_offset(data: bytes | bytearray) -> int:
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        return pe.get_offset_from_rva(
+            LOAD_SLOT_SELECTOR_TITLE_HOOK_VA - pe.OPTIONAL_HEADER.ImageBase,
+        )
+    finally:
+        pe.close()
+
+
+def _load_slot_selector_session_file_hook_offset(data: bytes | bytearray) -> int:
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        return pe.get_offset_from_rva(
+            LOAD_SLOT_SELECTOR_SESSION_FILE_HOOK_VA - pe.OPTIONAL_HEADER.ImageBase,
+        )
+    finally:
+        pe.close()
+
+
+def _build_load_slot_selector_command_wrapper(slot_va: int) -> bytes:
+    """Open the selector directly from the in-game load command.
+
+    The original command prepares the load only after its confirmation.
+    Select first for the same cancellation behavior; a cancelled selection
+    simply returns to the active in-game menu without changing UI state.
+    """
+    wrapper_va = slot_va + LOAD_SLOT_SELECTOR_COMMAND_WRAPPER_OFFSET
+    wrapper = bytearray(bytes.fromhex(
+        "E8 00 00 00 00 "  # selector
+        "85 C0 74 1B "     # cancellation: return to the active menu
+        "E8 00 00 00 00 "  # prepare save-directory path
+        "E8 00 00 00 00 "  # original loader
+        "80 0D 18 4D 5A 00 10 "
+        "B9 18 4D 5A 00 "
+        "E9 00 00 00 00 "
+        "C3"
+    ))
+    for offset, target in (
+        (0x00, slot_va + LOAD_SLOT_SELECTOR_WRAPPER_OFFSET),
+        (0x09, 0x478550),
+        (0x0E, LOAD_SLOT_SELECTOR_HOOK_VA),
+        (0x1F, LOAD_SLOT_SELECTOR_COMMAND_CONTINUATION_VA),
+    ):
+        struct.pack_into("<i", wrapper, offset + 1, target - (wrapper_va + offset + 5))
+    return bytes(wrapper)
+
+
+def _build_load_slot_selector_confirmation_wrapper(slot_va: int) -> bytes:
+    """Confirm a selected load slot and return to its menu on ``No``.
+
+    The selected row is kept in dedicated .patch data before this function is
+    entered.  It never returns: ``Yes`` stores the selected path and resumes
+    the ordinary file check; ``No`` returns to the selector.
+    """
+    wrapper_va = slot_va + LOAD_SLOT_SELECTOR_CONFIRM_WRAPPER_OFFSET
+    wrapper = bytearray(bytes.fromhex(
+        "68 11 11 11 11 "  # original \"load data?\" prompt
+        "6A 02 E8 00 00 00 00 83 C4 08 83 F8 02 75 18 "
+        "8B 15 11 11 11 11 8B 14 95 22 22 22 22 "
+        "89 15 78 87 56 00 E9 00 00 00 00 "
+        "E9 00 00 00 00"
+    ))
+    for offset, target in (
+        (0x07, SAVE_SLOT_SELECTOR_CONFIRM_ROUTINE_VA),
+        (0x27, slot_va + LOAD_SLOT_SELECTOR_WRAPPER_OFFSET + 0xDE),
+        (0x2C, slot_va + LOAD_SLOT_SELECTOR_WRAPPER_OFFSET + 0xBB),
+    ):
+        struct.pack_into("<i", wrapper, offset + 1, target - (wrapper_va + offset + 5))
+    struct.pack_into("<I", wrapper, 1, LOAD_SLOT_SELECTOR_CONFIRM_PROMPT_VA)
+    struct.pack_into(
+        "<I", wrapper, 0x16,
+        slot_va + LOAD_SLOT_SELECTOR_SELECTED_INDEX_OFFSET,
+    )
+    struct.pack_into(
+        "<I", wrapper, 0x1D,
+        slot_va + LOAD_SLOT_SELECTOR_SAVE_NAME_POINTERS_OFFSET,
+    )
+    return bytes(wrapper)
+
+
+def _build_load_slot_selector_confirmation_trampoline(slot_va: int) -> bytes:
+    """Persist the selected row before the game replaces its dialog stack."""
+    trampoline_va = slot_va + LOAD_SLOT_SELECTOR_CONFIRM_TRAMPOLINE_OFFSET
+    wrapper_va = slot_va + LOAD_SLOT_SELECTOR_WRAPPER_OFFSET
+    trampoline = bytearray(bytes.fromhex("A3 11 11 11 11 E9 00 00 00 00"))
+    struct.pack_into("<I", trampoline, 1, slot_va + LOAD_SLOT_SELECTOR_SELECTED_INDEX_OFFSET)
+    struct.pack_into(
+        "<i", trampoline, 6,
+        (slot_va + LOAD_SLOT_SELECTOR_CONFIRM_WRAPPER_OFFSET) - (trampoline_va + 10),
+    )
+    return bytes(trampoline)
+
+
+def _build_load_slot_selector_title_wrapper(slot_va: int) -> bytes:
+    """Prepare title state, select a slot, then run its native loader call."""
+    wrapper_va = slot_va + LOAD_SLOT_SELECTOR_TITLE_WRAPPER_OFFSET
+    wrapper = bytearray(bytes.fromhex(
+        "E8 00 00 00 00 "  # original title game-state preparation
+        "E8 00 00 00 00 "  # selector
+        "85 C0 "           # selected?
+        "0F 84 00 00 00 00 "  # no: original callback cancellation path
+        "E9 00 00 00 00"   # yes: native title loader call at 45ED40
+    ))
+    struct.pack_into(
+        "<i", wrapper, 1,
+        0x478550 - (wrapper_va + 5),
+    )
+    struct.pack_into(
+        "<i", wrapper, 6,
+        slot_va + LOAD_SLOT_SELECTOR_WRAPPER_OFFSET - (wrapper_va + 10),
+    )
+    struct.pack_into(
+        "<i", wrapper, 14,
+        LOAD_SLOT_SELECTOR_TITLE_CANCEL_VA - (wrapper_va + 18),
+    )
+    struct.pack_into(
+        "<i", wrapper, 19,
+        LOAD_SLOT_SELECTOR_TITLE_LOADER_VA - (wrapper_va + 23),
+    )
+    return bytes(wrapper)
+
+
+def _build_load_slot_selector_session_file_wrapper(slot_va: int) -> bytes:
+    """Open the selected save while retaining the game's shared temp file."""
+    wrapper_va = slot_va + LOAD_SLOT_SELECTOR_SESSION_FILE_WRAPPER_OFFSET
+    wrapper = bytearray(bytes.fromhex(
+        "FF 35 11 11 11 11 E8 00 00 00 00 83 C4 04 50 "
+        "E8 00 00 00 00 83 C4 04 "
+        "68 44 76 53 00 E8 00 00 00 00 83 C4 04 50 "
+        "E8 00 00 00 00 83 C4 04 E9 00 00 00 00"
+    ))
+    struct.pack_into("<I", wrapper, 2, SAVE_SLOT_SELECTOR_SAVE_NAME_POINTER_VA)
+    for offset, target in (
+        (0x06, LOAD_SLOT_SELECTOR_PATH_ROUTINE_VA),
+        (0x0F, 0x4B7B15),
+        (0x1C, LOAD_SLOT_SELECTOR_PATH_ROUTINE_VA),
+        (0x25, 0x4B7B15),
+        (0x2D, LOAD_SLOT_SELECTOR_SESSION_FILE_CONTINUATION_VA),
+    ):
+        struct.pack_into("<i", wrapper, offset + 1, target - (wrapper_va + offset + 5))
+    return bytes(wrapper)
+
+
+def _build_load_slot_selector_post_selection_wrapper(slot_va: int) -> bytes:
+    """Retain the game's temporary file after the selected path is installed."""
+    wrapper_va = slot_va + LOAD_SLOT_SELECTOR_POST_SELECTION_WRAPPER_OFFSET
+    wrapper = bytearray(bytes.fromhex(
+        "C7 05 7C 87 56 00 44 76 53 00 "
+        "E9 00 00 00 00"
+    ))
+    struct.pack_into(
+        "<i", wrapper, 0x0B,
+        (slot_va + LOAD_SLOT_SELECTOR_WRAPPER_OFFSET + 0x126) - (wrapper_va + 0x0F),
+    )
+    return bytes(wrapper)
+
+
+def _build_load_slot_selector_payload(slot_va: int) -> bytes:
+    """Build the load selector with read-only date and existence checks."""
+    wrapper_va = slot_va + LOAD_SLOT_SELECTOR_WRAPPER_OFFSET
+    wrapper = bytearray(bytes.fromhex(
+        "60 83 EC 20 31 F6 "
+        "89 F7 C1 E7 05 81 C7 11 11 11 11 C6 07 00 "
+        "8B 04 B5 22 22 22 22 50 E8 00 00 00 00 83 C4 04 "
+        "6A 00 68 80 00 00 00 6A 03 6A 00 6A 03 "
+        "68 00 00 00 80 50 FF 15 44 F4 62 00 "
+        "83 F8 FF 74 6F 89 C3 8D 0C 24 "
+        "6A 00 8D 44 24 20 50 6A 1B 51 53 FF 15 74 F4 62 00 "
+        "85 C0 0F 84 DE 00 00 00 53 FF 15 24 F4 62 00 "
+        "83 7C 24 1C 1B 75 43 "
+        "0F B7 44 24 15 3D 78 05 00 00 72 37 3D 6C 07 00 00 77 30 "
+        "0F B6 4C 24 19 83 F9 01 72 26 83 F9 0C 77 21 "
+        "0F B6 54 24 1A 83 FA 01 72 17 83 FA 1F 77 12 "
+        "52 51 50 68 33 33 33 33 57 FF 15 94 F5 62 00 83 C4 14 "
+        "46 83 FE 0A 0F 8C 4B FF FF FF "
+        "6A 00 6A 00 6A 01 6A 0B 68 44 44 44 44 E8 00 00 00 00 83 C4 14 "
+        "83 F8 0A 73 60 89 C5 8B 14 AD 22 22 22 22 52 "
+        "E8 00 00 00 00 83 C4 04 "
+        "6A 00 68 80 00 00 00 6A 03 6A 00 6A 03 "
+        "68 00 00 00 80 50 FF 15 44 F4 62 00 "
+        "83 F8 FF 74 B6 50 FF 15 24 F4 62 00 "
+        "8B 14 AD 22 22 22 22 89 15 78 87 56 00 "
+        "8B 14 AD 55 55 55 55 89 15 7C 87 56 00 "
+        "83 C4 20 61 81 EC 08 01 00 00 E9 00 00 00 00 "
+        "31 C0 83 C4 20 61 31 C0 C3 "
+        "53 FF 15 24 F4 62 00 E9 67 FF FF FF"
+    ))
+    for offset, target in (
+        (0x1C, LOAD_SLOT_SELECTOR_PATH_ROUTINE_VA),
+        (0xC8, LOAD_SLOT_SELECTOR_MENU_ROUTINE_VA),
+        (0xDF, LOAD_SLOT_SELECTOR_PATH_ROUTINE_VA),
+    ):
+        struct.pack_into("<i", wrapper, offset + 1, target - (wrapper_va + offset + 5))
+    for offset, value in (
+        (0x0D, slot_va + LOAD_SLOT_SELECTOR_LABELS_OFFSET),
+        (0x17, slot_va + LOAD_SLOT_SELECTOR_SAVE_NAME_POINTERS_OFFSET),
+        (0xA3, slot_va + LOAD_SLOT_SELECTOR_DATE_FORMAT_OFFSET),
+        (0xC4, slot_va + LOAD_SLOT_SELECTOR_MENU_ITEMS_OFFSET),
+        (0xDA, slot_va + LOAD_SLOT_SELECTOR_SAVE_NAME_POINTERS_OFFSET),
+        (0x10F, slot_va + LOAD_SLOT_SELECTOR_SAVE_NAME_POINTERS_OFFSET),
+        (0x11C, slot_va + LOAD_SLOT_SELECTOR_TMP_NAME_POINTERS_OFFSET),
+    ):
+        struct.pack_into("<I", wrapper, offset, value)
+    confirmation_wrapper_va = slot_va + LOAD_SLOT_SELECTOR_CONFIRM_WRAPPER_OFFSET
+    # The confirmation dialog clobbers both EBP and stack locals.  Save the
+    # row through a trampoline in .patch data, then enter that dialog wrapper.
+    trampoline_va = slot_va + LOAD_SLOT_SELECTOR_CONFIRM_TRAMPOLINE_OFFSET
+    wrapper[0xD5] = 0xE9
+    struct.pack_into(
+        "<i", wrapper, 0xD6,
+        trampoline_va - (wrapper_va + 0xDA),
+    )
+    post_selection_wrapper_va = slot_va + LOAD_SLOT_SELECTOR_POST_SELECTION_WRAPPER_OFFSET
+    wrapper[0x10C] = 0xE9
+    struct.pack_into(
+        "<i", wrapper, 0x10D,
+        post_selection_wrapper_va - (wrapper_va + 0x111),
+    )
+    # A chosen slot now returns success to its specific caller.  The title and
+    # in-game command wrappers then invoke the untouched original loader.
+    wrapper[0x126:0x135] = bytes.fromhex(
+        "83 C4 20 61 B8 01 00 00 00 C3 90 90 90 90 90"
+    )
+    if LOAD_SLOT_SELECTOR_WRAPPER_OFFSET + len(wrapper) > LOAD_SLOT_SELECTOR_SLOT_SIZE:
+        raise AssertionError("불러오기 슬롯 선택 래퍼가 예약 공간을 초과했습니다.")
+
+    payload = bytearray(LOAD_SLOT_SELECTOR_SLOT_SIZE)
+    payload[:len(LOAD_SLOT_SELECTOR_MAGIC)] = LOAD_SLOT_SELECTOR_MAGIC
+    struct.pack_into("<I", payload, len(LOAD_SLOT_SELECTOR_MAGIC), LOAD_SLOT_SELECTOR_VERSION)
+    payload[
+        LOAD_SLOT_SELECTOR_WRAPPER_OFFSET:
+        LOAD_SLOT_SELECTOR_WRAPPER_OFFSET + len(wrapper)
+    ] = wrapper
+    for index in range(LOAD_SLOT_SELECTOR_MENU_COUNT):
+        label_va = (
+            slot_va + LOAD_SLOT_SELECTOR_LABELS_OFFSET
+            + index * LOAD_SLOT_SELECTOR_LABEL_STRIDE
+        )
+        struct.pack_into(
+            "<III", payload,
+            LOAD_SLOT_SELECTOR_MENU_ITEMS_OFFSET + index * 12,
+            label_va, 1, 1,
+        )
+    for index in range(LOAD_SLOT_SELECTOR_SAVE_COUNT):
+        name_offset = (
+            LOAD_SLOT_SELECTOR_SAVE_NAMES_OFFSET
+            + index * LOAD_SLOT_SELECTOR_LABEL_STRIDE
+        )
+        tmp_offset = (
+            LOAD_SLOT_SELECTOR_TMP_NAMES_OFFSET
+            + index * LOAD_SLOT_SELECTOR_LABEL_STRIDE
+        )
+        struct.pack_into(
+            "<I", payload,
+            LOAD_SLOT_SELECTOR_SAVE_NAME_POINTERS_OFFSET + index * 4,
+            slot_va + name_offset,
+        )
+        struct.pack_into(
+            "<I", payload,
+            LOAD_SLOT_SELECTOR_TMP_NAME_POINTERS_OFFSET + index * 4,
+            slot_va + tmp_offset,
+        )
+        slot_number = index + 1
+        payload[name_offset:name_offset + LOAD_SLOT_SELECTOR_LABEL_STRIDE] = (
+            f"C:SAVEDATA{slot_number:02d}.CDS".encode("ascii") + b"\0"
+        ).ljust(LOAD_SLOT_SELECTOR_LABEL_STRIDE, b"\0")
+        payload[tmp_offset:tmp_offset + LOAD_SLOT_SELECTOR_LABEL_STRIDE] = (
+            f"C:SAVEDATA{slot_number:02d}.TMP".encode("ascii") + b"\0"
+        ).ljust(LOAD_SLOT_SELECTOR_LABEL_STRIDE, b"\0")
+    cancel_offset = (
+        LOAD_SLOT_SELECTOR_LABELS_OFFSET
+        + LOAD_SLOT_SELECTOR_SAVE_COUNT * LOAD_SLOT_SELECTOR_LABEL_STRIDE
+    )
+    payload[cancel_offset:cancel_offset + LOAD_SLOT_SELECTOR_LABEL_STRIDE] = (
+        "취소".encode("cp949") + b"\0"
+    ).ljust(LOAD_SLOT_SELECTOR_LABEL_STRIDE, b"\0")
+    date_format = "%d년 %d월 %d일".encode("cp949") + b"\0"
+    payload[
+        LOAD_SLOT_SELECTOR_DATE_FORMAT_OFFSET:
+        LOAD_SLOT_SELECTOR_DATE_FORMAT_OFFSET + len(date_format)
+    ] = date_format
+    command_wrapper = _build_load_slot_selector_command_wrapper(slot_va)
+    command_wrapper_offset = LOAD_SLOT_SELECTOR_COMMAND_WRAPPER_OFFSET
+    payload[
+        command_wrapper_offset:command_wrapper_offset + len(command_wrapper)
+    ] = command_wrapper
+    confirmation_wrapper = _build_load_slot_selector_confirmation_wrapper(slot_va)
+    confirmation_wrapper_offset = LOAD_SLOT_SELECTOR_CONFIRM_WRAPPER_OFFSET
+    payload[
+        confirmation_wrapper_offset:
+        confirmation_wrapper_offset + len(confirmation_wrapper)
+    ] = confirmation_wrapper
+    title_wrapper = _build_load_slot_selector_title_wrapper(slot_va)
+    title_wrapper_offset = LOAD_SLOT_SELECTOR_TITLE_WRAPPER_OFFSET
+    payload[title_wrapper_offset:title_wrapper_offset + len(title_wrapper)] = title_wrapper
+    session_file_wrapper = _build_load_slot_selector_session_file_wrapper(slot_va)
+    session_file_wrapper_offset = LOAD_SLOT_SELECTOR_SESSION_FILE_WRAPPER_OFFSET
+    payload[
+        session_file_wrapper_offset:
+        session_file_wrapper_offset + len(session_file_wrapper)
+    ] = session_file_wrapper
+    confirmation_trampoline = _build_load_slot_selector_confirmation_trampoline(slot_va)
+    payload[
+        LOAD_SLOT_SELECTOR_CONFIRM_TRAMPOLINE_OFFSET:
+        LOAD_SLOT_SELECTOR_CONFIRM_TRAMPOLINE_OFFSET + len(confirmation_trampoline)
+    ] = confirmation_trampoline
+    post_selection_wrapper = _build_load_slot_selector_post_selection_wrapper(slot_va)
+    post_selection_wrapper_offset = LOAD_SLOT_SELECTOR_POST_SELECTION_WRAPPER_OFFSET
+    payload[
+        post_selection_wrapper_offset:
+        post_selection_wrapper_offset + len(post_selection_wrapper)
+    ] = post_selection_wrapper
+    return bytes(payload)
+
+
+def _is_legacy_load_slot_selector_patch(data: bytes | bytearray) -> bool:
+    """Recognize v1 so an existing selector upgrades without manual removal."""
+    section = find_patch_section(data)
+    if section is None or section.raw_size < (
+        LOAD_SLOT_SELECTOR_SLOT_OFFSET + LOAD_SLOT_SELECTOR_SLOT_SIZE
+    ):
+        return False
+    hook_offset = _load_slot_selector_hook_offset(data)
+    command_hook_offset = _load_slot_selector_command_hook_offset(data)
+    title_hook_offset = _load_slot_selector_title_hook_offset(data)
+    session_file_hook_offset = _load_slot_selector_session_file_hook_offset(data)
+    hook = bytes(data[hook_offset:hook_offset + len(LOAD_SLOT_SELECTOR_HOOK_ORIGINAL)])
+    command_hook = bytes(data[
+        command_hook_offset:
+        command_hook_offset + len(LOAD_SLOT_SELECTOR_COMMAND_HOOK_ORIGINAL)
+    ])
+    title_hook = bytes(data[
+        title_hook_offset:
+        title_hook_offset + len(LOAD_SLOT_SELECTOR_TITLE_HOOK_ORIGINAL)
+    ])
+    session_file_hook = bytes(data[
+        session_file_hook_offset:
+        session_file_hook_offset + len(LOAD_SLOT_SELECTOR_SESSION_FILE_HOOK_ORIGINAL)
+    ])
+    magic_offset = section.raw_offset + LOAD_SLOT_SELECTOR_SLOT_OFFSET
+    magic = bytes(data[magic_offset:magic_offset + len(LOAD_SLOT_SELECTOR_MAGIC)])
+    version = struct.unpack_from("<I", data, magic_offset + len(LOAD_SLOT_SELECTOR_MAGIC))[0]
+    if (magic, version) in (
+        (LOAD_SLOT_SELECTOR_LEGACY_MAGIC, 1),
+        (LOAD_SLOT_SELECTOR_INTERMEDIATE_MAGIC, 2),
+        (LOAD_SLOT_SELECTOR_OLDER_MAGIC, 3),
+        (LOAD_SLOT_SELECTOR_PREVIOUS_MAGIC, 4),
+        (LOAD_SLOT_SELECTOR_LATEST_LEGACY_MAGIC, 5),
+        (LOAD_SLOT_SELECTOR_NEWEST_LEGACY_MAGIC, 6),
+        (LOAD_SLOT_SELECTOR_FINAL_LEGACY_MAGIC, 7),
+        (LOAD_SLOT_SELECTOR_SESSION_FILE_LEGACY_MAGIC, 8),
+        (LOAD_SLOT_SELECTOR_TITLE_CONTEXT_LEGACY_MAGIC, 9),
+        (LOAD_SLOT_SELECTOR_TITLE_ORDER_LEGACY_MAGIC, 10),
+        (LOAD_SLOT_SELECTOR_TITLE_CITY_ORDER_LEGACY_MAGIC, 11),
+        (LOAD_SLOT_SELECTOR_TEMP_SLOT_LEGACY_MAGIC, 12),
+        (LOAD_SLOT_SELECTOR_POST_SELECTION_LEGACY_MAGIC, 13),
+        (LOAD_SLOT_SELECTOR_TITLE_PREPARATION_ORDER_LEGACY_MAGIC, 14),
+        (LOAD_SLOT_SELECTOR_TITLE_SELECTOR_CALL_LEGACY_MAGIC, 15),
+        (LOAD_SLOT_SELECTOR_CONFIRM_STACK_INDEX_LEGACY_MAGIC, 16),
+        (LOAD_SLOT_SELECTOR_TITLE_LOADER_SKIP_LEGACY_MAGIC, 17),
+        (LOAD_SLOT_SELECTOR_DIALOG_REGISTER_LEGACY_MAGIC, 18),
+        (LOAD_SLOT_SELECTOR_DIALOG_STACK_LEGACY_MAGIC, 19),
+        (LOAD_SLOT_SELECTOR_COMMAND_PREPARATION_LEGACY_MAGIC, 20),
+    ):
+        return (
+            hook != LOAD_SLOT_SELECTOR_HOOK_ORIGINAL
+            or command_hook != LOAD_SLOT_SELECTOR_COMMAND_HOOK_ORIGINAL
+            or title_hook != LOAD_SLOT_SELECTOR_TITLE_HOOK_ORIGINAL
+            or session_file_hook != LOAD_SLOT_SELECTOR_SESSION_FILE_HOOK_ORIGINAL
+        )
+    return False
+
+
+def _load_slot_selector_patch_info(data: bytes | bytearray) -> bool:
+    hook_offset = _load_slot_selector_hook_offset(data)
+    command_hook_offset = _load_slot_selector_command_hook_offset(data)
+    title_hook_offset = _load_slot_selector_title_hook_offset(data)
+    session_file_hook_offset = _load_slot_selector_session_file_hook_offset(data)
+    hook = bytes(data[hook_offset:hook_offset + len(LOAD_SLOT_SELECTOR_HOOK_ORIGINAL)])
+    command_hook = bytes(data[
+        command_hook_offset:
+        command_hook_offset + len(LOAD_SLOT_SELECTOR_COMMAND_HOOK_ORIGINAL)
+    ])
+    title_hook = bytes(data[
+        title_hook_offset:
+        title_hook_offset + len(LOAD_SLOT_SELECTOR_TITLE_HOOK_ORIGINAL)
+    ])
+    session_file_hook = bytes(data[
+        session_file_hook_offset:
+        session_file_hook_offset + len(LOAD_SLOT_SELECTOR_SESSION_FILE_HOOK_ORIGINAL)
+    ])
+    section = find_patch_section(data)
+    if (
+        hook == LOAD_SLOT_SELECTOR_HOOK_ORIGINAL
+        and command_hook == LOAD_SLOT_SELECTOR_COMMAND_HOOK_ORIGINAL
+        and title_hook == LOAD_SLOT_SELECTOR_TITLE_HOOK_ORIGINAL
+        and session_file_hook == LOAD_SLOT_SELECTOR_SESSION_FILE_HOOK_ORIGINAL
+    ):
+        if section is not None and section.raw_size >= (
+            LOAD_SLOT_SELECTOR_SLOT_OFFSET + LOAD_SLOT_SELECTOR_SLOT_SIZE
+        ) and bytes(data[
+            section.raw_offset + LOAD_SLOT_SELECTOR_SLOT_OFFSET:
+            section.raw_offset + LOAD_SLOT_SELECTOR_SLOT_OFFSET + len(LOAD_SLOT_SELECTOR_MAGIC)
+        ]) == LOAD_SLOT_SELECTOR_MAGIC:
+            raise ValueError("불러오기 슬롯 선택 코드가 남아 있지만 진입 분기부가 원본 상태입니다.")
+        return False
+    if _is_legacy_load_slot_selector_patch(data):
+        return False
+    if section is None or section.raw_size < (
+        LOAD_SLOT_SELECTOR_SLOT_OFFSET + LOAD_SLOT_SELECTOR_SLOT_SIZE
+    ) or section.virtual_size < (
+        LOAD_SLOT_SELECTOR_SLOT_OFFSET + LOAD_SLOT_SELECTOR_SLOT_SIZE
+    ):
+        raise ValueError("불러오기 슬롯 선택 분기가 있으나 .patch 데이터를 찾지 못했습니다.")
+    slot_offset, slot_va = section.slot(
+        LOAD_SLOT_SELECTOR_SLOT_OFFSET, LOAD_SLOT_SELECTOR_SLOT_SIZE,
+    )
+    if (
+        hook != LOAD_SLOT_SELECTOR_HOOK_ORIGINAL
+        or command_hook != _load_slot_selector_command_hook(
+            slot_va + LOAD_SLOT_SELECTOR_COMMAND_WRAPPER_OFFSET,
+        )
+        or title_hook != _load_slot_selector_title_hook(
+            slot_va + LOAD_SLOT_SELECTOR_TITLE_WRAPPER_OFFSET,
+        )
+        or session_file_hook != _load_slot_selector_session_file_hook(
+            slot_va + LOAD_SLOT_SELECTOR_SESSION_FILE_WRAPPER_OFFSET,
+        )
+        or bytes(data[slot_offset:slot_offset + LOAD_SLOT_SELECTOR_SLOT_SIZE])
+        != _build_load_slot_selector_payload(slot_va)
+    ):
+        raise ValueError("불러오기 슬롯 선택 패치 상태를 검증하지 못했습니다.")
+    return True
+
+
+def apply_load_slot_selector_patch(data: bytearray, enabled: bool) -> bool:
+    """Install or remove the native ten-slot load selector."""
+    legacy_enabled = _is_legacy_load_slot_selector_patch(data)
+    current_enabled = _load_slot_selector_patch_info(data)
+    if current_enabled == enabled and not legacy_enabled:
+        return False
+    hook_offset = _load_slot_selector_hook_offset(data)
+    command_hook_offset = _load_slot_selector_command_hook_offset(data)
+    title_hook_offset = _load_slot_selector_title_hook_offset(data)
+    session_file_hook_offset = _load_slot_selector_session_file_hook_offset(data)
+    if current_enabled or legacy_enabled:
+        section = find_patch_section(data)
+        if section is None:
+            raise ValueError("불러오기 슬롯 선택의 복원 데이터를 찾지 못했습니다.")
+        data[hook_offset:hook_offset + len(LOAD_SLOT_SELECTOR_HOOK_ORIGINAL)] = (
+            LOAD_SLOT_SELECTOR_HOOK_ORIGINAL
+        )
+        data[
+            command_hook_offset:
+            command_hook_offset + len(LOAD_SLOT_SELECTOR_COMMAND_HOOK_ORIGINAL)
+        ] = LOAD_SLOT_SELECTOR_COMMAND_HOOK_ORIGINAL
+        data[
+            title_hook_offset:
+            title_hook_offset + len(LOAD_SLOT_SELECTOR_TITLE_HOOK_ORIGINAL)
+        ] = LOAD_SLOT_SELECTOR_TITLE_HOOK_ORIGINAL
+        data[
+            session_file_hook_offset:
+            session_file_hook_offset + len(LOAD_SLOT_SELECTOR_SESSION_FILE_HOOK_ORIGINAL)
+        ] = LOAD_SLOT_SELECTOR_SESSION_FILE_HOOK_ORIGINAL
+        clear_slot(
+            data, section, LOAD_SLOT_SELECTOR_SLOT_OFFSET, LOAD_SLOT_SELECTOR_SLOT_SIZE,
+        )
+        if not enabled:
+            if not read_save_slot_selector_patch_state(data):
+                characteristics = struct.unpack_from("<I", data, section.header_offset + 36)[0]
+                struct.pack_into("<I", data, section.header_offset + 36, characteristics & ~0x80000000)
+            return True
+    if enabled:
+        section, _created = ensure_patch_section(
+            data, PATCH_SECTION_LOAD_SLOT_SELECTOR_SIZE,
+        )
+        slot_offset, slot_va = section.slot(
+            LOAD_SLOT_SELECTOR_SLOT_OFFSET, LOAD_SLOT_SELECTOR_SLOT_SIZE,
+        )
+        payload = _build_load_slot_selector_payload(slot_va)
+        existing = bytes(data[slot_offset:slot_offset + LOAD_SLOT_SELECTOR_SLOT_SIZE])
+        if any(existing) and existing != payload:
+            raise ValueError("불러오기 슬롯 선택용 .patch 슬롯이 다른 데이터로 사용 중입니다.")
+        characteristics = struct.unpack_from("<I", data, section.header_offset + 36)[0]
+        struct.pack_into("<I", data, section.header_offset + 36, characteristics | 0x80000000)
+        data[slot_offset:slot_offset + LOAD_SLOT_SELECTOR_SLOT_SIZE] = payload
+        data[hook_offset:hook_offset + len(LOAD_SLOT_SELECTOR_HOOK_ORIGINAL)] = (
+            LOAD_SLOT_SELECTOR_HOOK_ORIGINAL
+        )
+        data[
+            command_hook_offset:
+            command_hook_offset + len(LOAD_SLOT_SELECTOR_COMMAND_HOOK_ORIGINAL)
+        ] = _load_slot_selector_command_hook(
+            slot_va + LOAD_SLOT_SELECTOR_COMMAND_WRAPPER_OFFSET,
+        )
+        data[
+            title_hook_offset:
+            title_hook_offset + len(LOAD_SLOT_SELECTOR_TITLE_HOOK_ORIGINAL)
+        ] = _load_slot_selector_title_hook(
+            slot_va + LOAD_SLOT_SELECTOR_TITLE_WRAPPER_OFFSET,
+        )
+        data[
+            session_file_hook_offset:
+            session_file_hook_offset + len(LOAD_SLOT_SELECTOR_SESSION_FILE_HOOK_ORIGINAL)
+        ] = _load_slot_selector_session_file_hook(
+            slot_va + LOAD_SLOT_SELECTOR_SESSION_FILE_WRAPPER_OFFSET,
+        )
+    else:
+        section = find_patch_section(data)
+        if section is None:
+            raise ValueError("불러오기 슬롯 선택의 복원 데이터를 찾지 못했습니다.")
+        data[hook_offset:hook_offset + len(LOAD_SLOT_SELECTOR_HOOK_ORIGINAL)] = (
+            LOAD_SLOT_SELECTOR_HOOK_ORIGINAL
+        )
+        data[
+            command_hook_offset:
+            command_hook_offset + len(LOAD_SLOT_SELECTOR_COMMAND_HOOK_ORIGINAL)
+        ] = LOAD_SLOT_SELECTOR_COMMAND_HOOK_ORIGINAL
+        data[
+            title_hook_offset:
+            title_hook_offset + len(LOAD_SLOT_SELECTOR_TITLE_HOOK_ORIGINAL)
+        ] = LOAD_SLOT_SELECTOR_TITLE_HOOK_ORIGINAL
+        data[
+            session_file_hook_offset:
+            session_file_hook_offset + len(LOAD_SLOT_SELECTOR_SESSION_FILE_HOOK_ORIGINAL)
+        ] = LOAD_SLOT_SELECTOR_SESSION_FILE_HOOK_ORIGINAL
+        clear_slot(
+            data, section, LOAD_SLOT_SELECTOR_SLOT_OFFSET, LOAD_SLOT_SELECTOR_SLOT_SIZE,
+        )
+        if not read_save_slot_selector_patch_state(data):
+            characteristics = struct.unpack_from("<I", data, section.header_offset + 36)[0]
+            struct.pack_into("<I", data, section.header_offset + 36, characteristics & ~0x80000000)
+    return True
+
+
+def read_load_slot_selector_patch_state(data: bytes | bytearray) -> bool:
+    """Public state reader for the GUI's unified slot save/load checkbox."""
+    return _load_slot_selector_patch_info(data) or _is_legacy_load_slot_selector_patch(data)
 
 
 def _build_ship_reuse_fix_payload(slot_va: int) -> bytes:
@@ -5785,6 +6791,8 @@ def read_settings(
             _disev_language_fix_patch_info(data),
             _history_elapsed_years_fix_patch_info(data),
             read_discover_avi_patch_state(data),
+            read_save_slot_selector_patch_state(data),
+            read_load_slot_selector_patch_state(data),
         )
     finally:
         pe.close()
@@ -5843,6 +6851,8 @@ def apply_all(
     disev_language_fix_enabled: bool = False,
     history_elapsed_years_fix_enabled: bool = False,
     discover_avi_enabled: bool = False,
+    save_slot_selector_enabled: bool = False,
+    load_slot_selector_enabled: bool = False,
     figurehead_effect_settings: FigureheadEffectSettings = DEFAULT_FIGUREHEAD_EFFECT_SETTINGS,
     barmaid_edit: BarmaidEdit | None = None,
     sponsor_edit: SponsorEdit | None = None,
@@ -5870,6 +6880,8 @@ def apply_all(
     tavern_hint_bug_fix_was_enabled = read_tavern_hint_bug_fix_state(original)
     history_elapsed_years_fix_was_enabled = _history_elapsed_years_fix_patch_info(original)
     discover_avi_was_enabled = read_discover_avi_patch_state(original)
+    save_slot_selector_was_enabled = read_save_slot_selector_patch_state(original)
+    load_slot_selector_was_enabled = read_load_slot_selector_patch_state(original)
     # Coordinate-style restoration may clear extensions after its own payload.
     # Temporarily remove relocatable patches, apply the requested coordinate
     # style, then recreate all selected payloads in their reserved slots.
@@ -5889,6 +6901,10 @@ def apply_all(
         apply_tavern_hint_bug_fix(before_coordinate, False)
     if history_elapsed_years_fix_was_enabled:
         apply_history_elapsed_years_fix(before_coordinate, False)
+    if save_slot_selector_was_enabled:
+        apply_save_slot_selector_patch(before_coordinate, False)
+    if load_slot_selector_was_enabled:
+        apply_load_slot_selector_patch(before_coordinate, False)
     if _eclipse_patch_info(bytes(before_coordinate))[0]:
         apply_eclipse_polar_caps(before_coordinate, False)
     if _npc_daily_departure_patch_info(before_coordinate):
@@ -5951,6 +6967,10 @@ def apply_all(
         apply_tavern_hint_bug_fix(updated, tavern_hint_bug_fix_enabled)
     if discover_avi_enabled or discover_avi_was_enabled:
         apply_discover_avi_patch(updated, discover_avi_enabled)
+    if save_slot_selector_enabled or save_slot_selector_was_enabled:
+        apply_save_slot_selector_patch(updated, save_slot_selector_enabled)
+    if load_slot_selector_enabled or load_slot_selector_was_enabled:
+        apply_load_slot_selector_patch(updated, load_slot_selector_enabled)
     if bytes(updated) == original:
         return None
 

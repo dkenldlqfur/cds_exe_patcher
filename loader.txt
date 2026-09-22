@@ -1,0 +1,586 @@
+00478B50 sbb      al, 0x83
+00478B52 les      ecx, ptr [eax + edx*2]
+00478B55 call     0x4b7ac2
+00478B5A lea      eax, [esp + 0x1c]
+00478B5E add      esp, 4
+00478B61 push     eax
+00478B62 call     0x4b7da4
+00478B67 lea      ecx, [esp + 0x1c]
+00478B6B add      esp, 4
+00478B6E lea      ebx, [esi + eax + 5]
+00478B72 lea      edx, [esi + 4]
+00478B75 mov      eax, dword ptr [esi]
+00478B77 push     ecx
+00478B78 mov      dword ptr [esp + 0x18], eax
+00478B7C push     edx
+00478B7D call     0x4b7e0d
+00478B82 add      esp, 8
+00478B85 test     eax, eax
+00478B87 je       0x478bbb
+00478B89 push     0x572480
+00478B8E push     0x572478
+00478B93 push     0x402
+00478B98 call     0x49e3e0
+00478B9D add      esp, 0xc
+00478BA0 cmp      eax, 2
+00478BA3 je       0x478bbb
+00478BA5 push     esi
+00478BA6 call     0x4bd010
+00478BAB add      esp, 4
+00478BAE xor      eax, eax
+00478BB0 pop      ebp
+00478BB1 pop      edi
+00478BB2 pop      esi
+00478BB3 pop      ebx
+00478BB4 add      esp, 0x108
+00478BBA ret      
+00478BBB push     ebx
+00478BBC mov      ecx, 0x5a4d18
+00478BC1 mov      ebx, 0x5b5a28
+00478BC6 call     0x44ad70
+00478BCB push     eax
+00478BCC mov      ecx, 0x5b60a0
+00478BD1 call     0x47c380
+00478BD6 push     eax
+00478BD7 mov      ecx, ebx
+00478BD9 add      ebx, 0x33c
+00478BDF call     0x47d680
+00478BE4 cmp      ebx, 0x5b60a0
+00478BEA jb       0x478bd6
+00478BEC mov      ebx, 0x5859c0
+00478BF1 push     eax
+00478BF2 mov      ecx, ebx
+00478BF4 add      ebx, 0x10
+00478BF7 call     0x41b370
+00478BFC cmp      ebx, 0x585ea0
+00478C02 jb       0x478bf1
+00478C04 xor      ebx, ebx
+00478C06 push     eax
+00478C07 push     ebx
+00478C08 inc      ebx
+00478C09 call     0x429950
+00478C0E add      esp, 4
+00478C11 mov      ecx, eax
+00478C13 call     0x429af0
+00478C18 cmp      ebx, 0xe2
+00478C1E jl       0x478c06
+00478C20 push     eax
+00478C21 mov      ecx, 0x5aa2b8
+00478C26 mov      ebx, 0x5a4df8
+00478C2B call     0x4501e0
+00478C30 push     eax
+00478C31 mov      ecx, 0x5b3928
+00478C36 call     0x473980
+00478C3B push     eax
+00478C3C mov      ecx, ebx
+00478C3E add      ebx, 4
+00478C41 call     0x44c350
+00478C46 cmp      ebx, 0x5a4e18
+00478C4C jb       0x478c3b
+00478C4E mov      ebx, 0x5a4e18
+00478C53 push     eax
+00478C54 mov      ecx, ebx
+00478C56 add      ebx, 0x6c
+00478C59 call     0x44c420
+00478C5E cmp      ebx, 0x5aa278
+00478C64 jb       0x478c53
+00478C66 xor      ebx, ebx
+00478C68 push     eax
+00478C69 push     ebx
+00478C6A inc      ebx
+00478C6B call     0x4319d0
+00478C70 add      esp, 4
+00478C73 mov      ecx, eax
+00478C75 call     0x431cb0
+00478C7A cmp      ebx, 0x119
+00478C80 jl       0x478c68
+00478C82 mov      ebx, 0x5b3c60
+00478C87 push     eax
+00478C88 mov      ecx, ebx
+00478C8A add      ebx, 0x3c
+00478C8D call     0x479630
+00478C92 cmp      ebx, 0x5b5a24
+00478C98 jb       0x478c87
+00478C9A xor      ebx, ebx
+00478C9C push     eax
+00478C9D push     ebx
+00478C9E inc      ebx
+00478C9F call     0x4ad810
+00478CA4 add      esp, 4
+00478CA7 mov      ecx, eax
+00478CA9 call     0x4ad950
+00478CAE cmp      ebx, 0x51
+00478CB1 jl       0x478c9c
+00478CB3 mov      ebx, 0x61c158
+00478CB8 push     eax
+00478CB9 mov      ecx, ebx
+00478CBB add      ebx, 0x34
+00478CBE call     0x493b50
+00478CC3 cmp      ebx, 0x61d1cc
+00478CC9 jb       0x478cb8
+00478CCB mov      ebx, 0x5b0a08
+00478CD0 push     eax
+00478CD1 mov      ecx, ebx
+00478CD3 add      ebx, 8
+00478CD6 call     0x4731d0
+00478CDB cmp      ebx, 0x5b3928
+00478CE1 jb       0x478cd0
+00478CE3 mov      ebx, 0x581120
+00478CE8 push     eax
+00478CE9 mov      ecx, ebx
+00478CEB add      ebx, 0x48
+00478CEE call     0x414160
+00478CF3 cmp      ebx, 0x585968
+00478CF9 jb       0x478ce8
+00478CFB mov      ebx, 0x58bab0
+00478D00 push     eax
+00478D01 mov      ecx, ebx
+00478D03 add      ebx, 4
+00478D06 call     0x42e2c0
+00478D0B cmp      ebx, 0x58bbc8
+00478D11 jb       0x478d00
+00478D13 push     eax
+00478D14 mov      ecx, 0x61d1d0
+00478D19 mov      ebx, 0x58b4e0
+00478D1E call     0x493c70
+00478D23 push     eax
+00478D24 mov      ecx, ebx
+00478D26 add      ebx, 8
+00478D29 call     0x42cb80
+00478D2E cmp      ebx, 0x58bab0
+00478D34 jb       0x478d23
+00478D36 mov      ebx, 0x61e4c8
+00478D3B push     eax
+00478D3C mov      ecx, ebx
+00478D3E add      ebx, 0xa8
+00478D44 call     0x4aa9e0
+00478D49 cmp      ebx, 0x629898
+00478D4F jb       0x478d3b
+00478D51 push     eax
+00478D52 mov      ecx, 0x586168
+00478D57 mov      ebx, 0x5aa498
+00478D5C call     0x424df0
+00478D61 push     eax
+00478D62 mov      ecx, ebx
+00478D64 add      ebx, 2
+00478D67 call     0x465630
+00478D6C cmp      ebx, 0x5aa6d4
+00478D72 jb       0x478d61
+00478D74 push     eax
+00478D75 mov      ecx, 0x585f78
+00478D7A call     0x41cc60
+00478D7F push     eax
+00478D80 mov      ecx, 0x629898
+00478D85 call     0x4ab3b0
+00478D8A push     eax
+00478D8B mov      ecx, 0x5859b0
+00478D90 call     0x419ef0
+00478D95 push     eax
+00478D96 mov      ecx, 0x5aa298
+00478D9B call     0x44e110
+00478DA0 push     eax
+00478DA1 mov      ecx, 0x5aa278
+00478DA6 xor      ebp, ebp
+00478DA8 call     0x44e110
+00478DAD push     eax
+00478DAE mov      ecx, 0x5aa898
+00478DB3 call     0x468d50
+00478DB8 mov      ebx, eax
+00478DBA push     ebx
+00478DBB push     ebp
+00478DBC inc      ebp
+00478DBD call     0x47e470
+00478DC2 add      esp, 4
+00478DC5 mov      ecx, eax
+00478DC7 call     0x47e4c0
+00478DCC mov      ebx, eax
+00478DCE cmp      ebp, 0x10
+00478DD1 jl       0x478dba
+00478DD3 mov      ecx, 0x5b60a0
+00478DD8 mov      eax, dword ptr [0x5b60a0]
+00478DDD call     dword ptr [eax + 0x30]
+00478DE0 cmp      eax, -1
+00478DE3 je       0x478dee
+00478DE5 or       byte ptr [0x5a4d19], 1
+00478DEC jmp      0x478df7
+00478DEE and      word ptr [0x5a4d18], 0xfeff
+00478DF7 mov      ax, word ptr [0x5a4d1a]
+00478DFD mov      ecx, 0x61b2d0
+00478E02 and      ax, 2
+00478E06 cmp      ax, 1
+00478E0A sbb      eax, eax
+00478E0C inc      eax
+00478E0D push     eax
+00478E0E call     0x425b30
+00478E13 test     edi, edi
+00478E15 je       0x478e35
+00478E17 mov      eax, dword ptr [0x56877c]
+00478E1C push     eax
+00478E1D call     0x425220
+00478E22 add      esp, 4
+00478E25 push     eax
+00478E26 call     0x4b7b15
+00478E2B or       byte ptr [0x5a4d18], 0x80
+00478E32 add      esp, 4
+00478E35 sub      ebx, dword ptr [esp + 0x14]
+00478E39 cmp      ebx, esi
+00478E3B je       0x478e67
+00478E3D push     0x572510
+00478E42 push     0
+00478E44 push     0x800
+00478E49 call     0x49e3e0
+00478E4E add      esp, 0xc
+00478E51 push     esi
+00478E52 call     0x4bd010
+00478E57 add      esp, 4
+00478E5A xor      eax, eax
+00478E5C pop      ebp
+00478E5D pop      edi
+00478E5E pop      esi
+00478E5F pop      ebx
+00478E60 add      esp, 0x108
+00478E66 ret      
+00478E67 mov      eax, 1
+00478E6C pop      ebp
+00478E6D pop      edi
+00478E6E pop      esi
+00478E6F pop      ebx
+00478E70 add      esp, 0x108
+00478E76 ret      
+00478E77 int3     
+00478E78 int3     
+00478E79 int3     
+00478E7A int3     
+00478E7B int3     
+00478E7C int3     
+00478E7D int3     
+00478E7E int3     
+00478E7F int3     
+00478E80 sub      esp, 0x84
+00478E86 lea      eax, [esp + 4]
+00478E8A push     esi
+00478E8B push     edi
+00478E8C push     eax
+00478E8D call     0x478930
+00478E92 add      esp, 4
+00478E95 push     0x80000
+00478E9A call     0x4bd020
+00478E9F add      esp, 4
+00478EA2 mov      esi, eax
+00478EA4 lea      eax, [esp + 0xc]
+00478EA8 push     eax
+00478EA9 call     0x4b7da4
+00478EAE add      esp, 4
+00478EB1 lea      edi, [esi + eax + 5]
+00478EB5 mov      ecx, 0x5859b0
+00478EBA call     0x41a260
+00478EBF push     edi
+00478EC0 mov      ecx, 0x5a4d18
+00478EC5 mov      edi, 0x5b5a28
+00478ECA call     0x44ae60
+00478ECF push     eax
+00478ED0 mov      ecx, 0x5b60a0
+00478ED5 call     0x47c680
+00478EDA push     eax
+00478EDB mov      ecx, edi
+00478EDD add      edi, 0x33c
+00478EE3 call     0x47d6c0
+00478EE8 cmp      edi, 0x5b60a0
+00478EEE jb       0x478eda
+00478EF0 mov      edi, 0x5859c0
+00478EF5 push     eax
+00478EF6 mov      ecx, edi
+00478EF8 add      edi, 0x10
+00478EFB call     0x41b3d0
+00478F00 cmp      edi, 0x585ea0
+00478F06 jb       0x478ef5
+00478F08 xor      edi, edi
+00478F0A push     eax
+00478F0B push     edi
+00478F0C inc      edi
+00478F0D call     0x429950
+00478F12 add      esp, 4
+00478F15 mov      ecx, eax
+00478F17 call     0x429c10
+00478F1C cmp      edi, 0xe2
+00478F22 jl       0x478f0a
+00478F24 push     eax
+00478F25 mov      ecx, 0x5aa2b8
+00478F2A mov      edi, 0x5a4df8
+00478F2F call     0x4501f0
+00478F34 push     eax
+00478F35 mov      ecx, 0x5b3928
+00478F3A call     0x473b20
+00478F3F push     eax
+00478F40 mov      ecx, edi
+00478F42 add      edi, 4
+00478F45 call     0x44c370
+00478F4A cmp      edi, 0x5a4e18
+00478F50 jb       0x478f3f
+00478F52 mov      edi, 0x5a4e18
+00478F57 push     eax
+00478F58 mov      ecx, edi
+00478F5A add      edi, 0x6c
+00478F5D call     0x44c560
+00478F62 cmp      edi, 0x5aa278
+00478F68 jb       0x478f57
+00478F6A xor      edi, edi
+00478F6C push     eax
+00478F6D push     edi
+00478F6E inc      edi
+00478F6F call     0x4319d0
+00478F74 add      esp, 4
+00478F77 mov      ecx, eax
+00478F79 call     0x431e90
+00478F7E cmp      edi, 0x119
+00478F84 jl       0x478f6c
+00478F86 mov      edi, 0x5b3c60
+00478F8B push     eax
+00478F8C mov      ecx, edi
+00478F8E add      edi, 0x3c
+00478F91 call     0x4796b0
+00478F96 cmp      edi, 0x5b5a24
+00478F9C jb       0x478f8b
+00478F9E xor      edi, edi
+00478FA0 push     eax
+00478FA1 push     edi
+00478FA2 inc      edi
+00478FA3 call     0x4ad810
+00478FA8 add      esp, 4
+00478FAB mov      ecx, eax
+00478FAD call     0x4ad9d0
+00478FB2 cmp      edi, 0x51
+00478FB5 jl       0x478fa0
+00478FB7 mov      edi, 0x61c158
+00478FBC push     eax
+00478FBD mov      ecx, edi
+00478FBF add      edi, 0x34
+00478FC2 call     0x493b90
+00478FC7 cmp      edi, 0x61d1cc
+00478FCD jb       0x478fbc
+00478FCF mov      edi, 0x5b0a08
+00478FD4 push     eax
+00478FD5 mov      ecx, edi
+00478FD7 add      edi, 8
+00478FDA call     0x473200
+00478FDF cmp      edi, 0x5b3928
+00478FE5 jb       0x478fd4
+00478FE7 mov      edi, 0x581120
+00478FEC push     eax
+00478FED mov      ecx, edi
+00478FEF add      edi, 0x48
+00478FF2 call     0x4141d0
+00478FF7 cmp      edi, 0x585968
+00478FFD jb       0x478fec
+00478FFF mov      edi, 0x58bab0
+00479004 push     eax
+00479005 mov      ecx, edi
+00479007 add      edi, 4
+0047900A call     0x42e2e0
+0047900F cmp      edi, 0x58bbc8
+00479015 jb       0x479004
+00479017 push     eax
+00479018 mov      ecx, 0x61d1d0
+0047901D mov      edi, 0x58b4e0
+00479022 call     0x493cf0
+00479027 push     eax
+00479028 mov      ecx, edi
+0047902A add      edi, 8
+0047902D call     0x42cbb0
+00479032 cmp      edi, 0x58bab0
+00479038 jb       0x479027
+0047903A mov      edi, 0x61e4c8
+0047903F push     eax
+00479040 mov      ecx, edi
+00479042 add      edi, 0xa8
+00479048 call     0x4aaa60
+0047904D cmp      edi, 0x629898
+00479053 jb       0x47903f
+00479055 push     eax
+00479056 mov      ecx, 0x586168
+0047905B mov      edi, 0x5aa498
+00479060 call     0x424e20
+00479065 push     eax
+00479066 mov      ecx, edi
+00479068 add      edi, 2
+0047906B call     0x465650
+00479070 cmp      edi, 0x5aa6d4
+00479076 jb       0x479065
+00479078 push     eax
+00479079 mov      ecx, 0x585f78
+0047907E call     0x41cd20
+00479083 push     eax
+00479084 mov      ecx, 0x629898
+00479089 call     0x4ab3e0
+0047908E push     eax
+0047908F mov      ecx, 0x5859b0
+00479094 call     0x419f20
+00479099 push     eax
+0047909A mov      ecx, 0x5aa298
+0047909F call     0x44e170
+004790A4 push     eax
+004790A5 mov      ecx, 0x5aa278
+004790AA xor      edi, edi
+004790AC call     0x44e170
+004790B1 push     eax
+004790B2 mov      ecx, 0x5aa898
+004790B7 call     0x468d70
+004790BC push     eax
+004790BD push     edi
+004790BE inc      edi
+004790BF call     0x47e470
+004790C4 add      esp, 4
+004790C7 mov      ecx, eax
+004790C9 call     0x47e500
+004790CE cmp      edi, 0x10
+004790D1 jl       0x4790bc
+004790D3 sub      eax, esi
+004790D5 lea      ecx, [esp + 0xc]
+004790D9 mov      edi, eax
+004790DB push     ecx
+004790DC mov      dword ptr [esi], edi
+004790DE call     0x4b7da4
+004790E3 lea      edx, [esp + 0x10]
+004790E7 add      esp, 4
+004790EA inc      eax
+004790EB lea      ecx, [esi + 4]
+004790EE push     eax
+004790EF push     ecx
+004790F0 push     edx
+004790F1 call     0x4b7e47
+004790F6 mov      dword ptr [esp + 0x14], 0xffffffff
+004790FE add      esp, 0xc
+00479101 mov      ecx, dword ptr [0x568778]
+00479107 push     ecx
+00479108 call     0x425220
+0047910D add      esp, 4
+00479110 push     eax
+00479111 call     0x4b7b15
+00479116 add      esp, 4
+00479119 mov      ecx, dword ptr [0x56877c]
+0047911F push     ecx
+00479120 call     0x425220
+00479125 add      esp, 4
+00479128 push     eax
+00479129 call     0x4b7b15
+0047912E add      esp, 4
+00479131 test     esi, esi
+00479133 je       0x479193
+00479135 push     7
+00479137 mov      eax, dword ptr [0x568778]
+0047913C lea      ecx, [esp + 0xc]
+00479140 push     eax
+00479141 call     0x425280
+00479146 test     eax, eax
+00479148 je       0x479186
+0047914A mov      eax, dword ptr [esp + 8]
+0047914E push     edi
+0047914F push     esi
+00479150 push     eax
+00479151 call     0x4b7af3
+00479156 mov      eax, dword ptr [esp + 0x14]
+0047915A add      esp, 0xc
+0047915D push     eax
+0047915E call     0x4b7ac2
+00479163 add      esp, 4
+00479166 push     esi
+00479167 call     0x4bd010
+0047916C add      esp, 4
+0047916F mov      eax, 1
+00479174 and      word ptr [0x5a4d18], 0xff7f
+0047917D pop      edi
+0047917E pop      esi
+0047917F add      esp, 0x84
+00479185 ret      
+00479186 test     esi, esi
+00479188 je       0x479193
+0047918A push     esi
+0047918B call     0x4bd010
+00479190 add      esp, 4
+00479193 push     2
+00479195 mov      eax, dword ptr [0x568778]
+0047919A push     eax
+0047919B call     0x4281b0
+004791A0 add      esp, 8
+004791A3 push     eax
+004791A4 mov      eax, dword ptr [0x568778]
+004791A9 push     eax
+004791AA push     0x572570
+004791AF push     0
+004791B1 push     0x800
+004791B6 call     0x49e3e0
+004791BB add      esp, 0x14
+004791BE xor      eax, eax
+004791C0 pop      edi
+004791C1 pop      esi
+004791C2 add      esp, 0x84
+004791C8 ret      
+004791C9 int3     
+004791CA int3     
+004791CB int3     
+004791CC int3     
+004791CD int3     
+004791CE int3     
+004791CF int3     
+004791D0 sub      esp, 0x84
+004791D6 lea      eax, [esp + 4]
+004791DA push     esi
+004791DB push     edi
+004791DC push     eax
+004791DD call     0x478930
+004791E2 add      esp, 4
+004791E5 push     0x80000
+004791EA call     0x4bd020
+004791EF add      esp, 4
+004791F2 mov      esi, eax
+004791F4 lea      eax, [esp + 0xc]
+004791F8 push     eax
+004791F9 call     0x4b7da4
+004791FE add      esp, 4
+00479201 lea      eax, [esi + eax + 5]
+00479205 mov      ecx, 0x5a4d18
+0047920A mov      edi, 0x5b5a28
+0047920F push     eax
+00479210 call     0x44ae60
+00479215 push     eax
+00479216 mov      ecx, 0x5b60a0
+0047921B call     0x47c680
+00479220 push     eax
+00479221 mov      ecx, edi
+00479223 add      edi, 0x33c
+00479229 call     0x47d6c0
+0047922E cmp      edi, 0x5b60a0
+00479234 jb       0x479220
+00479236 mov      edi, 0x5859c0
+0047923B push     eax
+0047923C mov      ecx, edi
+0047923E add      edi, 0x10
+00479241 call     0x41b3d0
+00479246 cmp      edi, 0x585ea0
+0047924C jb       0x47923b
+0047924E xor      edi, edi
+00479250 push     eax
+00479251 push     edi
+00479252 inc      edi
+00479253 call     0x429950
+00479258 add      esp, 4
+0047925B mov      ecx, eax
+0047925D call     0x429c10
+00479262 cmp      edi, 0xe2
+00479268 jl       0x479250
+0047926A push     eax
+0047926B mov      ecx, 0x5aa2b8
+00479270 mov      edi, 0x5a4df8
+00479275 call     0x4501f0
+0047927A push     eax
+0047927B mov      ecx, 0x5b3928
+00479280 call     0x473b20
+00479285 push     eax
+00479286 mov      ecx, edi
+00479288 add      edi, 4
+0047928B call     0x44c370
+00479290 cmp      edi, 0x5a4e18
+00479296 jb       0x479285
+00479298 mov      edi, 0x5a4e18
+0047929D push     eax
+0047929E mov      ecx, edi
