@@ -1593,7 +1593,22 @@ MISTRANSLATION_SWORD_ORIGINAL_VA = 0x558880
 MISTRANSLATION_SWORD_ORIGINAL = "아이베는 안강"
 MISTRANSLATION_SWORD_INTEGRATED = "도지기리 안강"
 MISTRANSLATION_SWORD_CORRECTED = "도지기리 야스츠나"
+# The item master spells this item with a space, but the recruitment route
+# searches its displayed name verbatim.  The original query omits that space,
+# so it can never find the item.  The original field is one byte too small for
+# the correct CP949 string; store it in .patch and redirect the PUSH operand.
+# Operand of ``push 0x55AA08`` at VA 0x4536AC.
+MISTRANSLATION_DANGO_SEARCH_POINTER_OFFSET = 0x52AAD
+MISTRANSLATION_DANGO_SEARCH_ORIGINAL_VA = 0x55AA08
+MISTRANSLATION_DANGO_SEARCH_ORIGINAL = "수수경단"
+MISTRANSLATION_DANGO_SEARCH_CORRECTED = "수수 경단"
 MISTRANSLATION_MAGIC = b"CDSTRN1\0"
+MISTRANSLATION_SWORD_SLOT_OFFSET = len(MISTRANSLATION_MAGIC)
+MISTRANSLATION_DANGO_SEARCH_SLOT_OFFSET = (
+    MISTRANSLATION_SWORD_SLOT_OFFSET
+    + len(MISTRANSLATION_SWORD_CORRECTED.encode("cp949"))
+    + 1
+)
 
 # The failed-pottery market appearance is a coordinated patch.  The tavern
 # sentence, hint target, and fake-item sale city must agree or the hint can
@@ -1622,6 +1637,16 @@ CACAO_HINT_CITY_PATCHED = 204   # 미틀라
 
 def _translation_bytes(text: str) -> bytes:
     return text.encode("cp949")
+
+
+def _mistranslation_slot_payload() -> bytes:
+    return (
+        MISTRANSLATION_MAGIC
+        + _translation_bytes(MISTRANSLATION_SWORD_CORRECTED)
+        + b"\0"
+        + _translation_bytes(MISTRANSLATION_DANGO_SEARCH_CORRECTED)
+        + b"\0"
+    )
 
 
 def _validate_mistranslation_layout(data: bytes | bytearray) -> None:
@@ -1659,12 +1684,19 @@ def _validate_mistranslation_layout(data: bytes | bytearray) -> None:
 
     pointer = struct.unpack_from("<I", data, MISTRANSLATION_SWORD_POINTER_OFFSET)[0]
     allowed_pointers = {MISTRANSLATION_SWORD_ORIGINAL_VA}
+    dango_pointer = struct.unpack_from(
+        "<I", data, MISTRANSLATION_DANGO_SEARCH_POINTER_OFFSET,
+    )[0]
+    allowed_dango_pointers = {MISTRANSLATION_DANGO_SEARCH_ORIGINAL_VA}
     section = find_patch_section(data)
     if section is not None:
         _, slot_va = section.slot(MISTRANSLATION_SLOT_OFFSET, MISTRANSLATION_SLOT_SIZE)
-        allowed_pointers.add(slot_va + len(MISTRANSLATION_MAGIC))
+        allowed_pointers.add(slot_va + MISTRANSLATION_SWORD_SLOT_OFFSET)
+        allowed_dango_pointers.add(slot_va + MISTRANSLATION_DANGO_SEARCH_SLOT_OFFSET)
     if pointer not in allowed_pointers:
         raise ValueError("도지기리 야스츠나 이름 포인터를 검증하지 못했습니다.")
+    if dango_pointer not in allowed_dango_pointers:
+        raise ValueError("수수 경단 검색 문자열 포인터를 검증하지 못했습니다.")
 
 
 def read_mistranslation_patch_state(data: bytes) -> bool:
@@ -1688,9 +1720,12 @@ def read_mistranslation_patch_state(data: bytes) -> bool:
     if section is None:
         return False
     slot_offset, slot_va = section.slot(MISTRANSLATION_SLOT_OFFSET, MISTRANSLATION_SLOT_SIZE)
-    payload = MISTRANSLATION_MAGIC + _translation_bytes(MISTRANSLATION_SWORD_CORRECTED) + b"\0"
+    payload = _mistranslation_slot_payload()
     return (
-        pointer == slot_va + len(MISTRANSLATION_MAGIC)
+        pointer == slot_va + MISTRANSLATION_SWORD_SLOT_OFFSET
+        and struct.unpack_from(
+            "<I", data, MISTRANSLATION_DANGO_SEARCH_POINTER_OFFSET,
+        )[0] == slot_va + MISTRANSLATION_DANGO_SEARCH_SLOT_OFFSET
         and data[slot_offset:slot_offset + len(payload)] == payload
     )
 
@@ -1737,9 +1772,10 @@ def apply_mistranslation_fixes(data: bytearray, enabled: bool) -> bool:
 
     if enabled:
         section, created = ensure_patch_section(data)
-        payload = MISTRANSLATION_MAGIC + _translation_bytes(MISTRANSLATION_SWORD_CORRECTED) + b"\0"
+        payload = _mistranslation_slot_payload()
         slot_offset, slot_va = section.slot(MISTRANSLATION_SLOT_OFFSET, MISTRANSLATION_SLOT_SIZE)
-        target_pointer = slot_va + len(MISTRANSLATION_MAGIC)
+        target_pointer = slot_va + MISTRANSLATION_SWORD_SLOT_OFFSET
+        dango_target_pointer = slot_va + MISTRANSLATION_DANGO_SEARCH_SLOT_OFFSET
         if data[slot_offset:slot_offset + len(payload)] != payload:
             clear_slot(data, section, MISTRANSLATION_SLOT_OFFSET, MISTRANSLATION_SLOT_SIZE)
             write_slot(data, section, MISTRANSLATION_SLOT_OFFSET, MISTRANSLATION_SLOT_SIZE, payload)
@@ -1747,10 +1783,24 @@ def apply_mistranslation_fixes(data: bytearray, enabled: bool) -> bool:
         if struct.unpack_from("<I", data, MISTRANSLATION_SWORD_POINTER_OFFSET)[0] != target_pointer:
             struct.pack_into("<I", data, MISTRANSLATION_SWORD_POINTER_OFFSET, target_pointer)
             changed = True
+        if struct.unpack_from("<I", data, MISTRANSLATION_DANGO_SEARCH_POINTER_OFFSET)[0] != dango_target_pointer:
+            struct.pack_into(
+                "<I", data, MISTRANSLATION_DANGO_SEARCH_POINTER_OFFSET, dango_target_pointer,
+            )
+            changed = True
         return changed or created
 
     if struct.unpack_from("<I", data, MISTRANSLATION_SWORD_POINTER_OFFSET)[0] != MISTRANSLATION_SWORD_ORIGINAL_VA:
         struct.pack_into("<I", data, MISTRANSLATION_SWORD_POINTER_OFFSET, MISTRANSLATION_SWORD_ORIGINAL_VA)
+        changed = True
+    if (
+        struct.unpack_from("<I", data, MISTRANSLATION_DANGO_SEARCH_POINTER_OFFSET)[0]
+        != MISTRANSLATION_DANGO_SEARCH_ORIGINAL_VA
+    ):
+        struct.pack_into(
+            "<I", data, MISTRANSLATION_DANGO_SEARCH_POINTER_OFFSET,
+            MISTRANSLATION_DANGO_SEARCH_ORIGINAL_VA,
+        )
         changed = True
     section = find_patch_section(data)
     if section is not None:

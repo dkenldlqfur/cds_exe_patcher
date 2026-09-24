@@ -38,6 +38,7 @@ from sea_monster_patch import (
     apply as apply_sea_monster_patch,
     is_enabled as is_sea_monster_patch_enabled,
 )
+from save_slot_migration import SaveSlotMigrationError, migrate_legacy_savedata
 from geographic_discovery_still_patch import (
     GeographicDiscoveryStillPatchError,
     apply as apply_geographic_discovery_still_patch,
@@ -273,6 +274,7 @@ SAVE_SLOT_SELECTOR_DETAILS = """10개 슬롯 저장/불러오기
 - 이미 저장된 슬롯을 고르면 기존의 덮어쓰기 Yes/No 확인을 표시하며, 아니오를 누르면 슬롯 목록으로 돌아갑니다.
 - 비어 있는 슬롯은 확인 없이 바로 저장합니다.
 - 불러오기에서 빈 슬롯을 누르면 파일을 읽지 않고 목록으로 돌아갑니다.
+- 기능을 적용할 때 같은 폴더에 `SAVEDATA.CDS`가 있으면 첫 번째 빈 슬롯 파일로 이동합니다. 10개 슬롯이 모두 있으면 이동하지 않습니다.
 
 체크 해제 시 저장·불러오기 모두 원래 단일 `SAVEDATA.CDS` 방식으로 복원합니다.
 """
@@ -6547,10 +6549,15 @@ class CDSExecutablePatcher(tk.Tk):
                 discover_avi_event_backups = apply_discover_avi_event_patch(
                     target, self.discover_avi_enabled.get(), backed_up_paths,
                 )
+            migrated_savedata = (
+                migrate_legacy_savedata(target)
+                if self.save_slot_selector_enabled.get() else None
+            )
             self.cold_north_latitude.set(f"{cold_limit_to_latitude(cold_north_limit):.3f}")
             self.cold_south_latitude.set(f"{cold_limit_to_latitude(cold_south_limit):.3f}")
         except (
             ValueError, DiscoverAviAssetError, KaabaPatchError, KaabaSavePatchError,
+            SaveSlotMigrationError,
             SlavePatchError, MughalPatchError, SeaMonsterPatchError,
             GeographicDiscoveryStillPatchError, DiscoverAviEventPatchError,
         ) as exc:
@@ -6563,7 +6570,7 @@ class CDSExecutablePatcher(tk.Tk):
                 and not slave_library_backups and not slave_dialogue_backups and not mughal_backups
                 and not sea_monster_backups and not geographic_discovery_still_backups
                 and not discover_avi_event_backups
-                and not discover_avi_installed):
+                and not discover_avi_installed and migrated_savedata is None):
             self._show_centered_popup("완료", "선택한 설정이 이미 적용되어 있습니다.")
         else:
             backups = [
@@ -6576,6 +6583,8 @@ class CDSExecutablePatcher(tk.Tk):
             details = ["선택한 설정을 적용했습니다."]
             if discover_avi_installed:
                 details.append(f"발견물 AVI 복사: {len(discover_avi_installed)}개")
+            if migrated_savedata is not None:
+                details.append(f"기존 세이브 이동: SAVEDATA.CDS → {migrated_savedata.name}")
             if backup_text:
                 details.append(f"원본 백업:\n{backup_text}")
             self._show_centered_popup("완료", "\n\n".join(details))
