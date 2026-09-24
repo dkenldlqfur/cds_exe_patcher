@@ -81,6 +81,11 @@ from pe_patch_section import (
     PLAYER_FAME_LIMIT_SLOT_SIZE,
     SHIP_TYPE_NAME_SLOT_OFFSET,
     SHIP_TYPE_NAME_SLOT_STRIDE,
+    CANNON_MASTER_SLOT_OFFSET,
+    CANNON_MASTER_SLOT_SIZE,
+    CANNON_NAME_SLOT_OFFSET,
+    CANNON_NAME_SLOT_STRIDE,
+    PATCH_SECTION_CANNON_MASTER_SIZE,
     SHIP_REUSE_FIX_SLOT_OFFSET,
     SHIP_REUSE_FIX_SLOT_SIZE,
     SHIP_PURCHASE_BLANK_SELECTION_FIX_SLOT_OFFSET,
@@ -647,6 +652,26 @@ class ShipTypeEdit:
 
 
 @dataclass(frozen=True)
+class CannonRecord:
+    identifier: int
+    name: str
+    price: int
+    weight: int
+    range_value: int
+    attack_coefficient: int
+
+
+@dataclass(frozen=True)
+class CannonEdit:
+    identifier: int
+    name: str
+    price: int
+    weight: int
+    range_value: int
+    attack_coefficient: int
+
+
+@dataclass(frozen=True)
 class CityRecord:
     """Verified static city definition stored in the executable."""
 
@@ -1142,6 +1167,22 @@ SHIP_TYPE_MIN_CREW_DISPLAY_OFFSET = 10
 # characters / ten CP949 bytes.  Keep renamed types within that game UI width.
 SHIP_TYPE_NAME_MAX_CHARACTERS = 5
 SHIP_TYPE_NAME_MAX_BYTES = 10
+
+# The four shop records contain name pointer, per-gun price and weight.
+# Combat range and attack coefficients are encoded separately in two battle
+# routines; the optional .patch table gives each cannon an independent value.
+CANNON_TABLE_VA = 0x549DB0
+CANNON_RECORD_SIZE = 12
+CANNON_COUNT = 4
+CANNON_DEFAULT_RANGES = (3, 4, 3, 2)
+CANNON_DEFAULT_ATTACKS = (3, 4, 5, 8)
+CANNON_PRIMARY_BRANCH_VA = 0x436997
+CANNON_PRIMARY_BRANCH_END_VA = 0x4369E0
+CANNON_SECONDARY_BRANCH_VA = 0x43AF91
+CANNON_SECONDARY_BRANCH_END_VA = 0x43AFC3
+CANNON_PATCH_MAGIC = b"CDS3GUN\0"
+CANNON_NAME_MAX_CHARACTERS = 5
+CANNON_NAME_MAX_BYTES = 10
 CITY_TABLE_VA = 0x4D14B0
 CITY_RECORD_COUNT = 226
 CITY_RECORD_SIZE = 0x88
@@ -5405,6 +5446,160 @@ def apply_ship_type_edit(data: bytearray, edit: ShipTypeEdit | None) -> bool:
     return True
 
 
+_CANNON_ORIGINAL_PRIMARY = bytes.fromhex(
+    "8b 80 18 03 00 00 83 f8 01 75 0b b8 04 00 00 00 89 44 24 34 eb 2f "
+    "83 f8 03 75 12 c7 44 24 34 02 00 00 00 c7 44 24 38 08 00 00 00 "
+    "eb 1c 83 f8 ff 74 17 c7 44 24 34 03 00 00 00 83 f8 01 1b c0 "
+    "83 e0 fe 83 c0 05 89 44 24 38"
+)
+_CANNON_ORIGINAL_SECONDARY = bytes.fromhex(
+    "8b 84 86 18 03 00 00 83 f8 01 75 0a c7 44 24 24 04 00 00 00 "
+    "eb 1c 83 f8 03 75 0a c7 44 24 24 02 00 00 00 eb 0d 83 f8 ff "
+    "74 08 c7 44 24 24 03 00 00 00"
+)
+
+
+def _cannon_battle_branches(table_va: int) -> tuple[bytes, bytes]:
+    """Replace both range paths; the primary path also reads attack power."""
+    primary = (
+        bytes.fromhex("8b 80 18 03 00 00 83 f8 03 77 3e 8d 04 c5")
+        + struct.pack("<I", table_va)
+        + bytes.fromhex("8b 10 89 54 24 34 8b 40 04 89 44 24 38")
+    )
+    secondary = (
+        bytes.fromhex("8b 84 86 18 03 00 00 83 f8 03 77 26 8b 04 c5")
+        + struct.pack("<I", table_va)
+        + bytes.fromhex("89 44 24 24")
+    )
+    primary_size = CANNON_PRIMARY_BRANCH_END_VA - CANNON_PRIMARY_BRANCH_VA
+    secondary_size = CANNON_SECONDARY_BRANCH_END_VA - CANNON_SECONDARY_BRANCH_VA
+    if len(primary) > primary_size or len(secondary) > secondary_size:
+        raise AssertionError("대포 전투 분기 패치 영역이 부족합니다.")
+    return primary.ljust(primary_size, b"\x90"), secondary.ljust(secondary_size, b"\x90")
+
+
+def _read_cannon_records_from_data(data: bytes) -> tuple[CannonRecord, ...]:
+    pe = pefile.PE(data=data, fast_load=True)
+    try:
+        if pe.FILE_HEADER.Machine != 0x14C or pe.OPTIONAL_HEADER.ImageBase != 0x400000:
+            raise ValueError("지원하는 32비트 CDS III 실행 파일이 아닙니다.")
+        base = pe.OPTIONAL_HEADER.ImageBase
+        table_offset = pe.get_offset_from_rva(CANNON_TABLE_VA - base)
+        primary_offset = pe.get_offset_from_rva(CANNON_PRIMARY_BRANCH_VA - base)
+        secondary_offset = pe.get_offset_from_rva(CANNON_SECONDARY_BRANCH_VA - base)
+        primary = data[primary_offset:primary_offset + len(_CANNON_ORIGINAL_PRIMARY)]
+        secondary = data[secondary_offset:secondary_offset + len(_CANNON_ORIGINAL_SECONDARY)]
+        section = find_patch_section(data)
+        ranges = CANNON_DEFAULT_RANGES
+        attacks = CANNON_DEFAULT_ATTACKS
+        if primary != _CANNON_ORIGINAL_PRIMARY or secondary != _CANNON_ORIGINAL_SECONDARY:
+            if section is None or section.raw_size < PATCH_SECTION_CANNON_MASTER_SIZE:
+                raise ValueError("대포 전투 코드의 형식을 확인하지 못했습니다.")
+            slot_offset, slot_va = section.slot(CANNON_MASTER_SLOT_OFFSET, CANNON_MASTER_SLOT_SIZE)
+            expected_primary, expected_secondary = _cannon_battle_branches(slot_va + len(CANNON_PATCH_MAGIC))
+            if (primary != expected_primary or secondary != expected_secondary
+                    or data[slot_offset:slot_offset + len(CANNON_PATCH_MAGIC)] != CANNON_PATCH_MAGIC):
+                raise ValueError("대포 전투 코드가 다른 방식으로 수정되어 있습니다.")
+            values = struct.unpack_from("<8I", data, slot_offset + len(CANNON_PATCH_MAGIC))
+            ranges, attacks = values[0::2], values[1::2]
+        records = []
+        for identifier in range(CANNON_COUNT):
+            offset = table_offset + identifier * CANNON_RECORD_SIZE
+            if offset + CANNON_RECORD_SIZE > len(data):
+                raise ValueError("대포 구매 레코드의 범위를 확인하지 못했습니다.")
+            name_va, price, weight = struct.unpack_from("<III", data, offset)
+            try:
+                name_offset = pe.get_offset_from_rva(name_va - base)
+            except pefile.PEFormatError as error:
+                raise ValueError(f"대포 {identifier}번 이름 주소가 올바르지 않습니다.") from error
+            name_end = data.find(b"\0", name_offset, min(name_offset + 64, len(data)))
+            if not 0 <= name_offset < len(data) or name_end < 0:
+                raise ValueError(f"대포 {identifier}번 이름을 읽지 못했습니다.")
+            try:
+                name = data[name_offset:name_end].decode("cp949")
+            except UnicodeDecodeError as error:
+                raise ValueError(f"대포 {identifier}번 이름을 읽지 못했습니다.") from error
+            records.append(CannonRecord(
+                identifier, name, price, weight, ranges[identifier], attacks[identifier],
+            ))
+        return tuple(records)
+    finally:
+        pe.close()
+
+
+def read_cannon_records(target: Path) -> tuple[CannonRecord, ...]:
+    return _read_cannon_records_from_data(target.resolve(strict=True).read_bytes())
+
+
+def apply_cannon_edit(data: bytearray, edit: CannonEdit | None) -> bool:
+    if edit is None:
+        return False
+    if not 0 <= edit.identifier < CANNON_COUNT:
+        raise ValueError("대포 번호가 올바르지 않습니다.")
+    name = edit.name.strip()
+    if not name:
+        raise ValueError("대포 이름을 입력해 주세요.")
+    try:
+        encoded_name = name.encode("cp949")
+    except UnicodeEncodeError as error:
+        raise ValueError("대포 이름은 CP949 문자만 사용할 수 있습니다.") from error
+    if len(name) > CANNON_NAME_MAX_CHARACTERS or len(encoded_name) > CANNON_NAME_MAX_BYTES:
+        raise ValueError("대포 이름은 한글 최대 5자(10바이트)까지 입력할 수 있습니다.")
+    if (not 0 <= edit.price <= 8_000_000
+            or not 0 <= edit.weight <= 8_000_000
+            or not 2 <= edit.range_value <= 8
+            or not 0 <= edit.attack_coefficient <= 127):
+        raise ValueError("대포 가격·중량·사거리·공격 계수의 범위를 확인해 주세요.")
+    current_records = _read_cannon_records_from_data(bytes(data))
+    current = current_records[edit.identifier]
+    if current == CannonRecord(
+        edit.identifier, name, edit.price, edit.weight,
+        edit.range_value, edit.attack_coefficient,
+    ):
+        return False
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        base = pe.OPTIONAL_HEADER.ImageBase
+        record_offset = pe.get_offset_from_rva(CANNON_TABLE_VA - base) + edit.identifier * CANNON_RECORD_SIZE
+        primary_offset = pe.get_offset_from_rva(CANNON_PRIMARY_BRANCH_VA - base)
+        secondary_offset = pe.get_offset_from_rva(CANNON_SECONDARY_BRANCH_VA - base)
+    finally:
+        pe.close()
+    if current.name != name:
+        section, _ = ensure_patch_section(data, PATCH_SECTION_CANNON_MASTER_SIZE)
+        slot_offset, slot_va = section.slot(
+            CANNON_NAME_SLOT_OFFSET + edit.identifier * CANNON_NAME_SLOT_STRIDE,
+            CANNON_NAME_SLOT_STRIDE,
+        )
+        data[slot_offset:slot_offset + CANNON_NAME_SLOT_STRIDE] = b"\0" * CANNON_NAME_SLOT_STRIDE
+        data[slot_offset:slot_offset + len(encoded_name) + 1] = encoded_name + b"\0"
+        struct.pack_into("<I", data, record_offset, slot_va)
+    struct.pack_into("<II", data, record_offset + 4, edit.price, edit.weight)
+    updated_records = list(current_records)
+    updated_records[edit.identifier] = CannonRecord(
+        edit.identifier, name, edit.price, edit.weight,
+        edit.range_value, edit.attack_coefficient,
+    )
+    ranges = tuple(record.range_value for record in updated_records)
+    attacks = tuple(record.attack_coefficient for record in updated_records)
+    if ranges == CANNON_DEFAULT_RANGES and attacks == CANNON_DEFAULT_ATTACKS:
+        data[primary_offset:primary_offset + len(_CANNON_ORIGINAL_PRIMARY)] = _CANNON_ORIGINAL_PRIMARY
+        data[secondary_offset:secondary_offset + len(_CANNON_ORIGINAL_SECONDARY)] = _CANNON_ORIGINAL_SECONDARY
+    else:
+        section, _ = ensure_patch_section(data, PATCH_SECTION_CANNON_MASTER_SIZE)
+        slot_offset, slot_va = section.slot(CANNON_MASTER_SLOT_OFFSET, CANNON_MASTER_SLOT_SIZE)
+        data[slot_offset:slot_offset + CANNON_MASTER_SLOT_SIZE] = b"\0" * CANNON_MASTER_SLOT_SIZE
+        data[slot_offset:slot_offset + len(CANNON_PATCH_MAGIC)] = CANNON_PATCH_MAGIC
+        struct.pack_into(
+            "<8I", data, slot_offset + len(CANNON_PATCH_MAGIC),
+            *(value for record in updated_records for value in (record.range_value, record.attack_coefficient)),
+        )
+        primary, secondary = _cannon_battle_branches(slot_va + len(CANNON_PATCH_MAGIC))
+        data[primary_offset:primary_offset + len(primary)] = primary
+        data[secondary_offset:secondary_offset + len(secondary)] = secondary
+    return True
+
+
 def _read_city_records_from_data(data: bytes) -> tuple[CityRecord, ...]:
     """Read the 226-row static city table from a supported executable."""
     pe = pefile.PE(data=data, fast_load=True)
@@ -7285,6 +7480,7 @@ def apply_all(
     library_book_edits: tuple[LibraryBookEdit, ...] = (),
     person_ability_limit: int | None = None,
     person_vitality_limit: int | None = None,
+    cannon_edit: CannonEdit | None = None,
 ) -> Path | None:
     """Apply all selected settings atomically and create one original backup."""
     target = target.resolve(strict=True)
@@ -7368,6 +7564,7 @@ def apply_all(
     apply_sponsor_edit(updated, sponsor_edit)
     apply_person_edit(updated, person_edit)
     apply_ship_type_edit(updated, ship_type_edit)
+    apply_cannon_edit(updated, cannon_edit)
     apply_city_edit(updated, city_edit)
     apply_trade_region_goods(updated, trade_region_goods)
     apply_item_edit(updated, item_edit)

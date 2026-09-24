@@ -77,6 +77,8 @@ from patch_cds_integrated import (
     PERSON_VITALITY_MAX,
     ShipTypeEdit,
     ShipTypeRecord,
+    CannonEdit,
+    CannonRecord,
     CityEdit,
     CityRecord,
     ItemEdit,
@@ -113,6 +115,8 @@ from patch_cds_integrated import (
     read_person_records,
     read_person_stat_limits,
     read_ship_type_records,
+    read_cannon_records,
+    apply_cannon_edit,
     read_city_records,
     read_trade_good_names,
     read_trade_region_goods,
@@ -773,6 +777,13 @@ class CDSExecutablePatcher(tk.Tk):
         self._ship_type_records: tuple[ShipTypeRecord, ...] = ()
         self._ship_type_by_identifier: dict[int, ShipTypeRecord] = {}
         self._ship_type_controls: list[tk.Widget] = []
+        self.cannon_price = tk.StringVar()
+        self.cannon_weight = tk.StringVar()
+        self.cannon_range = tk.StringVar()
+        self.cannon_attack = tk.StringVar()
+        self._cannon_records: tuple[CannonRecord, ...] = ()
+        self._cannon_by_identifier: dict[int, CannonRecord] = {}
+        self._cannon_controls: list[tk.Widget] = []
         self.city_name = tk.StringVar()
         self.city_inland_connections = [tk.StringVar(), tk.StringVar()]
         self.city_nation = tk.StringVar()
@@ -1263,6 +1274,7 @@ class CDSExecutablePatcher(tk.Tk):
         sponsor_tab = ttk.Frame(settings_notebook, padding=10)
         person_tab = ttk.Frame(settings_notebook, padding=10)
         ship_tab = ttk.Frame(settings_notebook, padding=10)
+        cannon_tab = ttk.Frame(settings_notebook, padding=10)
         city_tab = ttk.Frame(settings_notebook, padding=10)
         trade_region_tab = ttk.Frame(settings_notebook, padding=10)
         item_tab = ttk.Frame(settings_notebook, padding=10)
@@ -1277,6 +1289,7 @@ class CDSExecutablePatcher(tk.Tk):
         settings_notebook.add(sponsor_tab, text="후원자")
         settings_notebook.add(person_tab, text="인물")
         settings_notebook.add(ship_tab, text="함선")
+        settings_notebook.add(cannon_tab, text="대포")
         settings_notebook.add(city_tab, text="도시")
         settings_notebook.add(trade_region_tab, text="교역권")
         settings_notebook.add(item_tab, text="아이템")
@@ -1789,6 +1802,45 @@ class CDSExecutablePatcher(tk.Tk):
         self._ship_avi_preview = AviPreview(
             self, self.ship_image_preview, width=240, height=176,
         )
+
+        cannon_list_box = ttk.LabelFrame(cannon_tab, text="대포 목록", padding=10)
+        cannon_list_box.grid(row=0, column=0, sticky="ns")
+        self.cannon_list = ttk.Treeview(
+            cannon_list_box, columns=("id", "name"), show="headings", height=8,
+            selectmode="browse",
+        )
+        self.cannon_list.heading("id", text="번호")
+        self.cannon_list.heading("name", text="대포")
+        self._enable_treeview_text_sort(self.cannon_list, "id", "번호")
+        self._enable_treeview_text_sort(self.cannon_list, "name", "대포")
+        self.cannon_list.column("id", width=48, anchor="center", stretch=False)
+        self.cannon_list.column("name", width=150, anchor="w")
+        self.cannon_list.grid(row=0, column=0, sticky="nsew")
+        self.cannon_list.bind("<<TreeviewSelect>>", self._on_cannon_selected)
+        cannon_box = ttk.LabelFrame(cannon_tab, text="대포 정보", padding=10)
+        cannon_box.grid(row=0, column=1, padx=(10, 0), sticky="nw")
+        ttk.Label(cannon_box, text="이름 (한글 최대 5자):").grid(row=0, column=0, sticky="w", pady=3)
+        cannon_name_host = tk.Frame(cannon_box, width=180, height=23)
+        cannon_name_host.grid(row=0, column=1, padx=(8, 0), sticky="w", pady=3)
+        self.cannon_name_entry = NativeWinEdit(cannon_name_host, lambda: None, width=180, height=23)
+        self.cannon_name_entry.max_bytes = 10
+        self.cannon_name_entry.max_characters = 5
+        for row, (label, variable, minimum, maximum) in enumerate((
+            ("문당 가격", self.cannon_price, 0, 8_000_000),
+            ("문당 중량", self.cannon_weight, 0, 8_000_000),
+            ("사거리 판정값", self.cannon_range, 2, 8),
+            ("공격 계수", self.cannon_attack, 0, 127),
+        ), start=1):
+            ttk.Label(cannon_box, text=f"{label}:").grid(row=row, column=0, sticky="w", pady=3)
+            entry = ttk.Spinbox(
+                cannon_box, from_=minimum, to=maximum, textvariable=variable,
+                width=12, state="disabled",
+            )
+            entry.grid(row=row, column=1, padx=(8, 0), sticky="w", pady=3)
+            self._limit_integer_input(entry, minimum, maximum)
+            self._cannon_controls.append(entry)
+        self._cannon_controls.append(self.cannon_name_entry)
+        self._set_cannon_controls_enabled(False)
 
         city_list_box = ttk.LabelFrame(city_tab, text="도시 목록", padding=10)
         city_list_box.grid(row=0, column=0, rowspan=2, sticky="ns")
@@ -3423,6 +3475,76 @@ class CDSExecutablePatcher(tk.Tk):
         self._ship_type_by_identifier = {record.identifier: record for record in self._ship_type_records}
         self.ship_type_list.item(str(edit.identifier), values=(f"{edit.identifier:02d}", edit.name))
         self._reapply_treeview_text_sort(self.ship_type_list, "name")
+
+    def _set_cannon_controls_enabled(self, enabled: bool) -> None:
+        for control in self._cannon_controls:
+            if isinstance(control, NativeWinEdit):
+                control.set_enabled(enabled)
+            else:
+                control.configure(state="normal" if enabled else "disabled")
+
+    def _selected_cannon_record(self) -> CannonRecord | None:
+        selection = self.cannon_list.selection()
+        return self._cannon_by_identifier.get(int(selection[0])) if selection else None
+
+    def _load_cannon_records(self, records: tuple[CannonRecord, ...]) -> None:
+        self._cannon_records = records
+        self._cannon_by_identifier = {record.identifier: record for record in records}
+        self.cannon_list.delete(*self.cannon_list.get_children())
+        for record in records:
+            self.cannon_list.insert(
+                "", "end", iid=str(record.identifier),
+                values=(f"{record.identifier:02d}", record.name),
+            )
+        self._reapply_treeview_text_sort(self.cannon_list, "name")
+        self._set_cannon_controls_enabled(bool(records))
+        if records:
+            self.cannon_list.selection_set(str(records[0].identifier))
+            self.cannon_list.focus(str(records[0].identifier))
+            self._on_cannon_selected()
+
+    def _on_cannon_selected(self, _event: tk.Event | None = None) -> None:
+        record = self._selected_cannon_record()
+        if record is None:
+            return
+        self.cannon_name_entry.set(record.name)
+        self.cannon_price.set(str(record.price))
+        self.cannon_weight.set(str(record.weight))
+        self.cannon_range.set(str(record.range_value))
+        self.cannon_attack.set(str(record.attack_coefficient))
+
+    def _current_cannon_edit(self) -> CannonEdit | None:
+        record = self._selected_cannon_record()
+        if record is None:
+            return None
+        try:
+            return CannonEdit(
+                record.identifier, self.cannon_name_entry.get().strip(),
+                int(self.cannon_price.get()), int(self.cannon_weight.get()),
+                int(self.cannon_range.get()), int(self.cannon_attack.get()),
+            )
+        except ValueError as error:
+            raise ValueError("대포 이름 또는 숫자 입력값을 확인해 주세요.") from error
+
+    def _remember_cannon_edit(self, edit: CannonEdit | None) -> None:
+        if edit is None:
+            return
+        self._cannon_records = tuple(
+            CannonRecord(
+                record.identifier,
+                edit.name if record.identifier == edit.identifier else record.name,
+                edit.price if record.identifier == edit.identifier else record.price,
+                edit.weight if record.identifier == edit.identifier else record.weight,
+                edit.range_value if record.identifier == edit.identifier else record.range_value,
+                edit.attack_coefficient if record.identifier == edit.identifier else record.attack_coefficient,
+            )
+            for record in self._cannon_records
+        )
+        self._cannon_by_identifier = {record.identifier: record for record in self._cannon_records}
+        self.cannon_list.item(
+            str(edit.identifier), values=(f"{edit.identifier:02d}", edit.name),
+        )
+        self._reapply_treeview_text_sort(self.cannon_list, "name")
 
     def _set_city_controls_enabled(self, enabled: bool) -> None:
         for control in self._city_controls:
@@ -5916,6 +6038,7 @@ class CDSExecutablePatcher(tk.Tk):
                 sponsor_records = read_sponsor_records(target)
                 person_records = read_person_records(target)
                 ship_type_records = read_ship_type_records(target)
+                cannon_records = read_cannon_records(target)
                 city_records = read_city_records(target)
                 trade_good_names = read_trade_good_names(target)
                 trade_region_goods = read_trade_region_goods(target)
@@ -5951,6 +6074,7 @@ class CDSExecutablePatcher(tk.Tk):
             self._load_sponsor_records(sponsor_records)
             self._load_person_records(person_records)
             self._load_ship_type_records(ship_type_records)
+            self._load_cannon_records(cannon_records)
             self._load_discovery_records(discovery_records)
             self._load_discovery_hint_links(
                 discovery_hint_links, discovery_hint_targets,
@@ -6448,6 +6572,7 @@ class CDSExecutablePatcher(tk.Tk):
             sponsor_edit = self._current_sponsor_edit()
             person_edit = self._current_person_edit()
             ship_type_edit = self._current_ship_type_edit()
+            cannon_edit = self._current_cannon_edit()
             city_edit = self._current_city_edit()
             trade_region_goods_edit = self._current_trade_region_goods()
             item_edit = self._current_item_edit()
@@ -6509,6 +6634,7 @@ class CDSExecutablePatcher(tk.Tk):
                 library_book_edits,
                 person_ability_limit=int(self.person_ability_limit.get()),
                 person_vitality_limit=int(self.person_vitality_limit.get()),
+                cannon_edit=cannon_edit,
             )
             if backup is not None:
                 backed_up_paths.add(target.resolve())
@@ -6591,6 +6717,7 @@ class CDSExecutablePatcher(tk.Tk):
         self._remember_barmaid_edit(barmaid_edit)
         self._remember_sponsor_edit(sponsor_edit)
         self._remember_ship_type_edit(ship_type_edit)
+        self._remember_cannon_edit(cannon_edit)
         self._remember_city_edit(city_edit)
         self._remember_item_edit(item_edit)
         self._remember_fake_item_edit(fake_item_edit)
