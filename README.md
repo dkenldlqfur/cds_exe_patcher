@@ -96,7 +96,7 @@ ZIP 이름의 버전은 `Resources/data/app_config.json`의 버전과 일치해�
 
 ```json
 {
-  "version": "1.6.1",
+  "version": "1.10.1",
   "update": {
     "repository": "dkenldlqfur/cds_exe_patcher",
     "asset_name": "CDS_EXE_Patcher_v{version}.zip",

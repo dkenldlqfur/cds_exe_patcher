@@ -13,7 +13,7 @@
 
 ```json
 {
-  "version": "1.6.1",
+  "version": "1.10.1",
   "update": {
     "repository": "dkenldlqfur/cds_exe_patcher",
     "asset_name": "CDS_EXE_Patcher_v{version}.zip",
@@ -56,7 +56,7 @@ py -3.14 -m PyInstaller --noconfirm .\CDS_EXE_Patcher.spec
 버전 변수 하나를 사용해 설정, 태그와 파일 이름이 어긋나는 실수를 줄인다.
 
 ```powershell
-$releaseVersion = '1.6.1'
+$releaseVersion = '1.10.1'
 $zipPath = ".\dist\CDS_EXE_Patcher_v$releaseVersion.zip"
 Compress-Archive -LiteralPath '.\dist\CDS_EXE_Patcher.exe' -DestinationPath $zipPath -CompressionLevel Optimal -Force
 Get-FileHash -Algorithm SHA256 -LiteralPath '.\dist\CDS_EXE_Patcher.exe', $zipPath

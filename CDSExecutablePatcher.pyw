@@ -7,6 +7,7 @@ import sys
 import threading
 import tkinter as tk
 import ctypes
+from ctypes import wintypes
 from pathlib import Path
 from tkinter import filedialog, font as tkfont, ttk
 
@@ -463,7 +464,7 @@ def _windows_dpi_scale(hwnd: int = 0) -> float:
 
 
 class NativeWinEdit:
-    """The native Windows EDIT search field used by the Save Editor.
+    """A native Windows EDIT control embedded into the Tk-based patcher.
 
     Tk's Entry can lag behind a Korean IME composition.  This is a real Win32
     EDIT child control, polled while focused so the list is refreshed as text
@@ -479,19 +480,49 @@ class NativeWinEdit:
     _SWP_NOACTIVATE = 0x0010
     _WM_SETFONT = 0x0030
     _EM_SETSEL = 0x00B1
+    _EM_SETREADONLY = 0x00CF
+    _WM_KEYDOWN = 0x0100
+    _WM_KILLFOCUS = 0x0008
+    _WM_NCDESTROY = 0x0082
+    _ES_CENTER = 0x0001
+    _ES_RIGHT = 0x0002
 
-    def __init__(self, host: tk.Frame, on_change, width: int = 110, height: int = 23) -> None:
+    def __init__(
+        self, host: tk.Frame, on_change, width: int = 110, height: int = 23,
+        *, textvariable: tk.StringVar | None = None, state: str = "normal",
+        justify: str = "left", takefocus: bool = True,
+    ) -> None:
         self.host = host
         self.root = host.winfo_toplevel()
+        self.application = host._root()
+        native_edits = getattr(self.application, "_native_win_edits", None)
+        if native_edits is None:
+            native_edits = []
+            self.application._native_win_edits = native_edits
+        native_edits.append(self)
         self.on_change = on_change
         self.hwnd: int | None = None
         self._last_text = ""
         self._poll_job: str | None = None
         self._font_handle: int | None = None
-        self.enabled = True
+        self.enabled = state != "disabled"
+        self.readonly = state == "readonly"
         self.max_bytes: int | None = None
         self.max_characters: int | None = None
         self._user32 = None
+        self._comctl32 = None
+        self._subclass_proc = None
+        self._subclass_id = id(self) & 0xFFFFFFFF
+        self._bindings: dict[str, list] = {}
+        self._input_validator = None
+        self.textvariable = textvariable
+        self._variable_trace_id: str | None = None
+        self._syncing_variable = False
+        self._last_text = str(textvariable.get()) if textvariable is not None else ""
+        if textvariable is not None:
+            self._variable_trace_id = textvariable.trace_add("write", self._variable_changed)
+        self.justify = justify
+        self.takefocus = takefocus
         scale = _windows_dpi_scale(self.root.winfo_id())
         host.configure(width=round(width * scale), height=round(height * scale))
         host.pack_propagate(False)
@@ -500,6 +531,206 @@ class NativeWinEdit:
         host.bind("<Map>", self._wake_poll, add="+")
         host.bind("<Destroy>", self._destroy, add="+")
         self.root.after_idle(self._create)
+
+    def grid(self, *args, **kwargs):
+        return self.host.grid(*args, **kwargs)
+
+    def pack(self, *args, **kwargs):
+        return self.host.pack(*args, **kwargs)
+
+    def place(self, *args, **kwargs):
+        return self.host.place(*args, **kwargs)
+
+    def destroy(self) -> None:
+        self._remove_subclass()
+        if self.host.winfo_exists():
+            self.host.destroy()
+
+    def winfo_exists(self) -> bool:
+        return bool(self.host.winfo_exists())
+
+    def focus_set(self) -> None:
+        if self.hwnd and self.enabled:
+            ctypes.windll.user32.SetFocus(ctypes.c_void_p(self.hwnd))
+        elif self.enabled and self.host.winfo_exists():
+            self.root.after_idle(self.focus_set)
+
+    def focus_force(self) -> None:
+        self.focus_set()
+
+    def selection_range(self, first: int, last: int) -> None:
+        if self.hwnd:
+            text_length = len(self.get())
+            first = text_length if first == tk.END else int(first)
+            last = text_length if last == tk.END else int(last)
+            ctypes.windll.user32.SendMessageW(
+                ctypes.c_void_p(self.hwnd), self._EM_SETSEL,
+                ctypes.c_void_p(first), ctypes.c_void_p(last),
+            )
+        elif self.host.winfo_exists():
+            self.root.after_idle(lambda: self.selection_range(first, last))
+
+    def xview_moveto(self, fraction: float) -> None:
+        if self.hwnd:
+            position = 0 if fraction <= 0 else len(self.get())
+            self.selection_range(position, position)
+
+    def bind(self, sequence: str, callback, add=None):
+        if sequence in ("<Return>", "<KeyPress-Return>", "<Escape>", "<KeyPress-Escape>", "<FocusOut>"):
+            self._bindings.setdefault(sequence, []).append(callback)
+            if self.hwnd and self._subclass_proc is None:
+                self._install_subclass()
+            return f"native-edit-{len(self._bindings[sequence])}"
+        return self.host.bind(sequence, callback, add=add)
+
+    def configure(self, cnf=None, **kwargs):
+        options = dict(cnf) if isinstance(cnf, dict) else {}
+        options.update(kwargs)
+        if "state" in options:
+            self._set_state(str(options.pop("state")))
+        if "validate" in options or "validatecommand" in options:
+            options.pop("validate", None)
+            options.pop("validatecommand", None)
+        if options:
+            self.host.configure(**options)
+
+    config = configure
+
+    def state(self, statespec=None):
+        if statespec is None:
+            if not self.enabled:
+                return ("disabled",)
+            if self.readonly:
+                return ("readonly",)
+            return ("!disabled", "!readonly")
+        for state in statespec:
+            if state == "disabled":
+                self.enabled = False
+            elif state == "!disabled":
+                self.enabled = True
+            elif state == "readonly":
+                self.readonly = True
+            elif state == "!readonly":
+                self.readonly = False
+        self._apply_native_state()
+        return self.state()
+
+    def set_input_validator(self, validator) -> None:
+        self._input_validator = validator
+
+    def _set_state(self, state: str) -> None:
+        if state not in ("normal", "disabled", "readonly"):
+            raise ValueError(f"지원하지 않는 네이티브 에디트 상태입니다: {state}")
+        self.enabled = state != "disabled"
+        self.readonly = state == "readonly"
+        self._apply_native_state()
+
+    def _apply_native_state(self) -> None:
+        if not self.hwnd or self._user32 is None:
+            return
+        self._user32.EnableWindow(ctypes.c_void_p(self.hwnd), self.enabled)
+        self._user32.SendMessageW(
+            ctypes.c_void_p(self.hwnd), self._EM_SETREADONLY,
+            ctypes.c_void_p(bool(self.readonly)), ctypes.c_void_p(0),
+        )
+
+    def _variable_changed(self, *_args) -> None:
+        if self._syncing_variable or self.textvariable is None:
+            return
+        value = str(self.textvariable.get())
+        self._last_text = value
+        if self.hwnd and value != self.get():
+            self._user32.SetWindowTextW(ctypes.c_void_p(self.hwnd), value)
+
+    def _sync_textvariable(self, value: str) -> None:
+        if self.textvariable is None or str(self.textvariable.get()) == value:
+            return
+        self._syncing_variable = True
+        try:
+            self.textvariable.set(value)
+        finally:
+            self._syncing_variable = False
+
+    def _commit_native_text(self, raw_text: str) -> None:
+        text = raw_text[:self.max_characters] if self.max_characters is not None else raw_text
+        text = self._limit_cp949_bytes(text, self.max_bytes) if self.max_bytes is not None else text
+        if self._input_validator is not None and text != self._last_text:
+            if not self._input_validator(text):
+                text = self._last_text
+        if text != raw_text:
+            self._set_text_and_place_cursor_at_end(text)
+        if text != self._last_text:
+            self._last_text = text
+            self._sync_textvariable(text)
+            self.on_change()
+
+    def _dispatch_native_binding(self, sequence: str, keysym: str = "") -> None:
+        callbacks = tuple(self._bindings.get(sequence, ()))
+        if not callbacks:
+            return
+        event = tk.Event()
+        event.widget = self
+        event.keysym = keysym
+        for callback in callbacks:
+            try:
+                callback(event)
+            except tk.TclError:
+                pass
+
+    def _install_subclass(self) -> None:
+        callback_type = ctypes.WINFUNCTYPE(
+            ctypes.c_ssize_t, wintypes.HWND, wintypes.UINT,
+            ctypes.c_size_t, ctypes.c_ssize_t, ctypes.c_size_t, ctypes.c_size_t,
+        )
+        self._subclass_proc = callback_type(self._window_subclass_proc)
+        self._comctl32 = ctypes.windll.comctl32
+        self._comctl32.SetWindowSubclass.argtypes = [
+            wintypes.HWND, callback_type, ctypes.c_size_t, ctypes.c_size_t,
+        ]
+        self._comctl32.SetWindowSubclass.restype = wintypes.BOOL
+        self._comctl32.DefSubclassProc.argtypes = [
+            wintypes.HWND, wintypes.UINT, ctypes.c_size_t, ctypes.c_ssize_t,
+        ]
+        self._comctl32.DefSubclassProc.restype = ctypes.c_ssize_t
+        self._comctl32.RemoveWindowSubclass.argtypes = [
+            wintypes.HWND, callback_type, ctypes.c_size_t,
+        ]
+        self._comctl32.RemoveWindowSubclass.restype = wintypes.BOOL
+        installed = self._comctl32.SetWindowSubclass(
+            ctypes.c_void_p(self.hwnd), self._subclass_proc,
+            self._subclass_id, 0,
+        )
+        if not installed:
+            raise ctypes.WinError(ctypes.get_last_error())
+
+    def _window_subclass_proc(self, hwnd, message, wparam, lparam, _subclass_id, _ref_data):
+        if message == self._WM_KEYDOWN:
+            key_bindings = {0x0D: ("<Return>", "<KeyPress-Return>", "Return"),
+                            0x1B: ("<Escape>", "<KeyPress-Escape>", "Escape")}
+            binding = key_bindings.get(int(wparam))
+            sequence = next(
+                (candidate for candidate in binding[:2] if self._bindings.get(candidate)),
+                None,
+            ) if binding else None
+            if binding and sequence:
+                self.root.after_idle(lambda: self._dispatch_native_binding(sequence, binding[2]))
+                return 0
+        result = self._comctl32.DefSubclassProc(hwnd, message, wparam, lparam)
+        if message == self._WM_KILLFOCUS:
+            self._commit_native_text(self.get())
+            if self._bindings.get("<FocusOut>"):
+                self.root.after_idle(lambda: self._dispatch_native_binding("<FocusOut>"))
+        return result
+
+    def _remove_subclass(self) -> None:
+        if self.hwnd and self._comctl32 is not None and self._subclass_proc is not None:
+            try:
+                self._comctl32.RemoveWindowSubclass(
+                    ctypes.c_void_p(self.hwnd), self._subclass_proc, self._subclass_id,
+                )
+            except Exception:
+                pass
+            self._subclass_proc = None
 
     def _create(self) -> None:
         if self.hwnd or not self.host.winfo_exists():
@@ -520,9 +751,15 @@ class NativeWinEdit:
         user32.SetWindowTextW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
         user32.EnableWindow.argtypes = [ctypes.c_void_p, ctypes.c_bool]
         user32.GetFocus.restype = ctypes.c_void_p
+        style = self._WS_CHILD | self._WS_VISIBLE | self._ES_AUTOHSCROLL
+        if self.takefocus:
+            style |= self._WS_TABSTOP
+        if self.justify == "center":
+            style |= self._ES_CENTER
+        elif self.justify == "right":
+            style |= self._ES_RIGHT
         self.hwnd = user32.CreateWindowExW(
-            self._WS_EX_CLIENTEDGE, "EDIT", "",
-            self._WS_CHILD | self._WS_VISIBLE | self._WS_TABSTOP | self._ES_AUTOHSCROLL,
+            self._WS_EX_CLIENTEDGE, "EDIT", "", style,
             0, 0, max(1, self.host.winfo_width()), max(1, self.host.winfo_height()),
             ctypes.c_void_p(self.host.winfo_id()), None, None, None,
         )
@@ -544,6 +781,11 @@ class NativeWinEdit:
             ctypes.c_void_p(self.hwnd), self._WM_SETFONT,
             ctypes.c_void_p(self._font_handle), ctypes.c_void_p(True),
         )
+        if self._last_text:
+            user32.SetWindowTextW(ctypes.c_void_p(self.hwnd), self._last_text)
+        if self._bindings:
+            self._install_subclass()
+        self._apply_native_state()
         self._poll()
 
     def _resize(self, _event: tk.Event | None = None) -> None:
@@ -560,15 +802,8 @@ class NativeWinEdit:
                 return
             visible = bool(self.host.winfo_ismapped())
             focused = self.enabled and visible and self._user32.GetFocus() == self.hwnd
-            if focused:
-                raw_text = self.get()
-                text = raw_text[:self.max_characters] if self.max_characters is not None else raw_text
-                text = self._limit_cp949_bytes(text, self.max_bytes) if self.max_bytes is not None else text
-                if text != raw_text:
-                    self._set_text_and_place_cursor_at_end(text)
-                if text != self._last_text:
-                    self._last_text = text
-                    self.on_change()
+            if self.enabled and visible:
+                self._commit_native_text(self.get())
             delay = 50 if focused else (250 if self.enabled and visible else 1000)
             self._poll_job = self.root.after(delay, self._poll)
         except tk.TclError:
@@ -605,9 +840,10 @@ class NativeWinEdit:
 
     def set(self, value: str) -> None:
         value = str(value)
+        self._last_text = value
+        self._sync_textvariable(value)
         if self.hwnd and self._user32 is not None:
             self._user32.SetWindowTextW(ctypes.c_void_p(self.hwnd), value)
-        self._last_text = value
 
     def _set_text_and_place_cursor_at_end(self, value: str) -> None:
         self.set(value)
@@ -620,8 +856,7 @@ class NativeWinEdit:
 
     def set_enabled(self, enabled: bool) -> None:
         self.enabled = bool(enabled)
-        if self.hwnd and self._user32 is not None:
-            self._user32.EnableWindow(ctypes.c_void_p(self.hwnd), self.enabled)
+        self._apply_native_state()
         if self.enabled:
             self._wake_poll()
 
@@ -641,6 +876,16 @@ class NativeWinEdit:
         return "".join(accepted)
 
     def _destroy(self, _event: tk.Event | None = None) -> None:
+        if self.textvariable is not None and self._variable_trace_id is not None:
+            try:
+                self.textvariable.trace_remove("write", self._variable_trace_id)
+            except tk.TclError:
+                pass
+            self._variable_trace_id = None
+        self._remove_subclass()
+        native_edits = getattr(self.application, "_native_win_edits", ())
+        if self in native_edits:
+            native_edits.remove(self)
         if self._poll_job is not None:
             try:
                 self.root.after_cancel(self._poll_job)
@@ -741,7 +986,7 @@ class CDSExecutablePatcher(tk.Tk):
         self.sponsor_language_flags = [tk.BooleanVar(value=False) for _ in BARMAID_LANGUAGE_NAMES]
         self._sponsor_records: tuple[SponsorRecord, ...] = ()
         self._sponsor_by_identifier: dict[int, SponsorRecord] = {}
-        self._sponsor_controls: list[tk.Widget] = []
+        self._sponsor_controls: list[tk.Widget | NativeWinEdit] = []
         self.person_name = tk.StringVar()
         self.person_face_code = tk.StringVar()
         self.person_gender = tk.StringVar()
@@ -760,7 +1005,7 @@ class CDSExecutablePatcher(tk.Tk):
         self.person_skill_levels = [tk.StringVar() for _ in (*PERSON_SKILL_NAMES, *BARMAID_LANGUAGE_NAMES)]
         self._person_records: tuple[PersonRecord, ...] = ()
         self._person_by_identifier: dict[int, PersonRecord] = {}
-        self._person_controls: list[tk.Widget] = []
+        self._person_controls: list[tk.Widget | NativeWinEdit] = []
         self.ship_name = tk.StringVar()
         self.ship_shipyard_requirement = tk.StringVar()
         self.ship_base_power = tk.StringVar()
@@ -776,14 +1021,14 @@ class CDSExecutablePatcher(tk.Tk):
         self.ship_min_crew = tk.StringVar()
         self._ship_type_records: tuple[ShipTypeRecord, ...] = ()
         self._ship_type_by_identifier: dict[int, ShipTypeRecord] = {}
-        self._ship_type_controls: list[tk.Widget] = []
+        self._ship_type_controls: list[tk.Widget | NativeWinEdit] = []
         self.cannon_price = tk.StringVar()
         self.cannon_weight = tk.StringVar()
         self.cannon_range = tk.StringVar()
         self.cannon_attack = tk.StringVar()
         self._cannon_records: tuple[CannonRecord, ...] = ()
         self._cannon_by_identifier: dict[int, CannonRecord] = {}
-        self._cannon_controls: list[tk.Widget] = []
+        self._cannon_controls: list[tk.Widget | NativeWinEdit] = []
         self.city_name = tk.StringVar()
         self.city_inland_connections = [tk.StringVar(), tk.StringVar()]
         self.city_nation = tk.StringVar()
@@ -807,7 +1052,7 @@ class CDSExecutablePatcher(tk.Tk):
         self._city_by_identifier: dict[int, CityRecord] = {}
         self._trade_good_names: tuple[str, ...] = ()
         self._trade_region_goods: tuple[tuple[int, ...], ...] = ()
-        self._city_controls: list[tk.Widget] = []
+        self._city_controls: list[tk.Widget | NativeWinEdit] = []
         self.item_name = tk.StringVar()
         self.item_category = tk.StringVar()
         self.item_buy_price = tk.StringVar()
@@ -839,16 +1084,16 @@ class CDSExecutablePatcher(tk.Tk):
         self.figurehead_primary_unit = tk.StringVar(value="")
         self.figurehead_secondary_label = tk.StringVar(value="")
         self.figurehead_secondary_unit = tk.StringVar(value="")
-        self._figurehead_controls: list[tk.Widget] = []
+        self._figurehead_controls: list[tk.Widget | NativeWinEdit] = []
         self._figurehead_loaded = False
         self._item_records: tuple[ItemRecord, ...] = ()
         self._item_by_identifier: dict[int, ItemRecord] = {}
         self._item_discovery_media_links: dict[int, int] = {}
         self._item_hint_ids_by_name: dict[str, int] = {}
-        self._item_controls: list[tk.Widget] = []
+        self._item_controls: list[tk.Widget | NativeWinEdit] = []
         self._fake_item_records: tuple[FakeItemRecord, ...] = ()
         self._fake_item_by_identifier: dict[int, FakeItemRecord] = {}
-        self._fake_item_controls: list[tk.Widget] = []
+        self._fake_item_controls: list[tk.Widget | NativeWinEdit] = []
         self._fake_item_target_names_by_code: dict[int, str] = {}
         self._fake_item_target_codes_by_name: dict[str, int] = {}
         self.discovery_name = tk.StringVar()
@@ -868,8 +1113,8 @@ class CDSExecutablePatcher(tk.Tk):
         )
         self._discovery_records: tuple[DiscoveryRecord, ...] = ()
         self._discovery_by_identifier: dict[int, DiscoveryRecord] = {}
-        self._discovery_controls: list[tk.Widget] = []
-        self._discovery_coordinate_controls: list[tk.Widget] = []
+        self._discovery_controls: list[tk.Widget | NativeWinEdit] = []
+        self._discovery_coordinate_controls: list[tk.Widget | NativeWinEdit] = []
         self._discovery_still_slot_count = 85
         self._discovery_hint_links: tuple[DiscoveryHintLink, ...] = ()
         self._discovery_hint_by_identifier: dict[str, DiscoveryHintLink] = {}
@@ -909,7 +1154,7 @@ class CDSExecutablePatcher(tk.Tk):
         self._barmaid_records: tuple[BarmaidRecord, ...] = ()
         self._barmaid_child_aptitudes: tuple[BarmaidChildAptitudes, ...] = ()
         self._barmaid_by_identifier: dict[int, BarmaidRecord] = {}
-        self._barmaid_controls: list[tk.Widget] = []
+        self._barmaid_controls: list[tk.Widget | NativeWinEdit] = []
         self._slave_was_enabled = False
         self._mughal_was_enabled = False
         self._sea_monster_patch_was_enabled = False
@@ -950,6 +1195,7 @@ class CDSExecutablePatcher(tk.Tk):
         for variable in self.barmaid_child_aptitudes:
             variable.trace_add("write", self._update_barmaid_child_aptitude_total)
         self._build()
+        self.bind_all("<ButtonRelease-1>", self._move_focus_from_native_edit, add="+")
         self._center_main_window()
         self._show_splash()
 
@@ -1156,6 +1402,52 @@ class CDSExecutablePatcher(tk.Tk):
         value = int(proposed)
         return minimum <= value <= maximum
 
+    def _native_win_edit_has_focus(self) -> bool:
+        for edit in getattr(self, "_native_win_edits", ()):
+            try:
+                if edit.hwnd and edit._user32 and edit._user32.GetFocus() == edit.hwnd:
+                    return True
+            except (AttributeError, OSError):
+                continue
+        return False
+
+    @staticmethod
+    def _is_click_focus_control(widget: tk.Widget) -> bool:
+        focus_classes = {
+            "Button", "TButton", "Checkbutton", "TCheckbutton",
+            "Radiobutton", "TRadiobutton", "Entry", "TEntry",
+            "Spinbox", "TSpinbox", "Combobox", "TCombobox",
+            "Listbox", "Treeview", "Text", "Scale", "TScale",
+            "Scrollbar", "TScrollbar", "Menubutton", "TMenubutton",
+            "TNotebook",
+        }
+        try:
+            if widget.winfo_class() not in focus_classes:
+                return False
+            state_method = getattr(widget, "state", None)
+            states = state_method() if callable(state_method) else (str(widget.cget("state")),)
+            return "disabled" not in states
+        except tk.TclError:
+            return False
+
+    def _move_focus_from_native_edit(self, event: tk.Event) -> None:
+        """Transfer focus from a native EDIT to whichever interactive control was clicked."""
+        target = event.widget
+        if not self._is_click_focus_control(target):
+            return
+
+        def focus_clicked_control() -> None:
+            try:
+                if (target.winfo_exists() and self._native_win_edit_has_focus()
+                        and self._is_click_focus_control(target)):
+                    # Set native/Tk focus only if the native EDIT still owns it
+                    # after the clicked control's own mouse bindings have run.
+                    target.focus_force()
+            except tk.TclError:
+                pass
+
+        target.after_idle(focus_clicked_control)
+
     @staticmethod
     def _validate_decimal_text(proposed: str, lower: str, upper: str) -> bool:
         """Allow only an in-range decimal value while the user is editing a field."""
@@ -1238,13 +1530,45 @@ class CDSExecutablePatcher(tk.Tk):
             command=lambda: self._toggle_treeview_text_sort(tree, column),
         )
 
-    def _limit_integer_input(self, widget: ttk.Entry | ttk.Spinbox, minimum: int, maximum: int) -> None:
+    def _native_entry(
+        self, parent: tk.Misc, *, textvariable: tk.StringVar | None = None,
+        width: int = 12, state: str = "normal", justify: str = "left",
+        takefocus: bool = True,
+    ) -> NativeWinEdit:
+        pixel_width = max(24, width * 8 + 12)
+        host = ttk.Frame(parent, width=pixel_width, height=23)
+        return NativeWinEdit(
+            host, lambda: None, width=pixel_width, height=23,
+            textvariable=textvariable, state=state, justify=justify,
+            takefocus=takefocus,
+        )
+
+    def _limit_integer_input(
+        self, widget: ttk.Spinbox | NativeWinEdit,
+        minimum: int, maximum: int,
+    ) -> None:
+        if isinstance(widget, NativeWinEdit):
+            widget.set_input_validator(
+                lambda proposed: self._validate_integer_text(
+                    proposed, str(minimum), str(maximum),
+                )
+            )
+            return
         widget.configure(
             validate="key",
             validatecommand=(self._integer_validation_command, "%P", str(minimum), str(maximum)),
         )
 
-    def _limit_decimal_input(self, widget: ttk.Entry, minimum: float, maximum: float) -> None:
+    def _limit_decimal_input(
+        self, widget: NativeWinEdit, minimum: float, maximum: float,
+    ) -> None:
+        if isinstance(widget, NativeWinEdit):
+            widget.set_input_validator(
+                lambda proposed: self._validate_decimal_text(
+                    proposed, str(minimum), str(maximum),
+                )
+            )
+            return
         widget.configure(
             validate="key",
             validatecommand=(self._decimal_validation_command, "%P", str(minimum), str(maximum)),
@@ -1263,7 +1587,9 @@ class CDSExecutablePatcher(tk.Tk):
         top_bar = ttk.Frame(frame)
         top_bar.grid(row=0, column=0, sticky="w")
         ttk.Label(top_bar, text="대상 실행 파일").grid(row=0, column=0, padx=(0, 8), sticky="w")
-        self.path_entry = ttk.Entry(top_bar, textvariable=self.path, width=25, state="readonly")
+        self.path_entry = self._native_entry(
+            top_bar, textvariable=self.path, width=25, state="readonly",
+        )
         self.path_entry.grid(row=0, column=1, sticky="w")
 
         settings_notebook = ttk.Notebook(frame)
@@ -1336,9 +1662,9 @@ class CDSExecutablePatcher(tk.Tk):
         ttk.Label(resolution_box, text="세로").grid(row=0, column=3, padx=(12, 0))
         for index, (width, height) in enumerate(zip(self.widths, self.heights), start=1):
             ttk.Label(resolution_box, text=f"{index}번째").grid(row=index, column=0, sticky="w", pady=2)
-            ttk.Entry(resolution_box, textvariable=width, width=7).grid(row=index, column=1, padx=(12, 0))
+            self._native_entry(resolution_box, textvariable=width, width=7).grid(row=index, column=1, padx=(12, 0))
             ttk.Label(resolution_box, text="×").grid(row=index, column=2, padx=5)
-            ttk.Entry(resolution_box, textvariable=height, width=7).grid(row=index, column=3)
+            self._native_entry(resolution_box, textvariable=height, width=7).grid(row=index, column=3)
         ttk.Button(resolution_box, text="전체화면 적용", command=self.apply_fullscreen).grid(row=3, column=4, padx=(12, 0), sticky="w")
 
         npc_box = ttk.LabelFrame(basic_left_column, text="일반 NPC 이동", padding=10)
@@ -1346,12 +1672,12 @@ class CDSExecutablePatcher(tk.Tk):
         ttk.Label(npc_box, textvariable=self.npc_departure_probability_label).grid(
             row=0, column=0, sticky="w",
         )
-        departure_entry = ttk.Entry(npc_box, textvariable=self.departure, width=6)
+        departure_entry = self._native_entry(npc_box, textvariable=self.departure, width=6)
         departure_entry.grid(row=0, column=1, padx=(4, 0))
         self._limit_integer_input(departure_entry, 1, 127)
         ttk.Label(npc_box, text="(분모 1~127, 원본 5)").grid(row=0, column=2, padx=(5, 0), sticky="w")
         ttk.Label(npc_box, text="도착 대기:").grid(row=1, column=0, pady=(5, 0), sticky="w")
-        arrival_wait_entry = ttk.Entry(npc_box, textvariable=self.arrival_wait, width=6)
+        arrival_wait_entry = self._native_entry(npc_box, textvariable=self.arrival_wait, width=6)
         arrival_wait_entry.grid(row=1, column=1, padx=(4, 0), pady=(5, 0), sticky="w")
         self._limit_integer_input(arrival_wait_entry, 0, 127)
         ttk.Label(npc_box, text="일 (0~127, 기본값 60)").grid(row=1, column=2, padx=(5, 0), pady=(5, 0), sticky="w")
@@ -1374,7 +1700,7 @@ class CDSExecutablePatcher(tk.Tk):
             ttk.Label(gameplay_box, text=f"{label}:").grid(row=row, column=0, pady=2, sticky="w")
             value_row = ttk.Frame(gameplay_box)
             value_row.grid(row=row, column=1, columnspan=2, padx=(6, 0), pady=2, sticky="w")
-            entry = ttk.Entry(value_row, textvariable=variable, width=8)
+            entry = self._native_entry(value_row, textvariable=variable, width=8)
             entry.pack(side=tk.LEFT)
             self._limit_integer_input(entry, minimum, maximum)
             ttk.Label(value_row, text=suffix).pack(side=tk.LEFT, padx=(5, 0))
@@ -1382,11 +1708,11 @@ class CDSExecutablePatcher(tk.Tk):
         ttk.Label(gameplay_box, text="인물 활동 가능 나이:").grid(row=activity_age_row, column=0, pady=2, sticky="w")
         activity_age_frame = ttk.Frame(gameplay_box)
         activity_age_frame.grid(row=activity_age_row, column=1, columnspan=2, padx=(6, 0), pady=2, sticky="w")
-        activity_minimum_entry = ttk.Entry(activity_age_frame, textvariable=self.npc_activity_min_age, width=6)
+        activity_minimum_entry = self._native_entry(activity_age_frame, textvariable=self.npc_activity_min_age, width=6)
         activity_minimum_entry.grid(row=0, column=0)
         self._limit_integer_input(activity_minimum_entry, 0, 127)
         ttk.Label(activity_age_frame, text="~").grid(row=0, column=1, padx=5)
-        activity_maximum_entry = ttk.Entry(activity_age_frame, textvariable=self.npc_activity_max_age, width=6)
+        activity_maximum_entry = self._native_entry(activity_age_frame, textvariable=self.npc_activity_max_age, width=6)
         activity_maximum_entry.grid(row=0, column=2)
         self._limit_integer_input(activity_maximum_entry, 0, 127)
         ttk.Label(activity_age_frame, text="세 (0~127, 원본 18~60)").grid(row=0, column=3, padx=(5, 0))
@@ -1394,12 +1720,12 @@ class CDSExecutablePatcher(tk.Tk):
         encounter_box = ttk.LabelFrame(basic_right_column, text="인카운트", padding=10)
         encounter_box.grid(row=1, column=0, pady=(10, 0), sticky="ew")
         ttk.Label(encounter_box, text="서부 해역 (해적·추격대): 1 /").grid(row=0, column=0, sticky="w")
-        western_encounter_entry = ttk.Entry(encounter_box, textvariable=self.western_encounter_denominator, width=7)
+        western_encounter_entry = self._native_entry(encounter_box, textvariable=self.western_encounter_denominator, width=7)
         western_encounter_entry.grid(row=0, column=1, padx=(4, 0), sticky="w")
         self._limit_integer_input(western_encounter_entry, 1, 32_768)
         ttk.Label(encounter_box, text="(원본 700)").grid(row=0, column=2, padx=(5, 0), sticky="w")
         ttk.Label(encounter_box, text="동부 해역 (이슬람 함대): 1 /").grid(row=1, column=0, pady=(5, 0), sticky="w")
-        islamic_encounter_entry = ttk.Entry(encounter_box, textvariable=self.islamic_encounter_denominator, width=7)
+        islamic_encounter_entry = self._native_entry(encounter_box, textvariable=self.islamic_encounter_denominator, width=7)
         islamic_encounter_entry.grid(row=1, column=1, padx=(4, 0), pady=(5, 0), sticky="w")
         self._limit_integer_input(islamic_encounter_entry, 1, 32_768)
         ttk.Label(encounter_box, text="(원본 400)").grid(row=1, column=2, padx=(5, 0), pady=(5, 0), sticky="w")
@@ -1425,11 +1751,11 @@ class CDSExecutablePatcher(tk.Tk):
         fame_range.grid(row=1, column=1, columnspan=5, padx=(6, 0), pady=(7, 2), sticky="w")
         ttk.Label(fame_range, text="0").grid(row=0, column=0)
         ttk.Label(fame_range, text="—").grid(row=0, column=1, padx=6)
-        self.pirate_fame_middle_entry = ttk.Entry(fame_range, textvariable=self.pirate_fame_middle, width=8)
+        self.pirate_fame_middle_entry = self._native_entry(fame_range, textvariable=self.pirate_fame_middle, width=8)
         self.pirate_fame_middle_entry.grid(row=0, column=2)
         self._limit_integer_input(self.pirate_fame_middle_entry, 0, 65_535)
         ttk.Label(fame_range, text="—").grid(row=0, column=3, padx=6)
-        self.pirate_fame_high_entry = ttk.Entry(fame_range, textvariable=self.pirate_fame_high, width=8)
+        self.pirate_fame_high_entry = self._native_entry(fame_range, textvariable=self.pirate_fame_high, width=8)
         self.pirate_fame_high_entry.grid(row=0, column=4)
         self._limit_integer_input(self.pirate_fame_high_entry, 0, 65_535)
 
@@ -1438,13 +1764,13 @@ class CDSExecutablePatcher(tk.Tk):
         pursuit_range.grid(row=2, column=1, columnspan=5, padx=(6, 0), pady=2, sticky="w")
         ttk.Label(pursuit_range, text="0").grid(row=0, column=0)
         ttk.Label(pursuit_range, text="—").grid(row=0, column=1, padx=6)
-        self.pirate_pursuit_middle_entry = ttk.Entry(
+        self.pirate_pursuit_middle_entry = self._native_entry(
             pursuit_range, textvariable=self.pirate_pursuit_middle_threshold, width=8,
         )
         self.pirate_pursuit_middle_entry.grid(row=0, column=2)
         self._limit_integer_input(self.pirate_pursuit_middle_entry, 0, 127)
         ttk.Label(pursuit_range, text="—").grid(row=0, column=3, padx=6)
-        self.pirate_pursuit_high_entry = ttk.Entry(
+        self.pirate_pursuit_high_entry = self._native_entry(
             pursuit_range, textvariable=self.pirate_pursuit_high_threshold, width=8,
         )
         self.pirate_pursuit_high_entry.grid(row=0, column=4)
@@ -1503,7 +1829,7 @@ class CDSExecutablePatcher(tk.Tk):
         latitude_box = ttk.LabelFrame(basic_right_column, text="위도 경계", padding=10)
         latitude_box.grid(row=2, column=0, pady=(10, 0), sticky="ew")
         ttk.Label(latitude_box, text="북쪽 추위 전멸 경계:").grid(row=0, column=0, pady=2, sticky="w")
-        self.cold_north_entry = ttk.Entry(latitude_box, textvariable=self.cold_north_latitude, width=8)
+        self.cold_north_entry = self._native_entry(latitude_box, textvariable=self.cold_north_latitude, width=8)
         self.cold_north_entry.grid(row=0, column=1, padx=(6, 0), pady=2, sticky="w")
         self._limit_decimal_input(self.cold_north_entry, 0, 180)
         ttk.Label(latitude_box, text="°N (원본 76.995°N)").grid(row=0, column=2, padx=(5, 0), pady=2, sticky="w")
@@ -1513,7 +1839,7 @@ class CDSExecutablePatcher(tk.Tk):
         ).grid(row=0, column=3, padx=(10, 0), pady=2, sticky="w")
 
         ttk.Label(latitude_box, text="남쪽 추위 전멸 경계:").grid(row=1, column=0, pady=2, sticky="w")
-        self.cold_south_entry = ttk.Entry(latitude_box, textvariable=self.cold_south_latitude, width=8)
+        self.cold_south_entry = self._native_entry(latitude_box, textvariable=self.cold_south_latitude, width=8)
         self.cold_south_entry.grid(row=1, column=1, padx=(6, 0), pady=2, sticky="w")
         self._limit_decimal_input(self.cold_south_entry, 0, 180)
         ttk.Label(latitude_box, text="°S (원본 79.992°S)").grid(row=1, column=2, padx=(5, 0), pady=2, sticky="w")
@@ -1522,7 +1848,7 @@ class CDSExecutablePatcher(tk.Tk):
             command=self._update_cold_limit_entry_states,
         ).grid(row=1, column=3, padx=(10, 0), pady=2, sticky="w")
         ttk.Label(latitude_box, text="일식 관측 위도:").grid(row=2, column=0, pady=(6, 2), sticky="w")
-        self.eclipse_latitude_entry = ttk.Entry(latitude_box, textvariable=self.eclipse_latitude, width=8)
+        self.eclipse_latitude_entry = self._native_entry(latitude_box, textvariable=self.eclipse_latitude, width=8)
         self.eclipse_latitude_entry.grid(row=2, column=1, padx=(6, 0), pady=(6, 2), sticky="w")
         ttk.Label(latitude_box, text="° 이상 (남·북 공통)").grid(row=2, column=2, padx=(5, 0), pady=(6, 2), sticky="w")
         ttk.Checkbutton(
@@ -1971,13 +2297,13 @@ class CDSExecutablePatcher(tk.Tk):
         )
         self.city_specialty_supply_entry.grid(row=4, column=1, padx=(6, 0), pady=(4, 0), sticky="w")
         self._limit_integer_input(self.city_specialty_supply_entry, 0, 7)
-        self.city_common_good_entries: list[ttk.Entry] = []
+        self.city_common_good_entries: list[NativeWinEdit] = []
         for identifier, variable in enumerate(self.city_common_goods):
             ttk.Label(city_trade_box, text=f"교역품 {identifier + 1}:").grid(
                 row=identifier, column=2, padx=(24, 0),
                 pady=(4, 0) if identifier else 0, sticky="w",
             )
-            entry = ttk.Entry(
+            entry = self._native_entry(
                 city_trade_box, textvariable=variable, width=18,
                 state="readonly", takefocus=False,
             )
@@ -2504,7 +2830,9 @@ class CDSExecutablePatcher(tk.Tk):
             )
             first_direction_selector.grid(row=row, column=1, padx=(6, 0), pady=3, sticky="w")
             self._bind_combobox_arrow_selection(first_direction_selector)
-            first_entry = ttk.Entry(discovery_coordinates_box, textvariable=first, width=7, state="disabled")
+            first_entry = self._native_entry(
+                discovery_coordinates_box, textvariable=first, width=7, state="disabled",
+            )
             first_entry.grid(row=row, column=2, padx=(4, 0), pady=3, sticky="w")
             self._limit_decimal_input(first_entry, 0, high)
             ttk.Label(discovery_coordinates_box, text="~").grid(row=row, column=3, padx=(4, 0), pady=3, sticky="w")
@@ -2514,7 +2842,9 @@ class CDSExecutablePatcher(tk.Tk):
             )
             second_direction_selector.grid(row=row, column=4, padx=(4, 0), pady=3, sticky="w")
             self._bind_combobox_arrow_selection(second_direction_selector)
-            second_entry = ttk.Entry(discovery_coordinates_box, textvariable=second, width=7, state="disabled")
+            second_entry = self._native_entry(
+                discovery_coordinates_box, textvariable=second, width=7, state="disabled",
+            )
             second_entry.grid(row=row, column=5, padx=(4, 0), pady=3, sticky="w")
             self._limit_decimal_input(second_entry, 0, high)
             self._discovery_controls.extend((
@@ -5968,7 +6298,10 @@ class CDSExecutablePatcher(tk.Tk):
         if not box:
             return
         x, y, width, height = box
-        editor = ttk.Entry(tree, textvariable=variable, justify=tk.CENTER)
+        editor = self._native_entry(
+            tree, textvariable=variable, width=max(4, len(tree.set(item_id, column))),
+            justify="center",
+        )
         editor.place(x=x, y=y, width=width, height=height)
         self._limit_integer_input(editor, 0, 100)
         editor.focus_set()
