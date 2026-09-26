@@ -86,6 +86,8 @@ from patch_cds_integrated import (
     CityEdit,
     CityRecord,
     FacilityAreaRecord,
+    FacilityEventRecord,
+    FACILITY_EVENT_PART_COUNT,
     ItemEdit,
     ItemRecord,
     ITEM_BOOK_CATEGORY,
@@ -118,6 +120,7 @@ from patch_cds_integrated import (
     read_barmaid_records,
     read_sponsor_records,
     read_erasmus_location_bug_fix_state,
+    read_tunis_book_event_location_fix_state,
     read_person_records,
     read_person_stat_limits,
     read_ship_type_records,
@@ -126,6 +129,7 @@ from patch_cds_integrated import (
     read_troop_combat_records,
     read_city_records,
     read_facility_area_records,
+    read_facility_event_records,
     read_trade_good_names,
     read_trade_region_goods,
     read_item_records,
@@ -255,6 +259,14 @@ HISTORY_ELAPSED_YEARS_FIX_DETAILS = """발견 후 경과 연수 조건 수정
 - 파트 15의 2년 조건과 파트 19의 5년 조건에 적용됩니다.
 
 체크 해제 시 위 수정 사항을 원본 상태로 복원합니다.
+"""
+
+TUNIS_BOOK_EVENT_LOCATION_FIX_DETAILS = """튀니스 주점 아이템 이벤트 장소 수정
+
+- 카사블랑카 주점에서 발생하던 DISEV 파트 265 이벤트(아이템 277번 「지중해의 유혹 1」)를 튀니스 주점에서 발생하도록 옮깁니다.
+- 카사블랑카 주점 연결을 해제하고 튀니스 주점에 같은 이벤트를 연결합니다. 교역소 이벤트와 DISEV 내용은 변경하지 않습니다.
+
+체크 해제 시 카사블랑카 주점 연결을 복원합니다.
 """
 
 BRIBE_ITEM_DUPLICATE_FIX_DETAILS = """감찰관 매수 후 모조품 보고 증거품 재추가 방지
@@ -962,6 +974,7 @@ class CDSExecutablePatcher(tk.Tk):
         self.ship_reuse_fix_enabled = tk.BooleanVar(value=False)
         self.ship_purchase_blank_selection_fix_enabled = tk.BooleanVar(value=False)
         self.tavern_hint_bug_fix_enabled = tk.BooleanVar(value=False)
+        self.tunis_book_event_location_fix_enabled = tk.BooleanVar(value=False)
         self.disev_language_fix_enabled = tk.BooleanVar(value=False)
         self.history_elapsed_years_fix_enabled = tk.BooleanVar(value=False)
         self.bribe_item_duplicate_fix_enabled = tk.BooleanVar(value=False)
@@ -1097,6 +1110,8 @@ class CDSExecutablePatcher(tk.Tk):
         self._city_by_identifier: dict[int, CityRecord] = {}
         self._facility_area_records: tuple[FacilityAreaRecord, ...] = ()
         self._facility_area_original_records: tuple[FacilityAreaRecord, ...] = ()
+        self._facility_event_records: tuple[FacilityEventRecord, ...] = ()
+        self._facility_event_original_records: tuple[FacilityEventRecord, ...] = ()
         self._selected_facility_area_id = 0
         self._trade_good_names: tuple[str, ...] = ()
         self._trade_region_goods: tuple[tuple[int, ...], ...] = ()
@@ -2474,7 +2489,20 @@ class CDSExecutablePatcher(tk.Tk):
             state="disabled",
         )
         self.city_facility_area_button.grid(row=4, column=3, padx=(8, 0), pady=(8, 0), sticky="e")
-        self._city_controls.append(self.city_facility_area_button)
+        self.city_facility_event_button = ttk.Button(
+            city_facility_box, text="이벤트 연결...",
+            command=self._edit_city_facility_events, state="disabled",
+        )
+        self.city_facility_event_button.grid(
+            row=5, column=3, padx=(8, 0), pady=(6, 0), sticky="e",
+        )
+        ttk.Label(
+            city_facility_box,
+            text="도시 시설에 연결된 DISEV 이벤트 파트를 확인·변경합니다.",
+        ).grid(row=5, column=0, columnspan=3, pady=(6, 0), sticky="w")
+        self._city_controls.extend((
+            self.city_facility_area_button, self.city_facility_event_button,
+        ))
 
         city_trade_region_box = ttk.LabelFrame(trade_region_tab, text="교역권 정보", padding=10)
         city_trade_region_box.grid(row=0, column=0, sticky="nw")
@@ -4120,6 +4148,10 @@ class CDSExecutablePatcher(tk.Tk):
             self.city_facility_area_button.configure(
                 state="normal" if enabled and self._facility_area_records else "disabled",
             )
+        if hasattr(self, "city_facility_event_button"):
+            self.city_facility_event_button.configure(
+                state="normal" if enabled and self._facility_event_records else "disabled",
+            )
 
     def _schedule_city_list_refresh(self) -> None:
         job = getattr(self, "_city_search_job", None)
@@ -4277,6 +4309,13 @@ class CDSExecutablePatcher(tk.Tk):
         self._draw_city_preview_areas()
         self._set_city_controls_enabled(bool(self._city_records))
 
+    def _load_facility_event_records(
+        self, records: tuple[FacilityEventRecord, ...],
+    ) -> None:
+        self._facility_event_records = records
+        self._facility_event_original_records = records
+        self._set_city_controls_enabled(bool(self._city_records))
+
     def _on_city_selected(self, _event: tk.Event | None = None) -> None:
         record = self._selected_city_record()
         if record is None:
@@ -4409,6 +4448,160 @@ class CDSExecutablePatcher(tk.Tk):
         if not self._facility_area_records or self._facility_area_records == self._facility_area_original_records:
             return None
         return self._facility_area_records
+
+    def _current_facility_event_edits(self) -> tuple[FacilityEventRecord, ...] | None:
+        if (
+            not self._facility_event_records
+            or self._facility_event_records == self._facility_event_original_records
+        ):
+            return None
+        return self._facility_event_records
+
+    def _edit_city_facility_events(self, _event: tk.Event | None = None) -> None:
+        city = self._selected_city_record()
+        if city is None:
+            self._show_centered_popup("시설 이벤트 연결", "먼저 도시를 선택해 주세요.", kind="error")
+            return
+        city_records = tuple(
+            record for record in self._facility_event_records
+            if record.city_id == city.identifier
+        )
+        if not city_records:
+            self._show_centered_popup(
+                "시설 이벤트 연결", "선택한 도시의 시설 이벤트 연결을 읽지 못했습니다.",
+                kind="error",
+            )
+            return
+
+        window = tk.Toplevel(self)
+        window.withdraw()
+        window.title(f"{city.name} - 시설 이벤트 연결")
+        window.geometry("620x500")
+        window.minsize(560, 420)
+        window.transient(self)
+        window.columnconfigure(0, weight=1)
+        window.rowconfigure(1, weight=1)
+        ttk.Label(
+            window,
+            text="선택한 도시의 시설이 호출할 DISEV.CDS 이벤트 파트를 지정합니다.",
+        ).grid(row=0, column=0, padx=12, pady=(12, 8), sticky="w")
+
+        table_frame = ttk.Frame(window)
+        table_frame.grid(row=1, column=0, padx=12, sticky="nsew")
+        table_frame.columnconfigure(0, weight=1)
+        table_frame.rowconfigure(0, weight=1)
+        tree = ttk.Treeview(
+            table_frame, columns=("facility_id", "facility", "part"),
+            show="headings", height=13, selectmode="browse",
+        )
+        tree.heading("facility_id", text="시설 ID")
+        tree.heading("facility", text="시설")
+        tree.heading("part", text="DISEV 파트")
+        tree.column("facility_id", width=85, anchor="center", stretch=False)
+        tree.column("facility", width=190, anchor="w")
+        tree.column("part", width=145, anchor="center", stretch=False)
+        scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=scrollbar.set)
+        tree.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+        def part_label(part_id: int | None) -> str:
+            return "연결 없음" if part_id is None else f"파트 {part_id:03d}"
+
+        local_records = {record.table_index: record for record in city_records}
+        for record in city_records:
+            facility_name = (
+                CITY_FACILITY_NAMES[record.identifier]
+                if 0 <= record.identifier < len(CITY_FACILITY_NAMES)
+                else f"시설 {record.identifier}"
+            )
+            tree.insert(
+                "", "end", iid=str(record.table_index),
+                values=(f"{record.identifier:02d}", facility_name, part_label(record.event_part_id)),
+            )
+
+        editor = ttk.LabelFrame(window, text="선택한 시설의 연결", padding=8)
+        editor.grid(row=2, column=0, padx=12, pady=(8, 0), sticky="ew")
+        editor.columnconfigure(1, weight=1)
+        selected_label = tk.StringVar(value="시설을 선택해 주세요")
+        part_selection = tk.StringVar(value="연결 없음")
+        ttk.Label(editor, textvariable=selected_label).grid(row=0, column=0, sticky="w")
+        part_selector = ttk.Combobox(
+            editor, textvariable=part_selection,
+            values=(
+                "연결 없음",
+                *(f"파트 {part:03d}" for part in range(FACILITY_EVENT_PART_COUNT)),
+            ),
+            state="disabled", width=18,
+        )
+        part_selector.grid(row=0, column=1, padx=(10, 0), sticky="w")
+        self._bind_combobox_arrow_selection(part_selector)
+        ttk.Label(
+            window,
+            text=(
+                "이벤트 파트 번호는 DISEV.CDS 안의 파트 번호입니다."
+                + (
+                    " 버그 수정의 튀니스 이벤트 이동이 켜져 있으면 튀니스·카사블랑카 주점 연결은 그 수정값이 우선합니다."
+                    if self.bug_fixes_enabled.get()
+                    and self.tunis_book_event_location_fix_enabled.get()
+                    else ""
+                )
+            ),
+            wraplength=590,
+        ).grid(row=3, column=0, padx=12, pady=(8, 0), sticky="w")
+
+        selected_table_index: int | None = None
+
+        def commit_selection(_event: tk.Event | None = None) -> None:
+            if selected_table_index is None:
+                return
+            record = local_records[selected_table_index]
+            label = part_selection.get()
+            event_part_id = None if label == "연결 없음" else int(label.removeprefix("파트 "))
+            local_records[selected_table_index] = FacilityEventRecord(
+                record.identifier, record.city_id, event_part_id, record.table_index,
+            )
+            tree.set(str(selected_table_index), "part", part_label(event_part_id))
+
+        def on_select(_event: tk.Event | None = None) -> None:
+            nonlocal selected_table_index
+            selection = tree.selection()
+            if not selection:
+                return
+            commit_selection()
+            selected_table_index = int(selection[0])
+            record = local_records[selected_table_index]
+            selected_label.set(
+                f"{CITY_FACILITY_NAMES[record.identifier]} (ID {record.identifier})"
+            )
+            part_selection.set(part_label(record.event_part_id))
+            part_selector.configure(state="readonly")
+
+        tree.bind("<<TreeviewSelect>>", on_select)
+        part_selector.bind("<<ComboboxSelected>>", commit_selection)
+
+        buttons = ttk.Frame(window)
+        buttons.grid(row=4, column=0, padx=12, pady=12, sticky="e")
+
+        def save() -> None:
+            commit_selection()
+            self._facility_event_records = tuple(
+                local_records.get(record.table_index, record)
+                if record.city_id == city.identifier else record
+                for record in self._facility_event_records
+            )
+            window.destroy()
+
+        ttk.Button(buttons, text="적용", command=save).pack(side="left", padx=(0, 6))
+        ttk.Button(buttons, text="취소", command=window.destroy).pack(side="left")
+        window.bind("<Escape>", lambda _event: window.destroy())
+        first = city_records[0]
+        tree.selection_set(str(first.table_index))
+        tree.focus(str(first.table_index))
+        on_select()
+        self._center_dialog(window)
+        window.deiconify()
+        window.grab_set()
 
     def _edit_city_facility_areas(self, _event: tk.Event | None = None) -> None:
         if not self._facility_area_records:
@@ -5761,15 +5954,37 @@ class CDSExecutablePatcher(tk.Tk):
         window = tk.Toplevel(self)
         window.withdraw()
         window.title("힌트 정보")
-        window.geometry("820x700")
-        window.minsize(760, 620)
+        window.geometry("880x780")
+        window.minsize(820, 740)
         window.transient(self)
+
+        targets_by_code: dict[int, list[DiscoveryHintTarget]] = {}
+        for target in self._discovery_hint_targets:
+            targets_by_code.setdefault(target.target_id, []).append(target)
+        target_choices_by_code = {
+            code: f"{code}  {' / '.join(dict.fromkeys(target.name for target in targets))}"
+            for code, targets in targets_by_code.items()
+        }
+        try:
+            current_target_code = int(self.discovery_hint_target_id.get())
+        except ValueError:
+            current_target_code = link.target_id
+        if current_target_code not in target_choices_by_code:
+            target_choices_by_code[current_target_code] = (
+                f"{current_target_code}  (연결 대상 없음)"
+            )
+        target_codes_by_choice = {
+            choice: code for code, choice in target_choices_by_code.items()
+        }
+        target_choice_var = tk.StringVar(
+            value=target_choices_by_code[current_target_code],
+        )
 
         frame = ttk.Frame(window, padding=12)
         frame.pack(fill=tk.BOTH, expand=True)
         summary = ttk.LabelFrame(frame, text="기본 정보", padding=10)
         summary.pack(fill=tk.X)
-        for column in (1, 3, 5):
+        for column in (1, 3, 5, 7):
             summary.columnconfigure(column, weight=1)
         ttk.Label(summary, text="힌트 ID:").grid(row=0, column=0, sticky="w")
         ttk.Label(summary, text=f"{link.hint_id:03d}").grid(
@@ -5789,12 +6004,18 @@ class CDSExecutablePatcher(tk.Tk):
         window.update_idletasks()
         hint_name_entry.set(self.discovery_hint_name.get())
         ttk.Label(summary, text="대상 ID:").grid(row=0, column=4, sticky="w")
-        hint_target_entry = ttk.Spinbox(
-            summary, from_=0, to=0xFFFFFFFF,
-            textvariable=self.discovery_hint_target_id, width=10,
+        hint_target_selector = ttk.Combobox(
+            summary,
+            textvariable=target_choice_var,
+            values=tuple(
+                target_choices_by_code[code] for code in sorted(target_choices_by_code)
+            ),
+            width=32,
+            state="readonly",
         )
-        hint_target_entry.grid(row=0, column=5, padx=(7, 0), sticky="w")
-        self._limit_integer_input(hint_target_entry, 0, 0xFFFFFFFF)
+        hint_target_selector.grid(
+            row=0, column=5, columnspan=3, padx=(7, 0), sticky="ew",
+        )
         ttk.Label(summary, text="힌트 본문:").grid(
             row=1, column=0, pady=(10, 0), sticky="nw",
         )
@@ -5802,7 +6023,7 @@ class CDSExecutablePatcher(tk.Tk):
             summary, width=72, height=5, wrap=tk.WORD, font=("맑은 고딕", 9),
         )
         hint_text_editor.grid(
-            row=1, column=1, columnspan=5, pady=(10, 0), sticky="ew",
+            row=1, column=1, columnspan=7, pady=(10, 0), sticky="ew",
         )
         hint_text_editor.insert("1.0", self.discovery_hint_text.get())
 
@@ -5995,11 +6216,27 @@ class CDSExecutablePatcher(tk.Tk):
         target_tree.configure(yscrollcommand=target_scroll.set)
         target_tree.grid(row=0, column=0, sticky="nsew")
         target_scroll.grid(row=0, column=1, sticky="ns")
-        for target in link.targets:
-            target_tree.insert(
-                "", "end",
-                values=(target.kind, f"{target.record_number:03d}", target.name),
-            )
+
+        def refresh_target_view(_event: tk.Event | None = None) -> None:
+            target_code = target_codes_by_choice.get(target_choice_var.get())
+            if target_code is None:
+                return
+            self.discovery_hint_target_id.set(str(target_code))
+            targets = targets_by_code.get(target_code, ())
+            target_tree.delete(*target_tree.get_children())
+            if not targets:
+                target_tree.insert(
+                    "", "end", values=("-", "-", "연결 대상 없음"),
+                )
+                return
+            for target in targets:
+                target_tree.insert(
+                    "", "end",
+                    values=(target.kind, f"{target.record_number:03d}", target.name),
+                )
+
+        hint_target_selector.bind("<<ComboboxSelected>>", refresh_target_view)
+        refresh_target_view()
 
         def close_window() -> None:
             self.discovery_hint_name.set(hint_name_entry.get_limited())
@@ -6669,6 +6906,11 @@ class CDSExecutablePatcher(tk.Tk):
                 TAVERN_HINT_BUG_FIX_DETAILS,
             ),
             (
+                "튀니스 주점 아이템 이벤트 장소 수정",
+                self.tunis_book_event_location_fix_enabled,
+                TUNIS_BOOK_EVENT_LOCATION_FIX_DETAILS,
+            ),
+            (
                 "모뉴멘트밸리 언어 판정 수정",
                 self.disev_language_fix_enabled,
                 DISEV_LANGUAGE_FIX_DETAILS,
@@ -6698,21 +6940,48 @@ class CDSExecutablePatcher(tk.Tk):
     def show_bug_fix_details(self) -> None:
         """Select individual fixes and open their descriptions on demand."""
         window = tk.Toplevel(self)
+        window.withdraw()
         window.title("버그 수정 내역")
-        window.geometry("680x430")
-        window.minsize(560, 360)
+        window.geometry("680x470")
+        window.minsize(560, 380)
         window.transient(self)
+        window.columnconfigure(0, weight=1)
+        window.rowconfigure(1, weight=1)
 
         ttk.Label(
             window,
             text="메인 화면의 '버그 수정'을 체크하면 아래에서 선택한 항목만 적용됩니다.",
             wraplength=640,
-        ).pack(anchor="w", padx=12, pady=(12, 8))
+        ).grid(row=0, column=0, sticky="w", padx=12, pady=(12, 8))
 
         options = self._bug_fix_options()
-        for row, (title, variable, details) in enumerate(options):
-            item = ttk.Frame(window, padding=(20, 4))
-            item.pack(fill=tk.X, padx=12)
+        list_frame = ttk.Frame(window)
+        list_frame.grid(row=1, column=0, sticky="nsew", padx=12)
+        list_frame.columnconfigure(0, weight=1)
+        list_frame.rowconfigure(0, weight=1)
+        option_canvas = tk.Canvas(list_frame, highlightthickness=0, borderwidth=0)
+        option_scrollbar = ttk.Scrollbar(
+            list_frame, orient=tk.VERTICAL, command=option_canvas.yview,
+        )
+        option_canvas.configure(yscrollcommand=option_scrollbar.set)
+        option_canvas.grid(row=0, column=0, sticky="nsew")
+        option_scrollbar.grid(row=0, column=1, sticky="ns")
+        option_list = ttk.Frame(option_canvas)
+        option_window = option_canvas.create_window(
+            (0, 0), window=option_list, anchor="nw",
+        )
+
+        def update_option_scroll_region(_event: tk.Event | None = None) -> None:
+            option_canvas.configure(scrollregion=option_canvas.bbox("all"))
+
+        def resize_option_list(event: tk.Event) -> None:
+            option_canvas.itemconfigure(option_window, width=event.width)
+
+        option_list.bind("<Configure>", update_option_scroll_region)
+        option_canvas.bind("<Configure>", resize_option_list)
+        for title, variable, details in options:
+            item = ttk.Frame(option_list, padding=(8, 4))
+            item.pack(fill=tk.X)
             item.columnconfigure(0, weight=1)
             ttk.Checkbutton(item, text=title, variable=variable).grid(
                 row=0, column=0, sticky="w",
@@ -6726,7 +6995,7 @@ class CDSExecutablePatcher(tk.Tk):
             ).grid(row=0, column=1, sticky="e")
 
         buttons = ttk.Frame(window)
-        buttons.pack(fill=tk.X, padx=12, pady=10)
+        buttons.grid(row=2, column=0, sticky="ew", padx=12, pady=10)
         ttk.Button(
             buttons,
             text="전체 선택",
@@ -6739,6 +7008,7 @@ class CDSExecutablePatcher(tk.Tk):
         ).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Button(buttons, text="닫기", command=window.destroy).pack(side=tk.RIGHT)
         self._center_dialog(window)
+        window.deiconify()
         window.grab_set()
 
     def _update_bug_fix_control_states(self) -> None:
@@ -6918,6 +7188,7 @@ class CDSExecutablePatcher(tk.Tk):
                     ship_reuse_fix_enabled,
                     ship_purchase_blank_selection_fix_enabled,
                     tavern_hint_bug_fix_enabled,
+                    tunis_book_event_location_fix_enabled,
                     disev_language_fix_enabled,
                     history_elapsed_years_fix_enabled,
                     bribe_item_duplicate_fix_enabled,
@@ -6939,6 +7210,7 @@ class CDSExecutablePatcher(tk.Tk):
                 troop_combat_records = read_troop_combat_records(target)
                 city_records = read_city_records(target)
                 facility_area_records = read_facility_area_records(target)
+                facility_event_records = read_facility_event_records(target)
                 trade_good_names = read_trade_good_names(target)
                 trade_region_goods = read_trade_region_goods(target)
                 item_records = read_item_records(target)
@@ -6983,6 +7255,7 @@ class CDSExecutablePatcher(tk.Tk):
             self._load_figurehead_effect_settings(figurehead_effect_settings)
             self._load_city_records(city_records, trade_good_names, trade_region_goods)
             self._load_facility_area_records(facility_area_records)
+            self._load_facility_event_records(facility_event_records)
             self._load_fake_item_records(fake_item_records)
             self._load_hint_records(hint_records)
             self.coordinate.set(coordinate)
@@ -7008,6 +7281,9 @@ class CDSExecutablePatcher(tk.Tk):
                 ship_purchase_blank_selection_fix_enabled,
             )
             self.tavern_hint_bug_fix_enabled.set(tavern_hint_bug_fix_enabled)
+            self.tunis_book_event_location_fix_enabled.set(
+                tunis_book_event_location_fix_enabled,
+            )
             self.disev_language_fix_enabled.set(disev_language_fix_enabled)
             self.history_elapsed_years_fix_enabled.set(history_elapsed_years_fix_enabled)
             self.bribe_item_duplicate_fix_enabled.set(bribe_item_duplicate_fix_enabled)
@@ -7025,6 +7301,7 @@ class CDSExecutablePatcher(tk.Tk):
                 ship_reuse_fix_enabled,
                 ship_purchase_blank_selection_fix_enabled,
                 tavern_hint_bug_fix_enabled,
+                tunis_book_event_location_fix_enabled,
                 disev_language_fix_enabled,
                 history_elapsed_years_fix_enabled,
                 bribe_item_duplicate_fix_enabled,
@@ -7523,6 +7800,8 @@ class CDSExecutablePatcher(tk.Tk):
                 self.bug_fixes_enabled.get() and self.ship_reuse_fix_enabled.get(),
                 self.bug_fixes_enabled.get() and self.ship_purchase_blank_selection_fix_enabled.get(),
                 self.bug_fixes_enabled.get() and self.tavern_hint_bug_fix_enabled.get(),
+                self.bug_fixes_enabled.get()
+                and self.tunis_book_event_location_fix_enabled.get(),
                 self.bug_fixes_enabled.get() and self.disev_language_fix_enabled.get(),
                 self.bug_fixes_enabled.get() and self.history_elapsed_years_fix_enabled.get(),
                 self.bug_fixes_enabled.get() and self.bribe_item_duplicate_fix_enabled.get(),
@@ -7548,6 +7827,7 @@ class CDSExecutablePatcher(tk.Tk):
                 person_vitality_limit=int(self.person_vitality_limit.get()),
                 cannon_edit=cannon_edit,
                 facility_area_edits=self._current_facility_area_edits(),
+                facility_event_edits=self._current_facility_event_edits(),
                 troop_combat_edit=troop_combat_edit,
                 erasmus_location_bug_fix_enabled=(
                     self.bug_fixes_enabled.get() and self.erasmus_location_fix_enabled.get()
@@ -7641,6 +7921,8 @@ class CDSExecutablePatcher(tk.Tk):
         if self._current_facility_area_edits() is not None:
             self._facility_area_original_records = self._facility_area_records
             self._draw_city_preview_areas()
+        self._facility_event_records = read_facility_event_records(target)
+        self._facility_event_original_records = self._facility_event_records
         self._remember_item_edit(item_edit)
         self._remember_fake_item_edit(fake_item_edit)
         self._remember_discovery_edit(discovery_edit)

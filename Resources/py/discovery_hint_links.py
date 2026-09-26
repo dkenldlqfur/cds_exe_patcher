@@ -54,6 +54,7 @@ class DiscoveryHintTarget:
     record_number: int
     name: str
     kind: str
+    target_id: int
 
 
 @dataclass(frozen=True)
@@ -171,8 +172,11 @@ def _read_discovery_hint_targets_from_data(
             record_offset + DISCOVERY_NAME_POINTER_OFFSET,
             f"발견물 마스터 {record_number}번 이름",
         )
+        target_id = struct.unpack_from(
+            "<I", data, record_offset + DISCOVERY_TARGET_ID_OFFSET,
+        )[0]
         targets.append(DiscoveryHintTarget(
-            record_number, name, _record_kind(record_number),
+            record_number, name, _record_kind(record_number), target_id,
         ))
     return tuple(targets)
 
@@ -245,12 +249,7 @@ def read_discovery_hint_links(
             target.record_number: target for target in all_targets
         }
         for target in all_targets:
-            record_number = target.record_number
-            record_offset = discovery_offset + record_number * DISCOVERY_MASTER_RECORD_SIZE
-            target_id = struct.unpack_from(
-                "<I", data, record_offset + DISCOVERY_TARGET_ID_OFFSET,
-            )[0]
-            targets_by_id[target_id].append(target)
+            targets_by_id[target.target_id].append(target)
 
         books_by_hint: defaultdict[int, list[DiscoveryHintBookSource]] = defaultdict(list)
         for record_number in range(BOOK_RECORD_COUNT):

@@ -793,6 +793,16 @@ class FacilityAreaRecord:
 
 
 @dataclass(frozen=True)
+class FacilityEventRecord:
+    """One city/facility link to a DISEV event part."""
+
+    identifier: int
+    city_id: int
+    event_part_id: int | None
+    table_index: int
+
+
+@dataclass(frozen=True)
 class ItemRecord:
     """One static item definition embedded in the executable."""
 
@@ -1322,10 +1332,18 @@ FACILITY_LAYOUT_RECORD_COUNT = 1508
 FACILITY_LAYOUT_RECORD_SIZE = 0x38
 FACILITY_LAYOUT_CITY_ID_OFFSET = 0x08
 FACILITY_LAYOUT_ID_OFFSET = 0x0C
+FACILITY_EVENT_PART_OFFSET = 0x1C
+FACILITY_EVENT_PART_COUNT = 274
 FACILITY_LAYOUT_X_OFFSET = 0x20
 FACILITY_LAYOUT_Y_OFFSET = 0x24
 FACILITY_LAYOUT_WIDTH_OFFSET = 0x28
 FACILITY_LAYOUT_HEIGHT_OFFSET = 0x2C
+# The same city/facility rows also carry the DISEV part called by that place.
+TUNIS_CITY_ID = 82
+CASABLANCA_CITY_ID = 85
+TAVERN_FACILITY_ID = 4
+TUNIS_BOOK_EVENT_PART = 265
+NO_FACILITY_EVENT = 0xFFFFFFFF
 CITY_WORLD_X_MIN = 0
 CITY_WORLD_X_MAX = 2500
 CITY_WORLD_Y_MIN = 0
@@ -2094,6 +2112,81 @@ def apply_tavern_hint_bug_fix(data: bytearray, enabled: bool) -> bool:
         struct.pack_into("<i", data, cacao_city_offset, city)
         changed = True
     return changed
+
+
+def _tunis_book_event_offsets(data: bytes | bytearray) -> tuple[int, int]:
+    """Return the DISEV-part fields for Tunis and Casablanca taverns."""
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        if pe.FILE_HEADER.Machine != 0x14C or pe.OPTIONAL_HEADER.ImageBase != 0x400000:
+            raise ValueError("지원하는 32비트 CDS III 실행 파일이 아닙니다.")
+        table_offset = pe.get_offset_from_rva(
+            FACILITY_LAYOUT_TABLE_VA - pe.OPTIONAL_HEADER.ImageBase,
+        )
+    finally:
+        pe.close()
+    table_size = FACILITY_LAYOUT_RECORD_COUNT * FACILITY_LAYOUT_RECORD_SIZE
+    if table_offset < 0 or table_offset + table_size > len(data):
+        raise ValueError("도시·시설 이벤트 연결표의 범위를 검증하지 못했습니다.")
+    wanted = {
+        (TUNIS_CITY_ID, TAVERN_FACILITY_ID),
+        (CASABLANCA_CITY_ID, TAVERN_FACILITY_ID),
+    }
+    offsets: dict[tuple[int, int], int] = {}
+    for index in range(FACILITY_LAYOUT_RECORD_COUNT):
+        row_offset = table_offset + index * FACILITY_LAYOUT_RECORD_SIZE
+        key = struct.unpack_from(
+            "<II", data,
+            row_offset + FACILITY_LAYOUT_CITY_ID_OFFSET,
+        )
+        if key in wanted:
+            if key in offsets:
+                raise ValueError("도시·시설 이벤트 연결 행이 중복되었습니다.")
+            offsets[key] = row_offset + FACILITY_EVENT_PART_OFFSET
+    if set(offsets) != wanted:
+        raise ValueError("튀니스·카사블랑카 주점의 이벤트 연결 행을 찾지 못했습니다.")
+    return (
+        offsets[(TUNIS_CITY_ID, TAVERN_FACILITY_ID)],
+        offsets[(CASABLANCA_CITY_ID, TAVERN_FACILITY_ID)],
+    )
+
+
+def read_tunis_book_event_location_fix_state(data: bytes | bytearray) -> bool:
+    """Recognize the relocation of the Tunis-themed book event to Tunis."""
+    tunis_offset, casablanca_offset = _tunis_book_event_offsets(data)
+    tunis_part = struct.unpack_from("<I", data, tunis_offset)[0]
+    casablanca_part = struct.unpack_from("<I", data, casablanca_offset)[0]
+    return (
+        tunis_part == TUNIS_BOOK_EVENT_PART
+        and casablanca_part == NO_FACILITY_EVENT
+    )
+
+
+def apply_tunis_book_event_location_fix(data: bytearray, enabled: bool) -> bool:
+    """Move DISEV part 265 from Casablanca's tavern to Tunis's tavern."""
+    tunis_offset, casablanca_offset = _tunis_book_event_offsets(data)
+    current = (
+        struct.unpack_from("<I", data, tunis_offset)[0],
+        struct.unpack_from("<I", data, casablanca_offset)[0],
+    )
+    original = (NO_FACILITY_EVENT, TUNIS_BOOK_EVENT_PART)
+    patched = (TUNIS_BOOK_EVENT_PART, NO_FACILITY_EVENT)
+    target = patched if enabled else original
+    if current == target:
+        return False
+    if enabled and current != original:
+        raise ValueError(
+            "튀니스·카사블랑카 주점 이벤트 연결이 원본 또는 지원되는 수정 상태와 다릅니다. "
+            "기존 사용자 설정을 덮어쓰지 않도록 패치를 중단했습니다."
+        )
+    if not enabled and current != patched:
+        raise ValueError(
+            "튀니스·카사블랑카 주점 이벤트 연결이 원본 또는 지원되는 수정 상태와 다릅니다. "
+            "기존 사용자 설정을 덮어쓰지 않도록 패치를 중단했습니다."
+        )
+    struct.pack_into("<I", data, tunis_offset, target[0])
+    struct.pack_into("<I", data, casablanca_offset, target[1])
+    return True
 
 
 def cold_limit_to_latitude(cold_limit: int) -> Decimal:
@@ -6406,6 +6499,81 @@ def apply_facility_area_edits(
     return True
 
 
+def _read_facility_event_records_from_data(data: bytes) -> tuple[FacilityEventRecord, ...]:
+    """Read each city's facility-to-DISEV-part link."""
+    areas = _read_facility_area_records_from_data(data)
+    pe = pefile.PE(data=data, fast_load=True)
+    try:
+        table_offset = pe.get_offset_from_rva(
+            FACILITY_LAYOUT_TABLE_VA - pe.OPTIONAL_HEADER.ImageBase,
+        )
+    finally:
+        pe.close()
+    records: list[FacilityEventRecord] = []
+    for area in areas:
+        row_offset = table_offset + area.table_index * FACILITY_LAYOUT_RECORD_SIZE
+        raw_part_id = struct.unpack_from(
+            "<I", data, row_offset + FACILITY_EVENT_PART_OFFSET,
+        )[0]
+        if raw_part_id != NO_FACILITY_EVENT and raw_part_id >= FACILITY_EVENT_PART_COUNT:
+            raise ValueError(
+                f"도시 {area.city_id}번 시설 {area.identifier}번의 이벤트 파트 번호가 올바르지 않습니다."
+            )
+        records.append(FacilityEventRecord(
+            area.identifier,
+            area.city_id,
+            None if raw_part_id == NO_FACILITY_EVENT else raw_part_id,
+            area.table_index,
+        ))
+    return tuple(records)
+
+
+def read_facility_event_records(target: Path) -> tuple[FacilityEventRecord, ...]:
+    """Read city/facility event links from an executable without modifying it."""
+    return _read_facility_event_records_from_data(target.resolve(strict=True).read_bytes())
+
+
+def apply_facility_event_edits(
+    data: bytearray, edits: tuple[FacilityEventRecord, ...] | None,
+) -> bool:
+    """Update the selected event-part numbers while preserving all other row data."""
+    if edits is None:
+        return False
+    if len(edits) != FACILITY_LAYOUT_RECORD_COUNT:
+        raise ValueError("도시별 시설 이벤트 연결 수가 원본과 일치하지 않습니다.")
+    if tuple(edit.table_index for edit in edits) != tuple(range(FACILITY_LAYOUT_RECORD_COUNT)):
+        raise ValueError("도시별 시설 이벤트 연결 인덱스가 올바르지 않습니다.")
+    current = _read_facility_event_records_from_data(bytes(data))
+    if tuple((edit.city_id, edit.identifier) for edit in edits) != tuple(
+        (record.city_id, record.identifier) for record in current
+    ):
+        raise ValueError("도시별 시설 이벤트 연결 ID가 원본 실행 파일과 일치하지 않습니다.")
+    if any(
+        edit.event_part_id is not None
+        and not 0 <= edit.event_part_id < FACILITY_EVENT_PART_COUNT
+        for edit in edits
+    ):
+        raise ValueError("이벤트 파트는 없음 또는 0~273 범위로 지정해 주세요.")
+    if current == edits:
+        return False
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        table_offset = pe.get_offset_from_rva(
+            FACILITY_LAYOUT_TABLE_VA - pe.OPTIONAL_HEADER.ImageBase,
+        )
+    finally:
+        pe.close()
+    for edit, record in zip(edits, current):
+        if edit.event_part_id == record.event_part_id:
+            continue
+        raw_part_id = (
+            NO_FACILITY_EVENT if edit.event_part_id is None else edit.event_part_id
+        )
+        row_offset = table_offset + edit.table_index * FACILITY_LAYOUT_RECORD_SIZE
+        struct.pack_into("<I", data, row_offset + FACILITY_EVENT_PART_OFFSET, raw_part_id)
+    return True
+
+
 def read_trade_good_names(target: Path) -> tuple[str, ...]:
     """Read the 70 EXE-side trade-good names used by city specialties."""
     data = target.resolve(strict=True).read_bytes()
@@ -8105,7 +8273,7 @@ def read_settings(
 ) -> tuple[
     str, tuple[tuple[int, int], ...], int, int, bool, int, int, int, int, int,
     int, int, int, int, int, int, int, bool, PirateVarietySettings, bool, Decimal, bool,
-    bool, bool, bool, bool, bool, bool, bool, bool, bool, bool,
+    bool, bool, bool, bool, bool, bool, bool, bool, bool, bool, bool,
 ]:
     """Read the settings currently encoded in a selected executable."""
     target = target.resolve(strict=True)
@@ -8152,6 +8320,7 @@ def read_settings(
             _ship_reuse_fix_patch_info(data),
             _ship_purchase_blank_selection_fix_patch_info(data),
             read_tavern_hint_bug_fix_state(data),
+            read_tunis_book_event_location_fix_state(data),
             _disev_language_fix_patch_info(data),
             _history_elapsed_years_fix_patch_info(data),
             _bribe_item_duplicate_fix_patch_info(data),
@@ -8214,6 +8383,7 @@ def apply_all(
     ship_reuse_fix_enabled: bool = False,
     ship_purchase_blank_selection_fix_enabled: bool = False,
     tavern_hint_bug_fix_enabled: bool = False,
+    tunis_book_event_location_fix_enabled: bool = False,
     disev_language_fix_enabled: bool = False,
     history_elapsed_years_fix_enabled: bool = False,
     bribe_item_duplicate_fix_enabled: bool = False,
@@ -8238,6 +8408,7 @@ def apply_all(
     person_vitality_limit: int | None = None,
     cannon_edit: CannonEdit | None = None,
     facility_area_edits: tuple[FacilityAreaRecord, ...] | None = None,
+    facility_event_edits: tuple[FacilityEventRecord, ...] | None = None,
     troop_combat_edit: TroopCombatEdit | None = None,
     erasmus_location_bug_fix_enabled: bool = False,
 ) -> Path | None:
@@ -8250,6 +8421,7 @@ def apply_all(
     ship_reuse_fix_was_enabled = _ship_reuse_fix_patch_info(original)
     ship_purchase_blank_selection_fix_was_enabled = _ship_purchase_blank_selection_fix_patch_info(original)
     tavern_hint_bug_fix_was_enabled = read_tavern_hint_bug_fix_state(original)
+    tunis_book_event_location_fix_was_enabled = read_tunis_book_event_location_fix_state(original)
     history_elapsed_years_fix_was_enabled = _history_elapsed_years_fix_patch_info(original)
     bribe_item_duplicate_fix_was_enabled = _bribe_item_duplicate_fix_patch_info(original)
     erasmus_location_bug_fix_was_enabled = read_erasmus_location_bug_fix_state(original)
@@ -8273,6 +8445,8 @@ def apply_all(
         apply_ship_purchase_blank_selection_fix(before_coordinate, False)
     if tavern_hint_bug_fix_was_enabled:
         apply_tavern_hint_bug_fix(before_coordinate, False)
+    if tunis_book_event_location_fix_was_enabled:
+        apply_tunis_book_event_location_fix(before_coordinate, False)
     if history_elapsed_years_fix_was_enabled:
         apply_history_elapsed_years_fix(before_coordinate, False)
     if bribe_item_duplicate_fix_was_enabled:
@@ -8337,6 +8511,36 @@ def apply_all(
     apply_troop_combat_edit(updated, troop_combat_edit)
     apply_city_edit(updated, city_edit)
     apply_facility_area_edits(updated, facility_area_edits)
+    event_edits_to_apply = facility_event_edits
+    if (
+        event_edits_to_apply is not None
+        and tunis_book_event_location_fix_was_enabled
+        and not tunis_book_event_location_fix_enabled
+    ):
+        # The loaded editor model still contains the prior automatic mapping.
+        # When that option is unchecked, translate untouched patched values
+        # back to the original links before applying any user's manual edits.
+        event_edits_to_apply = tuple(
+            FacilityEventRecord(
+                edit.identifier,
+                edit.city_id,
+                (
+                    None if edit.city_id == TUNIS_CITY_ID else TUNIS_BOOK_EVENT_PART
+                )
+                if (
+                    edit.identifier == TAVERN_FACILITY_ID
+                    and (
+                        (edit.city_id == TUNIS_CITY_ID
+                         and edit.event_part_id == TUNIS_BOOK_EVENT_PART)
+                        or (edit.city_id == CASABLANCA_CITY_ID
+                            and edit.event_part_id is None)
+                    )
+                ) else edit.event_part_id,
+                edit.table_index,
+            )
+            for edit in event_edits_to_apply
+        )
+    apply_facility_event_edits(updated, event_edits_to_apply)
     apply_trade_region_goods(updated, trade_region_goods)
     apply_item_edit(updated, item_edit)
     apply_fake_item_edit(updated, fake_item_edit)
@@ -8350,6 +8554,8 @@ def apply_all(
         apply_failed_pottery_patch(updated, failed_pottery_enabled)
     if tavern_hint_bug_fix_enabled or tavern_hint_bug_fix_was_enabled:
         apply_tavern_hint_bug_fix(updated, tavern_hint_bug_fix_enabled)
+    if tunis_book_event_location_fix_enabled:
+        apply_tunis_book_event_location_fix(updated, True)
     if erasmus_location_bug_fix_enabled or erasmus_location_bug_fix_was_enabled:
         apply_erasmus_location_bug_fix(updated, erasmus_location_bug_fix_enabled)
     if discover_avi_enabled or discover_avi_was_enabled:
