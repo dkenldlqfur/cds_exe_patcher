@@ -80,8 +80,11 @@ from patch_cds_integrated import (
     ShipTypeRecord,
     CannonEdit,
     CannonRecord,
+    TroopCombatRecord,
+    TroopCombatEdit,
     CityEdit,
     CityRecord,
+    FacilityAreaRecord,
     ItemEdit,
     ItemRecord,
     ITEM_BOOK_CATEGORY,
@@ -118,7 +121,9 @@ from patch_cds_integrated import (
     read_ship_type_records,
     read_cannon_records,
     apply_cannon_edit,
+    read_troop_combat_records,
     read_city_records,
+    read_facility_area_records,
     read_trade_good_names,
     read_trade_region_goods,
     read_item_records,
@@ -1029,6 +1034,17 @@ class CDSExecutablePatcher(tk.Tk):
         self._cannon_records: tuple[CannonRecord, ...] = ()
         self._cannon_by_identifier: dict[int, CannonRecord] = {}
         self._cannon_controls: list[tk.Widget | NativeWinEdit] = []
+        self._troop_combat_records: tuple[TroopCombatRecord, ...] = ()
+        self._troop_combat_by_identifier: dict[int, TroopCombatRecord] = {}
+        self._troop_combat_controls: list[tk.Widget] = []
+        self.troop_attack_technology = tk.StringVar()
+        self.troop_attack_technology_coefficient = tk.StringVar()
+        self.troop_attack_stat_coefficient = tk.StringVar()
+        self.troop_attack_flat_bonus = tk.StringVar()
+        self.troop_defense_technology = tk.StringVar()
+        self.troop_defense_technology_coefficient = tk.StringVar()
+        self.troop_defense_stat_coefficient = tk.StringVar()
+        self.troop_defense_flat_bonus = tk.StringVar()
         self.city_name = tk.StringVar()
         self.city_inland_connections = [tk.StringVar(), tk.StringVar()]
         self.city_nation = tk.StringVar()
@@ -1050,6 +1066,9 @@ class CDSExecutablePatcher(tk.Tk):
         self._trade_region_good_photos: list[ImageTk.PhotoImage | None] = [None] * 5
         self._city_records: tuple[CityRecord, ...] = ()
         self._city_by_identifier: dict[int, CityRecord] = {}
+        self._facility_area_records: tuple[FacilityAreaRecord, ...] = ()
+        self._facility_area_original_records: tuple[FacilityAreaRecord, ...] = ()
+        self._selected_facility_area_id = 0
         self._trade_good_names: tuple[str, ...] = ()
         self._trade_region_goods: tuple[tuple[int, ...], ...] = ()
         self._city_controls: list[tk.Widget | NativeWinEdit] = []
@@ -1601,6 +1620,7 @@ class CDSExecutablePatcher(tk.Tk):
         person_tab = ttk.Frame(settings_notebook, padding=10)
         ship_tab = ttk.Frame(settings_notebook, padding=10)
         cannon_tab = ttk.Frame(settings_notebook, padding=10)
+        troop_combat_tab = ttk.Frame(settings_notebook, padding=10)
         city_tab = ttk.Frame(settings_notebook, padding=10)
         trade_region_tab = ttk.Frame(settings_notebook, padding=10)
         item_tab = ttk.Frame(settings_notebook, padding=10)
@@ -1616,6 +1636,7 @@ class CDSExecutablePatcher(tk.Tk):
         settings_notebook.add(person_tab, text="인물")
         settings_notebook.add(ship_tab, text="함선")
         settings_notebook.add(cannon_tab, text="대포")
+        settings_notebook.add(troop_combat_tab, text="병종")
         settings_notebook.add(city_tab, text="도시")
         settings_notebook.add(trade_region_tab, text="교역권")
         settings_notebook.add(item_tab, text="아이템")
@@ -2168,10 +2189,78 @@ class CDSExecutablePatcher(tk.Tk):
         self._cannon_controls.append(self.cannon_name_entry)
         self._set_cannon_controls_enabled(False)
 
+        troop_list_box = ttk.LabelFrame(troop_combat_tab, text="병종 목록", padding=10)
+        troop_list_box.grid(row=0, column=0, sticky="nsew")
+        troop_combat_tab.columnconfigure(0, weight=0)
+        troop_combat_tab.rowconfigure(0, weight=1)
+        troop_list_box.columnconfigure(0, weight=1)
+        troop_list_box.rowconfigure(0, weight=1)
+        self.troop_combat_list = ttk.Treeview(
+            troop_list_box, columns=("id", "name"), show="headings", height=1,
+            selectmode="browse",
+        )
+        self.troop_combat_list.heading("id", text="코드")
+        self.troop_combat_list.heading("name", text="병종")
+        self._enable_treeview_text_sort(self.troop_combat_list, "id", "코드")
+        self._enable_treeview_text_sort(self.troop_combat_list, "name", "병종")
+        self.troop_combat_list.column("id", width=48, anchor="center", stretch=False)
+        self.troop_combat_list.column("name", width=130, anchor="w")
+        troop_scroll = ttk.Scrollbar(
+            troop_list_box, orient="vertical", command=self.troop_combat_list.yview,
+        )
+        self.troop_combat_list.configure(yscrollcommand=troop_scroll.set)
+        self.troop_combat_list.grid(row=0, column=0, sticky="nsew")
+        troop_scroll.grid(row=0, column=1, sticky="ns")
+        self.troop_combat_list.bind("<<TreeviewSelect>>", self._on_troop_combat_selected)
+
+        troop_info = ttk.LabelFrame(troop_combat_tab, text="병종 전투 공식", padding=10)
+        troop_info.grid(row=0, column=1, padx=(10, 0), sticky="nw")
+        ttk.Label(
+            troop_info,
+            text="계산식: 기술값 × 기술계수 + 능력치 × 능력치계수 ÷ 10 + 상수",
+        ).grid(row=0, column=0, columnspan=8, sticky="w", pady=(0, 8))
+        troop_fields = (
+            ("공격 기술", self.troop_attack_technology, 0, 12),
+            ("기술계수", self.troop_attack_technology_coefficient, 0, 127),
+            ("무력계수", self.troop_attack_stat_coefficient, 0, 127),
+            ("상수", self.troop_attack_flat_bonus, -128, 127),
+            ("방어 기술", self.troop_defense_technology, 0, 12),
+            ("기술계수", self.troop_defense_technology_coefficient, 0, 127),
+            ("지력계수", self.troop_defense_stat_coefficient, 0, 127),
+            ("상수", self.troop_defense_flat_bonus, -128, 127),
+        )
+        for index, (label, variable, low, high) in enumerate(troop_fields):
+            column = index % 4 * 2
+            row = index // 4 + 1
+            ttk.Label(troop_info, text=f"{label}:").grid(
+                row=row, column=column, sticky="w", padx=(10, 0) if column else 0, pady=4,
+            )
+            if index in (0, 4):
+                entry = ttk.Combobox(
+                    troop_info, values=PERSON_SKILL_NAMES, textvariable=variable,
+                    width=10, state="disabled",
+                )
+            else:
+                entry = ttk.Spinbox(
+                    troop_info, from_=low, to=high, textvariable=variable,
+                    width=7, state="disabled",
+                )
+                self._limit_integer_input(entry, low, high)
+            entry.grid(row=row, column=column + 1, padx=(5, 10), sticky="w", pady=4)
+            self._troop_combat_controls.append(entry)
+        self._troop_combat_controls.append(self.troop_combat_list)
+        ttk.Label(
+            troop_info,
+            text="기술 코드는 EXE 기술 계산에 전달되는 인덱스입니다. 주술사·고승·표범은 원본에 공격 공식이 없습니다.",
+        ).grid(row=3, column=0, columnspan=8, sticky="w", pady=(8, 0))
+        self._set_troop_combat_controls_enabled(False)
+
         city_list_box = ttk.LabelFrame(city_tab, text="도시 목록", padding=10)
-        city_list_box.grid(row=0, column=0, rowspan=2, sticky="ns")
+        city_list_box.grid(row=0, column=0, rowspan=2, sticky="nsew")
         city_tab.grid_columnconfigure(1, weight=1)
-        city_tab.grid_rowconfigure(1, minsize=324)
+        city_tab.grid_rowconfigure(1, minsize=324, weight=1)
+        city_list_box.columnconfigure(1, weight=1)
+        city_list_box.rowconfigure(1, weight=1)
         ttk.Label(city_list_box, text="검색:").grid(row=0, column=0, sticky="w")
         city_search_host = tk.Frame(city_list_box, width=180, height=23)
         city_search_host.grid(row=0, column=1, padx=(6, 0), sticky="w")
@@ -2180,6 +2269,8 @@ class CDSExecutablePatcher(tk.Tk):
         )
         city_list_frame = ttk.Frame(city_list_box)
         city_list_frame.grid(row=1, column=0, columnspan=2, pady=(8, 0), sticky="nsew")
+        city_list_frame.columnconfigure(0, weight=1)
+        city_list_frame.rowconfigure(0, weight=1)
         self.city_list = ttk.Treeview(
             city_list_frame, columns=("id", "name"), show="headings", height=16, selectmode="browse",
         )
@@ -2205,9 +2296,9 @@ class CDSExecutablePatcher(tk.Tk):
         city_details_notebook.add(city_market_tab, text="시장 정보")
         city_details_notebook.add(city_trade_tab, text="교역")
         city_details_notebook.add(city_facility_tab, text="시설 정보")
-        # Reserve the lower 400×320 preview first.  The editor notebook gets
-        # only the vertical space left in the fixed-size main window.
-        city_details_notebook.configure(height=130)
+        # Keep enough vertical room for every city-detail tab; the fixed-size
+        # preview remains below it and still fits within the main window.
+        city_details_notebook.configure(height=170)
 
         city_box = ttk.Frame(city_info_tab)
         city_box.grid(row=0, column=0, sticky="nw")
@@ -2336,12 +2427,25 @@ class CDSExecutablePatcher(tk.Tk):
         city_facility_box.grid(row=0, column=0, sticky="nw")
         self.city_facility_buttons: list[ttk.Checkbutton] = []
         for identifier, (name, variable) in enumerate(zip(CITY_FACILITY_NAMES, self.city_facilities)):
-            button = ttk.Checkbutton(city_facility_box, text=name, variable=variable, state="disabled")
+            button = ttk.Checkbutton(
+                city_facility_box, text=name, variable=variable,
+                command=self._draw_city_preview_areas, state="disabled",
+            )
             button.grid(
                 row=identifier // 4, column=identifier % 4,
                 padx=(10, 0) if identifier % 4 else 0, pady=(4, 0), sticky="w",
             )
             self.city_facility_buttons.append(button); self._city_controls.append(button)
+        ttk.Label(
+            city_facility_box,
+            text="지도와 영역 편집에는 선택한 도시의 시설 배치가 표시됩니다.",
+        ).grid(row=4, column=0, columnspan=3, pady=(8, 0), sticky="w")
+        self.city_facility_area_button = ttk.Button(
+            city_facility_box, text="영역 편집...", command=self._edit_city_facility_areas,
+            state="disabled",
+        )
+        self.city_facility_area_button.grid(row=4, column=3, padx=(8, 0), pady=(8, 0), sticky="e")
+        self._city_controls.append(self.city_facility_area_button)
 
         city_trade_region_box = ttk.LabelFrame(trade_region_tab, text="교역권 정보", padding=10)
         city_trade_region_box.grid(row=0, column=0, sticky="nw")
@@ -2414,8 +2518,13 @@ class CDSExecutablePatcher(tk.Tk):
         city_preview_box.grid(row=1, column=1, padx=(10, 0), pady=(10, 0), sticky="sw")
         city_preview_box.grid_propagate(False)
         city_preview_box.pack_propagate(False)
-        self.city_image_preview = tk.Label(city_preview_box, bg="#222222", fg="#DDDDDD", text="이미지 없음")
-        self.city_image_preview.pack(fill=tk.BOTH, expand=True)
+        self.city_image_preview = tk.Canvas(
+            city_preview_box, width=400, height=320, bg="#222222",
+            highlightthickness=0, borderwidth=0,
+        )
+        self.city_image_preview.pack(fill=tk.NONE, expand=False)
+        self.city_image_preview.bind("<Button-1>", self._on_city_preview_area_click)
+        self.city_image_preview.bind("<Double-Button-1>", self._edit_city_facility_areas)
         self._set_city_controls_enabled(False)
 
         item_list_box = ttk.LabelFrame(item_tab, text="아이템 목록", padding=10)
@@ -3876,6 +3985,98 @@ class CDSExecutablePatcher(tk.Tk):
         )
         self._reapply_treeview_text_sort(self.cannon_list, "name")
 
+    def _set_troop_combat_controls_enabled(self, enabled: bool) -> None:
+        for control in self._troop_combat_controls:
+            if isinstance(control, ttk.Treeview):
+                control.configure(selectmode="browse" if enabled else "none")
+            elif isinstance(control, ttk.Combobox):
+                control.configure(state="readonly" if enabled else "disabled")
+            else:
+                control.configure(state="normal" if enabled else "disabled")
+
+    def _selected_troop_combat_record(self) -> TroopCombatRecord | None:
+        selection = self.troop_combat_list.selection()
+        return self._troop_combat_by_identifier.get(int(selection[0])) if selection else None
+
+    def _load_troop_combat_records(self, records: tuple[TroopCombatRecord, ...]) -> None:
+        self._troop_combat_records = records
+        self._troop_combat_by_identifier = {record.identifier: record for record in records}
+        self.troop_combat_list.delete(*self.troop_combat_list.get_children())
+        for record in records:
+            self.troop_combat_list.insert(
+                "", "end", iid=str(record.identifier),
+                values=(f"{record.identifier:02d}", record.name),
+            )
+        self._reapply_treeview_text_sort(self.troop_combat_list, "id")
+        self._set_troop_combat_controls_enabled(bool(records))
+        if records:
+            self.troop_combat_list.selection_set(str(records[0].identifier))
+            self.troop_combat_list.focus(str(records[0].identifier))
+            self._on_troop_combat_selected()
+
+    def _on_troop_combat_selected(self, _event: tk.Event | None = None) -> None:
+        record = self._selected_troop_combat_record()
+        if record is None:
+            return
+        values = (
+            (self.troop_attack_technology, PERSON_SKILL_NAMES[record.attack_technology]),
+            (self.troop_attack_technology_coefficient, record.attack_technology_coefficient),
+            (self.troop_attack_stat_coefficient, record.attack_stat_coefficient),
+            (self.troop_attack_flat_bonus, record.attack_flat_bonus),
+            (self.troop_defense_technology, PERSON_SKILL_NAMES[record.defense_technology]),
+            (self.troop_defense_technology_coefficient, record.defense_technology_coefficient),
+            (self.troop_defense_stat_coefficient, record.defense_stat_coefficient),
+            (self.troop_defense_flat_bonus, record.defense_flat_bonus),
+        )
+        for variable, value in values:
+            variable.set(str(value))
+        attack_enabled = record.identifier < 21
+        for control in self._troop_combat_controls[:4]:
+            state = "disabled" if not attack_enabled else (
+                "readonly" if isinstance(control, ttk.Combobox) else "normal"
+            )
+            control.configure(state=state)
+
+    def _current_troop_combat_edit(self) -> TroopCombatEdit | None:
+        record = self._selected_troop_combat_record()
+        if record is None:
+            return None
+        try:
+            return TroopCombatEdit(
+                record.identifier,
+                PERSON_SKILL_NAMES.index(self.troop_attack_technology.get()),
+                int(self.troop_attack_technology_coefficient.get()),
+                int(self.troop_attack_stat_coefficient.get()),
+                int(self.troop_attack_flat_bonus.get()),
+                PERSON_SKILL_NAMES.index(self.troop_defense_technology.get()),
+                int(self.troop_defense_technology_coefficient.get()),
+                int(self.troop_defense_stat_coefficient.get()),
+                int(self.troop_defense_flat_bonus.get()),
+            )
+        except ValueError as error:
+            raise ValueError("병종 공격·방어 공식의 입력값을 확인해 주세요.") from error
+
+    def _remember_troop_combat_edit(self, edit: TroopCombatEdit | None) -> None:
+        if edit is None:
+            return
+        self._troop_combat_records = tuple(
+            TroopCombatRecord(
+                record.identifier, record.name,
+                edit.attack_technology if record.identifier == edit.identifier else record.attack_technology,
+                edit.attack_technology_coefficient if record.identifier == edit.identifier else record.attack_technology_coefficient,
+                edit.attack_stat_coefficient if record.identifier == edit.identifier else record.attack_stat_coefficient,
+                edit.attack_flat_bonus if record.identifier == edit.identifier else record.attack_flat_bonus,
+                edit.defense_technology if record.identifier == edit.identifier else record.defense_technology,
+                edit.defense_technology_coefficient if record.identifier == edit.identifier else record.defense_technology_coefficient,
+                edit.defense_stat_coefficient if record.identifier == edit.identifier else record.defense_stat_coefficient,
+                edit.defense_flat_bonus if record.identifier == edit.identifier else record.defense_flat_bonus,
+            )
+            for record in self._troop_combat_records
+        )
+        self._troop_combat_by_identifier = {
+            record.identifier: record for record in self._troop_combat_records
+        }
+
     def _set_city_controls_enabled(self, enabled: bool) -> None:
         for control in self._city_controls:
             if isinstance(control, NativeWinEdit):
@@ -3886,6 +4087,10 @@ class CDSExecutablePatcher(tk.Tk):
                 control.configure(state="readonly" if enabled else "disabled")
             else:
                 control.state(["!disabled"] if enabled else ["disabled"])
+        if hasattr(self, "city_facility_area_button"):
+            self.city_facility_area_button.configure(
+                state="normal" if enabled and self._facility_area_records else "disabled",
+            )
 
     def _schedule_city_list_refresh(self) -> None:
         job = getattr(self, "_city_search_job", None)
@@ -4036,6 +4241,13 @@ class CDSExecutablePatcher(tk.Tk):
             self.city_list.focus(first_identifier)
             self._on_city_selected()
 
+    def _load_facility_area_records(self, records: tuple[FacilityAreaRecord, ...]) -> None:
+        self._facility_area_records = records
+        self._facility_area_original_records = records
+        self._selected_facility_area_id = 0
+        self._draw_city_preview_areas()
+        self._set_city_controls_enabled(bool(self._city_records))
+
     def _on_city_selected(self, _event: tk.Event | None = None) -> None:
         record = self._selected_city_record()
         if record is None:
@@ -4073,10 +4285,300 @@ class CDSExecutablePatcher(tk.Tk):
         try:
             image = read_city_image(self.path.get(), city_id=city_id)
             self._city_image_photo = ImageTk.PhotoImage(image.convert("RGBA"))
-            self.city_image_preview.configure(image=self._city_image_photo, text="")
+            self.city_image_preview.delete("all")
+            self.city_image_preview.create_image(
+                0, 0, anchor="nw", image=self._city_image_photo,
+            )
         except (CityImageReadError, tk.TclError):
             self._city_image_photo = None
-            self.city_image_preview.configure(image="", text="이미지 없음")
+            self.city_image_preview.delete("all")
+            self.city_image_preview.create_text(
+                200, 160, text="이미지 없음", fill="#dddddd",
+            )
+        self._draw_city_preview_areas()
+
+    @staticmethod
+    def _facility_area_color(identifier: int) -> str:
+        colors = (
+            "#ff5252", "#ff9800", "#ffeb3b", "#8bc34a", "#00bcd4", "#448aff",
+            "#7c4dff", "#e040fb", "#ff4081", "#69f0ae", "#40c4ff", "#ffd740",
+            "#b2ff59", "#ea80fc", "#ff6e40", "#a7ffeb",
+        )
+        return colors[identifier % len(colors)]
+
+    def _draw_facility_areas(
+        self, canvas: tk.Canvas, records: tuple[FacilityAreaRecord, ...] | list[FacilityAreaRecord],
+        selected_id: int | None = None, *, show_labels: bool = True,
+    ) -> None:
+        canvas.delete("facility-area")
+        canvas.delete("facility-label")
+        for record in records:
+            left, top, width, height = record.hit_rect
+            right, bottom = left + width, top + height
+            color = self._facility_area_color(record.identifier)
+            selected = record.identifier == selected_id
+            canvas.create_rectangle(
+                left, top, right, bottom,
+                outline="#ffffff" if selected else color,
+                width=3 if selected else 2,
+                fill=color,
+                stipple="gray25",
+                tags=("facility-area", f"facility-{record.identifier}"),
+            )
+            if show_labels:
+                name = CITY_FACILITY_NAMES[record.identifier]
+                label = f"{record.identifier:02d} {name}"
+                canvas.create_rectangle(
+                    left, top, min(right, left + 104), min(bottom, top + 16),
+                    fill="#111111", outline=color, width=1,
+                    tags=("facility-label", f"facility-{record.identifier}"),
+                )
+                canvas.create_text(
+                    left + 3, top + 1, text=label, fill="#ffffff",
+                    anchor="nw", font=("맑은 고딕", 8, "bold"),
+                    tags=("facility-label", f"facility-{record.identifier}"),
+                )
+
+    def _draw_city_preview_areas(self) -> None:
+        if not hasattr(self, "city_image_preview"):
+            return
+        city = self._selected_city_record()
+        visible_areas = tuple(
+            area for area in self._facility_area_records
+            if city is not None and area.city_id == city.identifier
+        )
+        self._draw_facility_areas(
+            self.city_image_preview, visible_areas,
+            self._selected_facility_area_id if visible_areas else None,
+        )
+
+    def _find_facility_area_at(
+        self, x: int, y: int, records: tuple[FacilityAreaRecord, ...] | list[FacilityAreaRecord],
+    ) -> int | None:
+        matches = []
+        for record in records:
+            left, top, width, height = record.hit_rect
+            if left <= x <= left + width and top <= y <= top + height:
+                matches.append((width * height, record.identifier))
+        return min(matches)[1] if matches else None
+
+    def _on_city_preview_area_click(self, event: tk.Event) -> None:
+        if not self._facility_area_records or self._selected_city_record() is None:
+            return
+        city = self._selected_city_record()
+        visible_areas = tuple(
+            area for area in self._facility_area_records
+            if area.city_id == city.identifier
+        )
+        identifier = self._find_facility_area_at(event.x, event.y, visible_areas)
+        if identifier is None:
+            return
+        self._selected_facility_area_id = identifier
+        self._draw_city_preview_areas()
+
+    def _current_facility_area_edits(self) -> tuple[FacilityAreaRecord, ...] | None:
+        if not self._facility_area_records or self._facility_area_records == self._facility_area_original_records:
+            return None
+        return self._facility_area_records
+
+    def _edit_city_facility_areas(self, _event: tk.Event | None = None) -> None:
+        if not self._facility_area_records:
+            return
+        city = self._selected_city_record()
+        if city is None:
+            self._show_centered_popup("시설 영역 편집", "먼저 도시를 선택해 주세요.", kind="error")
+            return
+        try:
+            source_image = read_city_image(self.path.get(), city_id=city.identifier)
+        except CityImageReadError as error:
+            self._show_centered_popup("시설 영역 편집", str(error), kind="error")
+            return
+
+        window = tk.Toplevel(self)
+        window.title(f"{city.name} - 시설 선택 영역")
+        window.transient(self)
+        window.resizable(False, False)
+        window.geometry("770x430")
+        self._center_dialog(window)
+        window.columnconfigure(0, weight=0)
+        window.columnconfigure(1, weight=1)
+        ttk.Label(
+            window,
+            text="사각형을 드래그해 이동하고 오른쪽 아래 손잡이로 크기를 조절하세요. 숫자 입력도 가능합니다.",
+        ).grid(row=0, column=0, columnspan=2, padx=12, pady=(10, 6), sticky="w")
+
+        map_frame = tk.Frame(window, width=404, height=324, bg="#222222", relief="ridge", bd=2)
+        map_frame.grid(row=1, column=0, padx=(12, 8), pady=6, sticky="nw")
+        map_frame.grid_propagate(False)
+        photo = ImageTk.PhotoImage(source_image.convert("RGBA"))
+        window._facility_area_photo = photo
+        canvas = tk.Canvas(
+            map_frame, width=400, height=320, bg="#222222", highlightthickness=0,
+        )
+        canvas.pack()
+        canvas.create_image(0, 0, anchor="nw", image=photo)
+
+        panel = ttk.LabelFrame(window, text="선택 영역", padding=10)
+        panel.grid(row=1, column=1, padx=(4, 12), pady=6, sticky="nsew")
+        panel.columnconfigure(1, weight=1)
+        areas = [area for area in self._facility_area_records if area.city_id == city.identifier]
+        if not areas:
+            window.destroy()
+            self._show_centered_popup("시설 영역 편집", "선택한 도시에 시설 영역이 없습니다.", kind="error")
+            return
+        selected = {"index": next(
+            (index for index, area in enumerate(areas) if area.identifier == self._selected_facility_area_id),
+            0,
+        )}
+        variables = {name: tk.StringVar() for name in ("x", "y", "width", "height")}
+        selector = ttk.Combobox(
+            panel, state="readonly", width=22,
+            values=tuple(
+                f"{record.identifier:02d} {CITY_FACILITY_NAMES[record.identifier]}"
+                for record in areas
+            ),
+        )
+        ttk.Label(panel, text="시설:").grid(row=0, column=0, sticky="w", pady=(0, 8))
+        selector.grid(row=0, column=1, columnspan=2, sticky="w", pady=(0, 8))
+        field_specs = (("X", "x", 0, 400), ("Y", "y", 0, 320),
+                       ("너비", "width", 1, 400), ("높이", "height", 1, 320))
+        entries: dict[str, ttk.Spinbox] = {}
+        for row, (label, key, low, high) in enumerate(field_specs, start=1):
+            ttk.Label(panel, text=f"{label}:").grid(row=row, column=0, sticky="w", pady=4)
+            entry = ttk.Spinbox(
+                panel, from_=low, to=high, textvariable=variables[key], width=8,
+            )
+            entry.grid(row=row, column=1, sticky="w", pady=4)
+            entries[key] = entry
+        ttk.Label(
+            panel, text="기준: 도시 이미지 원본 픽셀 (400×320)",
+        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        ttk.Label(
+            panel, text=f"도시: {city.name} (이 도시의 시설 영역만 편집)",
+            wraplength=280,
+        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        error_label = ttk.Label(panel, text="", foreground="#b00020", wraplength=280)
+        error_label.grid(row=7, column=0, columnspan=3, sticky="w", pady=(8, 0))
+
+        def sync_controls() -> None:
+            record = areas[selected["index"]]
+            left, top, width, height = record.hit_rect
+            for key, value in (("x", left), ("y", top), ("width", width), ("height", height)):
+                variables[key].set(str(value))
+            selector.current(selected["index"])
+            error_label.configure(text="")
+
+        def redraw() -> None:
+            self._draw_facility_areas(canvas, areas, areas[selected["index"]].identifier)
+            record = areas[selected["index"]]
+            left, top, width, height = record.hit_rect
+            canvas.create_rectangle(
+                left + width - 5, top + height - 5, left + width + 3, top + height + 3,
+                fill="#ffffff", outline="#111111", tags="facility-handle",
+            )
+
+        def select_area(index: int) -> None:
+            selected["index"] = index
+            self._selected_facility_area_id = areas[index].identifier
+            sync_controls()
+            redraw()
+
+        def commit_fields(show_error: bool = False) -> bool:
+            try:
+                left = int(variables["x"].get())
+                top = int(variables["y"].get())
+                width = int(variables["width"].get())
+                height = int(variables["height"].get())
+                if left < 0 or top < 0 or width <= 0 or height <= 0 or left + width > 400 or top + height > 320:
+                    raise ValueError
+            except ValueError:
+                if show_error:
+                    error_label.configure(text="영역이 도시 이미지 경계(400×320)를 벗어났습니다.")
+                return False
+            index = selected["index"]
+            record = areas[index]
+            areas[index] = FacilityAreaRecord(
+                record.identifier,
+                left - width // 2,
+                top - height // 2,
+                width * 2,
+                height * 2,
+                record.city_id,
+                record.table_index,
+            )
+            error_label.configure(text="")
+            redraw()
+            return True
+
+        for entry in entries.values():
+            entry.bind("<Return>", lambda _event: commit_fields(True))
+            entry.bind("<FocusOut>", lambda _event: commit_fields(False))
+        selector.bind("<<ComboboxSelected>>", lambda _event: select_area(selector.current()))
+
+        drag = {"x": 0, "y": 0, "mode": "move", "rect": None}
+
+        def on_press(event: tk.Event) -> None:
+            facility_id = self._find_facility_area_at(event.x, event.y, areas)
+            if facility_id is None:
+                return
+            if not commit_fields(False):
+                sync_controls()
+            index = next(index for index, area in enumerate(areas) if area.identifier == facility_id)
+            select_area(index)
+            record = areas[index]
+            left, top, width, height = record.hit_rect
+            drag.update(
+                x=event.x, y=event.y,
+                mode="resize" if event.x >= left + width - 8 and event.y >= top + height - 8 else "move",
+                rect=(left, top, width, height),
+            )
+
+        def on_drag(event: tk.Event) -> None:
+            rect = drag["rect"]
+            if rect is None:
+                return
+            left, top, width, height = rect
+            dx, dy = event.x - drag["x"], event.y - drag["y"]
+            if drag["mode"] == "resize":
+                width = max(8, min(400 - left, width + dx))
+                height = max(8, min(320 - top, height + dy))
+            else:
+                left = max(0, min(400 - width, left + dx))
+                top = max(0, min(320 - height, top + dy))
+            index = selected["index"]
+            record = areas[index]
+            areas[index] = FacilityAreaRecord(
+                record.identifier, left - width // 2, top - height // 2,
+                width * 2, height * 2, record.city_id, record.table_index,
+            )
+            sync_controls()
+            redraw()
+
+        canvas.bind("<ButtonPress-1>", on_press)
+        canvas.bind("<B1-Motion>", on_drag)
+
+        button_row = ttk.Frame(window)
+        button_row.grid(row=2, column=0, columnspan=2, padx=12, pady=(4, 12), sticky="e")
+
+        def save() -> None:
+            if not commit_fields(True):
+                return
+            updated_by_table_index = {area.table_index: area for area in areas}
+            self._facility_area_records = tuple(
+                updated_by_table_index.get(area.table_index, area)
+                for area in self._facility_area_records
+            )
+            self._selected_facility_area_id = areas[selected["index"]].identifier
+            self._draw_city_preview_areas()
+            window.destroy()
+
+        ttk.Button(button_row, text="적용", command=save).pack(side="left", padx=(0, 6))
+        ttk.Button(button_row, text="취소", command=window.destroy).pack(side="left")
+        window.bind("<Escape>", lambda _event: window.destroy())
+        selector.current(selected["index"])
+        sync_controls()
+        redraw()
+        window.grab_set()
 
     def _current_city_edit(self) -> CityEdit | None:
         record = self._selected_city_record()
@@ -6372,7 +6874,9 @@ class CDSExecutablePatcher(tk.Tk):
                 person_records = read_person_records(target)
                 ship_type_records = read_ship_type_records(target)
                 cannon_records = read_cannon_records(target)
+                troop_combat_records = read_troop_combat_records(target)
                 city_records = read_city_records(target)
+                facility_area_records = read_facility_area_records(target)
                 trade_good_names = read_trade_good_names(target)
                 trade_region_goods = read_trade_region_goods(target)
                 item_records = read_item_records(target)
@@ -6408,6 +6912,7 @@ class CDSExecutablePatcher(tk.Tk):
             self._load_person_records(person_records)
             self._load_ship_type_records(ship_type_records)
             self._load_cannon_records(cannon_records)
+            self._load_troop_combat_records(troop_combat_records)
             self._load_discovery_records(discovery_records)
             self._load_discovery_hint_links(
                 discovery_hint_links, discovery_hint_targets,
@@ -6415,6 +6920,7 @@ class CDSExecutablePatcher(tk.Tk):
             self._load_item_records(item_records, item_discovery_media_links)
             self._load_figurehead_effect_settings(figurehead_effect_settings)
             self._load_city_records(city_records, trade_good_names, trade_region_goods)
+            self._load_facility_area_records(facility_area_records)
             self._load_fake_item_records(fake_item_records)
             self._load_hint_records(hint_records)
             self.coordinate.set(coordinate)
@@ -6906,6 +7412,7 @@ class CDSExecutablePatcher(tk.Tk):
             person_edit = self._current_person_edit()
             ship_type_edit = self._current_ship_type_edit()
             cannon_edit = self._current_cannon_edit()
+            troop_combat_edit = self._current_troop_combat_edit()
             city_edit = self._current_city_edit()
             trade_region_goods_edit = self._current_trade_region_goods()
             item_edit = self._current_item_edit()
@@ -6968,6 +7475,8 @@ class CDSExecutablePatcher(tk.Tk):
                 person_ability_limit=int(self.person_ability_limit.get()),
                 person_vitality_limit=int(self.person_vitality_limit.get()),
                 cannon_edit=cannon_edit,
+                facility_area_edits=self._current_facility_area_edits(),
+                troop_combat_edit=troop_combat_edit,
             )
             if backup is not None:
                 backed_up_paths.add(target.resolve())
@@ -7051,7 +7560,11 @@ class CDSExecutablePatcher(tk.Tk):
         self._remember_sponsor_edit(sponsor_edit)
         self._remember_ship_type_edit(ship_type_edit)
         self._remember_cannon_edit(cannon_edit)
+        self._remember_troop_combat_edit(troop_combat_edit)
         self._remember_city_edit(city_edit)
+        if self._current_facility_area_edits() is not None:
+            self._facility_area_original_records = self._facility_area_records
+            self._draw_city_preview_areas()
         self._remember_item_edit(item_edit)
         self._remember_fake_item_edit(fake_item_edit)
         self._remember_discovery_edit(discovery_edit)

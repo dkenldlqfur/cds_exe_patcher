@@ -86,6 +86,9 @@ from pe_patch_section import (
     CANNON_NAME_SLOT_OFFSET,
     CANNON_NAME_SLOT_STRIDE,
     PATCH_SECTION_CANNON_MASTER_SIZE,
+    TROOP_COMBAT_SLOT_OFFSET,
+    TROOP_COMBAT_SLOT_SIZE,
+    PATCH_SECTION_TROOP_COMBAT_SIZE,
     SHIP_REUSE_FIX_SLOT_OFFSET,
     SHIP_REUSE_FIX_SLOT_SIZE,
     SHIP_PURCHASE_BLANK_SELECTION_FIX_SLOT_OFFSET,
@@ -672,6 +675,33 @@ class CannonEdit:
 
 
 @dataclass(frozen=True)
+class TroopCombatRecord:
+    identifier: int
+    name: str
+    attack_technology: int
+    attack_technology_coefficient: int
+    attack_stat_coefficient: int
+    attack_flat_bonus: int
+    defense_technology: int
+    defense_technology_coefficient: int
+    defense_stat_coefficient: int
+    defense_flat_bonus: int
+
+
+@dataclass(frozen=True)
+class TroopCombatEdit:
+    identifier: int
+    attack_technology: int
+    attack_technology_coefficient: int
+    attack_stat_coefficient: int
+    attack_flat_bonus: int
+    defense_technology: int
+    defense_technology_coefficient: int
+    defense_stat_coefficient: int
+    defense_flat_bonus: int
+
+
+@dataclass(frozen=True)
 class CityRecord:
     """Verified static city definition stored in the executable."""
 
@@ -717,6 +747,29 @@ class CityEdit:
     city_status: int
     facility_flags: int
     default_flags: int
+
+
+@dataclass(frozen=True)
+class FacilityAreaRecord:
+    """One city-specific facility hit-area layout entry embedded in the executable."""
+
+    identifier: int
+    x: int
+    y: int
+    width: int
+    height: int
+    city_id: int = 0
+    table_index: int = -1
+
+    @property
+    def hit_rect(self) -> tuple[int, int, int, int]:
+        """Return the effective map rectangle derived by the game's layout routine."""
+        return (
+            self.x + self.width // 4,
+            self.y + self.height // 4,
+            self.width // 2,
+            self.height // 2,
+        )
 
 
 @dataclass(frozen=True)
@@ -1183,6 +1236,43 @@ CANNON_SECONDARY_BRANCH_END_VA = 0x43AFC3
 CANNON_PATCH_MAGIC = b"CDS3GUN\0"
 CANNON_NAME_MAX_CHARACTERS = 5
 CANNON_NAME_MAX_BYTES = 10
+TROOP_ATTACK_FORMULA_TABLE_VA = 0x444D7C
+TROOP_DEFENSE_FORMULA_TABLE_VA = 0x445134
+TROOP_ATTACK_FORMULA_COUNT = 21
+TROOP_COMBAT_COUNT = 24
+TROOP_COMBAT_MAGIC = b"CDS3TRP\0"
+TROOP_COMBAT_VERSION = 1
+TROOP_COMBAT_RECORD_SIZE = 8
+TROOP_COMBAT_ORIGINAL_ATTACK_POINTERS_OFFSET = 0x200
+TROOP_COMBAT_ORIGINAL_DEFENSE_POINTERS_OFFSET = 0x254
+TROOP_COMBAT_CODE_OFFSET = 0x300
+TROOP_COMBAT_CODE_STRIDE = 0x40
+TROOP_COMBAT_NAMES = (
+    "기병", "중장기병", "제독", "무적제독", "창병", "경보병", "낙타병", "코끼리병",
+    "사무라이", "하타모토", "닌자", "인디오", "족장", "영주", "장군", "화승총대",
+    "머스킷총대", "궁병", "포병", "캐논포병", "화포병", "주술사", "고승", "표범",
+)
+# Each row: technology selector, technology coefficient, strength/defense
+# coefficient (divided by ten), and flat bonus. The selectors and values below
+# are transcribed from the original per-class switch branches at 0x444AB0 and
+# 0x444DD0; the three classes without an attack branch remain non-editable for
+# attack because the original dispatcher returns zero for IDs 21–23.
+_TROOP_ATTACK_DEFAULTS = (
+    (2, 9, 8, 0), (2, 12, 8, 10), (2, 14, 10, 0), (2, 18, 12, 12),
+    (2, 6, 7, 0), (2, 6, 6, 0), (2, 9, 8, 10), (2, 10, 8, 12),
+    (2, 9, 8, 0), (2, 12, 8, 10), (2, 8, 8, 0), (2, 11, 8, 0),
+    (2, 7, 8, 0), (2, 7, 8, 0), (2, 7, 8, 0), (4, 6, 12, 12),
+    (4, 8, 6, 10), (4, 10, 6, 0), (3, 4, 6, 0), (3, 6, 6, 10),
+    (3, 5, 6, 9),
+)
+_TROOP_DEFENSE_DEFAULTS = (
+    (2, 5, 4, 0), (2, 7, 4, 5), (2, 7, 6, 0), (2, 7, 6, 9),
+    (2, 4, 6, 0), (2, 4, 6, 0), (2, 5, 4, 5), (2, 7, 7, 5),
+    (2, 5, 4, 0), (2, 7, 4, 5), (2, 5, 4, 0), (2, 3, 3, 0),
+    (2, 5, 3, 5), (2, 7, 6, 0), (2, 7, 6, 0), (4, 4, 3, 0),
+    (4, 3, 3, 0), (4, 3, 3, 0), (3, 4, 2, 0), (3, 4, 4, 5),
+    (3, 5, 2, 4), (11, 2, 3, 0), (11, 4, 2, 0), (11, 3, 4, 0),
+)
 CITY_TABLE_VA = 0x4D14B0
 CITY_RECORD_COUNT = 226
 CITY_RECORD_SIZE = 0x88
@@ -1203,6 +1293,15 @@ CITY_DEFAULT_MARKET_GOODS_OFFSET = 0x3C
 CITY_DEFAULT_MARKET_GOODS_COUNT = 8
 CITY_STATUS_OFFSET = 0x5C
 CITY_PACKED_FLAGS_OFFSET = 0x60
+FACILITY_LAYOUT_TABLE_VA = 0x500918
+FACILITY_LAYOUT_RECORD_COUNT = 1508
+FACILITY_LAYOUT_RECORD_SIZE = 0x38
+FACILITY_LAYOUT_CITY_ID_OFFSET = 0x08
+FACILITY_LAYOUT_ID_OFFSET = 0x0C
+FACILITY_LAYOUT_X_OFFSET = 0x20
+FACILITY_LAYOUT_Y_OFFSET = 0x24
+FACILITY_LAYOUT_WIDTH_OFFSET = 0x28
+FACILITY_LAYOUT_HEIGHT_OFFSET = 0x2C
 CITY_WORLD_X_MIN = 0
 CITY_WORLD_X_MAX = 2500
 CITY_WORLD_Y_MIN = 0
@@ -5600,6 +5699,252 @@ def apply_cannon_edit(data: bytearray, edit: CannonEdit | None) -> bool:
     return True
 
 
+def _default_troop_combat_records() -> tuple[TroopCombatRecord, ...]:
+    records = []
+    for identifier, name in enumerate(TROOP_COMBAT_NAMES):
+        attack = _TROOP_ATTACK_DEFAULTS[identifier] if identifier < TROOP_ATTACK_FORMULA_COUNT else (0, 0, 0, 0)
+        defense = _TROOP_DEFENSE_DEFAULTS[identifier]
+        records.append(TroopCombatRecord(identifier, name, *attack, *defense))
+    return tuple(records)
+
+
+_TROOP_COMBAT_DEFAULTS = _default_troop_combat_records()
+
+
+def _troop_combat_call(source_va: int, target_va: int) -> bytes:
+    return b"\xE8" + struct.pack("<i", target_va - (source_va + 5))
+
+
+def _troop_combat_formula_stub(
+    code_va: int, record: TroopCombatRecord, *, attack: bool,
+) -> bytes:
+    technology = record.attack_technology if attack else record.defense_technology
+    technology_coefficient = (
+        record.attack_technology_coefficient if attack
+        else record.defense_technology_coefficient
+    )
+    stat_coefficient = (
+        record.attack_stat_coefficient if attack
+        else record.defense_stat_coefficient
+    )
+    flat_bonus = record.attack_flat_bonus if attack else record.defense_flat_bonus
+    # The caller's prologue already has the relevant stat in ESI (attack) or
+    # EDI (defense), and EBX contains the helper argument. The game's own
+    # technology getter uses __thiscall and returns with ret 8.
+    code = bytearray(b"\xB9\xE8\x47\x5A\x00")  # mov ecx, 005A47E8h
+    code.extend(b"\x53\x6A" + bytes((technology,)))  # push ebx; push technology ID
+    call_va = code_va + len(code)
+    code.extend(_troop_combat_call(call_va, 0x446F70))
+    code.extend(b"\x6B\xC0" + bytes((technology_coefficient,)))  # imul eax,eax,imm8
+    code.extend(b"\x89\xC3")  # mov ebx,eax (temporary technology term)
+    stat_register = 0xF6 if attack else 0xFF  # imul esi,esi,imm8 / imul edi,edi,imm8
+    code.extend(b"\x6B" + bytes((stat_register, stat_coefficient)))
+    code.extend(b"\x89\xF0" if attack else b"\x89\xF8")  # mov eax,esi / mov eax,edi
+    code.extend(b"\x99\xB9\x0A\x00\x00\x00\xF7\xF9")  # cdq; idiv 10
+    code.extend(b"\x01\xD8")  # add eax,ebx
+    if flat_bonus:
+        code.extend(b"\x83\xC0" + bytes((flat_bonus & 0xFF,)))
+    # Restore the original three saved registers and apply the original ret 4.
+    code.extend(b"\x5F\x5E\x5B\xC2\x04\x00")
+    if len(code) > TROOP_COMBAT_CODE_STRIDE:
+        raise AssertionError("병종 전투 공식 코드 슬롯이 부족합니다.")
+    return bytes(code).ljust(TROOP_COMBAT_CODE_STRIDE, b"\x90")
+
+
+def _troop_combat_records_from_slot(data: bytes | bytearray, slot_offset: int) -> tuple[TroopCombatRecord, ...]:
+    version = struct.unpack_from("<I", data, slot_offset + len(TROOP_COMBAT_MAGIC))[0]
+    if version != TROOP_COMBAT_VERSION:
+        raise ValueError("병종 전투 공식 패치 버전을 확인하지 못했습니다.")
+    records = []
+    records_offset = slot_offset + len(TROOP_COMBAT_MAGIC) + 4
+    for default in _TROOP_COMBAT_DEFAULTS:
+        values = struct.unpack_from("<BBBBBBBB", data, records_offset + default.identifier * TROOP_COMBAT_RECORD_SIZE)
+        signed = lambda value: value - 256 if value >= 128 else value
+        records.append(TroopCombatRecord(
+            default.identifier, default.name,
+            values[0], values[1], values[2], signed(values[3]),
+            values[4], values[5], values[6], signed(values[7]),
+        ))
+    return tuple(records)
+
+
+def _read_troop_combat_from_data(data: bytes) -> tuple[TroopCombatRecord, ...]:
+    pe = pefile.PE(data=data, fast_load=True)
+    try:
+        if pe.FILE_HEADER.Machine != 0x14C or pe.OPTIONAL_HEADER.ImageBase != 0x400000:
+            raise ValueError("지원하는 32비트 CDS III 실행 파일이 아닙니다.")
+        base = pe.OPTIONAL_HEADER.ImageBase
+        attack_table_offset = pe.get_offset_from_rva(TROOP_ATTACK_FORMULA_TABLE_VA - base)
+        defense_table_offset = pe.get_offset_from_rva(TROOP_DEFENSE_FORMULA_TABLE_VA - base)
+        attack_size = TROOP_ATTACK_FORMULA_COUNT * 4
+        defense_size = TROOP_COMBAT_COUNT * 4
+        attack_table = data[attack_table_offset:attack_table_offset + attack_size]
+        defense_table = data[defense_table_offset:defense_table_offset + defense_size]
+        section = find_patch_section(data)
+        if section is not None and section.raw_size >= PATCH_SECTION_TROOP_COMBAT_SIZE:
+            slot_offset, slot_va = section.slot(TROOP_COMBAT_SLOT_OFFSET, TROOP_COMBAT_SLOT_SIZE)
+            if data[slot_offset:slot_offset + len(TROOP_COMBAT_MAGIC)] == TROOP_COMBAT_MAGIC:
+                records = _troop_combat_records_from_slot(data, slot_offset)
+                attack_original_offset = slot_offset + TROOP_COMBAT_ORIGINAL_ATTACK_POINTERS_OFFSET
+                defense_original_offset = slot_offset + TROOP_COMBAT_ORIGINAL_DEFENSE_POINTERS_OFFSET
+                original_attack = struct.unpack_from(f"<{TROOP_ATTACK_FORMULA_COUNT}I", data, attack_original_offset)
+                original_defense = struct.unpack_from(f"<{TROOP_COMBAT_COUNT}I", data, defense_original_offset)
+                expected_attack = tuple(
+                    slot_va + TROOP_COMBAT_CODE_OFFSET + i * TROOP_COMBAT_CODE_STRIDE
+                    for i in range(TROOP_ATTACK_FORMULA_COUNT)
+                )
+                expected_defense = tuple(
+                    slot_va + TROOP_COMBAT_CODE_OFFSET
+                    + (TROOP_ATTACK_FORMULA_COUNT + i) * TROOP_COMBAT_CODE_STRIDE
+                    for i in range(TROOP_COMBAT_COUNT)
+                )
+                if (attack_table != struct.pack(f"<{TROOP_ATTACK_FORMULA_COUNT}I", *expected_attack)
+                        or defense_table != struct.pack(f"<{TROOP_COMBAT_COUNT}I", *expected_defense)):
+                    raise ValueError("병종 전투 공식의 실행 코드가 예상한 패치와 다릅니다.")
+                code_offset = slot_offset + TROOP_COMBAT_CODE_OFFSET
+                for i, record in enumerate(records):
+                    if i < TROOP_ATTACK_FORMULA_COUNT and (
+                        data[code_offset + i * TROOP_COMBAT_CODE_STRIDE:
+                             code_offset + (i + 1) * TROOP_COMBAT_CODE_STRIDE] != _troop_combat_formula_stub(
+                                 slot_va + TROOP_COMBAT_CODE_OFFSET + i * TROOP_COMBAT_CODE_STRIDE,
+                                 record, attack=True,
+                             )
+                    ):
+                        raise ValueError("병종 공격 공식 패치를 검증하지 못했습니다.")
+                    defense_i = TROOP_ATTACK_FORMULA_COUNT + i
+                    if data[code_offset + defense_i * TROOP_COMBAT_CODE_STRIDE:
+                            code_offset + (defense_i + 1) * TROOP_COMBAT_CODE_STRIDE] != _troop_combat_formula_stub(
+                                slot_va + TROOP_COMBAT_CODE_OFFSET + defense_i * TROOP_COMBAT_CODE_STRIDE,
+                                record, attack=False,
+                            ):
+                        raise ValueError("병종 방어 공식 패치를 검증하지 못했습니다.")
+                # Ensure saved unpatched destinations are in executable image space
+                # before they are ever used to restore the original dispatch.
+                image_end = base + pe.OPTIONAL_HEADER.SizeOfImage
+                if any(not base <= target < image_end for target in (*original_attack, *original_defense)):
+                    raise ValueError("병종 전투 공식의 원본 주소가 실행 파일 범위를 벗어납니다.")
+                return records
+        # The unmodified Korean executable has compact function dispatchers.
+        # Verify their prologues and switch-table bounds before exposing values.
+        attack_start = pe.get_offset_from_rva(0x444AB0 - base)
+        defense_start = pe.get_offset_from_rva(0x444DD0 - base)
+        attack_signature = bytes.fromhex(
+            "53 56 8B 5C 24 0C 57 8B F9 53 6A 02 B9 E8 47 5A 00 E8 2A 25 00 00 8B F0 8B 47 04 83 F8 14 77 07 FF 24 85 7C 4D 44 00"
+        )
+        defense_signature = bytes.fromhex(
+            "53 56 57 8B F1 8B 5C 24 10 B9 E8 47 5A 00 53 6A 01 E8 0A 22 00 00 8B F8 8B 46 04 83 F8 17 77 07 FF 24 85 34 51 44 00"
+        )
+        if (data[attack_start:attack_start + len(attack_signature)] != attack_signature
+                or data[defense_start:defense_start + len(defense_signature)] != defense_signature):
+            raise ValueError("병종 전투 공식의 원본 실행 코드를 확인하지 못했습니다.")
+        return _TROOP_COMBAT_DEFAULTS
+    finally:
+        pe.close()
+
+
+def read_troop_combat_records(target: Path) -> tuple[TroopCombatRecord, ...]:
+    return _read_troop_combat_from_data(target.resolve(strict=True).read_bytes())
+
+
+def apply_troop_combat_edit(data: bytearray, edit: TroopCombatEdit | None) -> bool:
+    if edit is None:
+        return False
+    if not 0 <= edit.identifier < TROOP_COMBAT_COUNT:
+        raise ValueError("병종 ID가 올바르지 않습니다.")
+    values = (
+        edit.attack_technology, edit.attack_technology_coefficient,
+        edit.attack_stat_coefficient, edit.attack_flat_bonus,
+        edit.defense_technology, edit.defense_technology_coefficient,
+        edit.defense_stat_coefficient, edit.defense_flat_bonus,
+    )
+    if (not 0 <= values[0] <= 12 or not 0 <= values[4] <= 12
+            or any(not 0 <= value <= 127 for value in (values[1], values[2], values[5], values[6]))
+            or any(not -128 <= value <= 127 for value in (values[3], values[7]))):
+        raise ValueError("병종 기술 코드·계수·상수의 범위를 확인해 주세요.")
+    if edit.identifier >= TROOP_ATTACK_FORMULA_COUNT and values[:4] != (0, 0, 0, 0):
+        raise ValueError("주술사·고승·표범은 원본 EXE에 공격 계산 분기가 없습니다.")
+    current_records = _read_troop_combat_from_data(bytes(data))
+    current = current_records[edit.identifier]
+    desired = TroopCombatRecord(edit.identifier, current.name, *values)
+    if current == desired:
+        return False
+
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        base = pe.OPTIONAL_HEADER.ImageBase
+        attack_table_offset = pe.get_offset_from_rva(TROOP_ATTACK_FORMULA_TABLE_VA - base)
+        defense_table_offset = pe.get_offset_from_rva(TROOP_DEFENSE_FORMULA_TABLE_VA - base)
+    finally:
+        pe.close()
+    updated_records = list(current_records)
+    updated_records[edit.identifier] = desired
+    section = find_patch_section(data)
+    patched = False
+    if section is not None and section.raw_size >= PATCH_SECTION_TROOP_COMBAT_SIZE:
+        candidate_offset, _candidate_va = section.slot(TROOP_COMBAT_SLOT_OFFSET, TROOP_COMBAT_SLOT_SIZE)
+        patched = data[candidate_offset:candidate_offset + len(TROOP_COMBAT_MAGIC)] == TROOP_COMBAT_MAGIC
+    slot_offset = slot_va = 0
+    if patched:
+        assert section is not None
+        slot_offset, slot_va = section.slot(TROOP_COMBAT_SLOT_OFFSET, TROOP_COMBAT_SLOT_SIZE)
+    if tuple(updated_records) == _TROOP_COMBAT_DEFAULTS:
+        if not patched or data[slot_offset:slot_offset + len(TROOP_COMBAT_MAGIC)] != TROOP_COMBAT_MAGIC:
+            return False
+        original_attack_offset = slot_offset + TROOP_COMBAT_ORIGINAL_ATTACK_POINTERS_OFFSET
+        original_defense_offset = slot_offset + TROOP_COMBAT_ORIGINAL_DEFENSE_POINTERS_OFFSET
+        attack_original = data[original_attack_offset:original_attack_offset + TROOP_ATTACK_FORMULA_COUNT * 4]
+        defense_original = data[original_defense_offset:original_defense_offset + TROOP_COMBAT_COUNT * 4]
+        data[attack_table_offset:attack_table_offset + len(attack_original)] = attack_original
+        data[defense_table_offset:defense_table_offset + len(defense_original)] = defense_original
+        assert section is not None
+        clear_slot(data, section, TROOP_COMBAT_SLOT_OFFSET, TROOP_COMBAT_SLOT_SIZE)
+        return True
+
+    if not patched:
+        # Preserve original switch targets before installing the hooks.
+        original_attack = data[attack_table_offset:attack_table_offset + TROOP_ATTACK_FORMULA_COUNT * 4]
+        original_defense = data[defense_table_offset:defense_table_offset + TROOP_COMBAT_COUNT * 4]
+        section, _ = ensure_patch_section(data, PATCH_SECTION_TROOP_COMBAT_SIZE)
+        slot_offset, slot_va = section.slot(TROOP_COMBAT_SLOT_OFFSET, TROOP_COMBAT_SLOT_SIZE)
+        data[slot_offset:slot_offset + TROOP_COMBAT_SLOT_SIZE] = b"\0" * TROOP_COMBAT_SLOT_SIZE
+        data[slot_offset:slot_offset + len(TROOP_COMBAT_MAGIC)] = TROOP_COMBAT_MAGIC
+        struct.pack_into("<I", data, slot_offset + len(TROOP_COMBAT_MAGIC), TROOP_COMBAT_VERSION)
+        data[slot_offset + TROOP_COMBAT_ORIGINAL_ATTACK_POINTERS_OFFSET:
+             slot_offset + TROOP_COMBAT_ORIGINAL_ATTACK_POINTERS_OFFSET + len(original_attack)] = original_attack
+        data[slot_offset + TROOP_COMBAT_ORIGINAL_DEFENSE_POINTERS_OFFSET:
+             slot_offset + TROOP_COMBAT_ORIGINAL_DEFENSE_POINTERS_OFFSET + len(original_defense)] = original_defense
+
+    records_offset = slot_offset + len(TROOP_COMBAT_MAGIC) + 4
+    for record in updated_records:
+        struct.pack_into(
+            "<BBBBBBBB", data, records_offset + record.identifier * TROOP_COMBAT_RECORD_SIZE,
+            record.attack_technology, record.attack_technology_coefficient,
+            record.attack_stat_coefficient, record.attack_flat_bonus & 0xFF,
+            record.defense_technology, record.defense_technology_coefficient,
+            record.defense_stat_coefficient, record.defense_flat_bonus & 0xFF,
+        )
+    code_offset = slot_offset + TROOP_COMBAT_CODE_OFFSET
+    attack_targets = []
+    defense_targets = []
+    for identifier, record in enumerate(updated_records):
+        attack_index = identifier
+        attack_va = slot_va + TROOP_COMBAT_CODE_OFFSET + attack_index * TROOP_COMBAT_CODE_STRIDE
+        if identifier < TROOP_ATTACK_FORMULA_COUNT:
+            stub = _troop_combat_formula_stub(attack_va, record, attack=True)
+            data[code_offset + attack_index * TROOP_COMBAT_CODE_STRIDE:
+                 code_offset + (attack_index + 1) * TROOP_COMBAT_CODE_STRIDE] = stub
+            attack_targets.append(attack_va)
+        defense_index = TROOP_ATTACK_FORMULA_COUNT + identifier
+        defense_va = slot_va + TROOP_COMBAT_CODE_OFFSET + defense_index * TROOP_COMBAT_CODE_STRIDE
+        stub = _troop_combat_formula_stub(defense_va, record, attack=False)
+        data[code_offset + defense_index * TROOP_COMBAT_CODE_STRIDE:
+             code_offset + (defense_index + 1) * TROOP_COMBAT_CODE_STRIDE] = stub
+        defense_targets.append(defense_va)
+    struct.pack_into(f"<{TROOP_ATTACK_FORMULA_COUNT}I", data, attack_table_offset, *attack_targets)
+    struct.pack_into(f"<{TROOP_COMBAT_COUNT}I", data, defense_table_offset, *defense_targets)
+    return True
+
+
 def _read_city_records_from_data(data: bytes) -> tuple[CityRecord, ...]:
     """Read the 226-row static city table from a supported executable."""
     pe = pefile.PE(data=data, fast_load=True)
@@ -5686,6 +6031,99 @@ def _read_city_records_from_data(data: bytes) -> tuple[CityRecord, ...]:
 def read_city_records(target: Path) -> tuple[CityRecord, ...]:
     """Read EXE-side city definitions without touching saved game state."""
     return _read_city_records_from_data(target.resolve(strict=True).read_bytes())
+
+
+def _read_facility_area_records_from_data(data: bytes) -> tuple[FacilityAreaRecord, ...]:
+    """Read the flattened, city-specific facility-area table."""
+    pe = pefile.PE(data=data, fast_load=True)
+    try:
+        if pe.FILE_HEADER.Machine != 0x14C or pe.OPTIONAL_HEADER.ImageBase != 0x400000:
+            raise ValueError("지원하는 32비트 CDS III 실행 파일이 아닙니다.")
+        table_offset = pe.get_offset_from_rva(
+            FACILITY_LAYOUT_TABLE_VA - pe.OPTIONAL_HEADER.ImageBase,
+        )
+    finally:
+        pe.close()
+    table_size = FACILITY_LAYOUT_RECORD_COUNT * FACILITY_LAYOUT_RECORD_SIZE
+    if table_offset < 0 or table_offset + table_size > len(data):
+        raise ValueError("시설 영역 레이아웃 표의 범위를 검증하지 못했습니다.")
+    records: list[FacilityAreaRecord] = []
+    previous_city_id = -1
+    seen_facilities: set[tuple[int, int]] = set()
+    for table_index in range(FACILITY_LAYOUT_RECORD_COUNT):
+        offset = table_offset + table_index * FACILITY_LAYOUT_RECORD_SIZE
+        city_id = struct.unpack_from("<I", data, offset + FACILITY_LAYOUT_CITY_ID_OFFSET)[0]
+        stored_id = struct.unpack_from("<I", data, offset + FACILITY_LAYOUT_ID_OFFSET)[0]
+        x, y, width, height = struct.unpack_from(
+            "<4i", data, offset + FACILITY_LAYOUT_X_OFFSET,
+        )
+        record = FacilityAreaRecord(stored_id, x, y, width, height, city_id, table_index)
+        left, top, rect_width, rect_height = record.hit_rect
+        if (
+            city_id >= CITY_RECORD_COUNT
+            or city_id < previous_city_id
+            or stored_id >= 16
+            or (city_id, stored_id) in seen_facilities
+            or width <= 0 or height <= 0
+            or rect_width <= 0 or rect_height <= 0
+            or left < 0 or top < 0
+            or left + rect_width > 400 or top + rect_height > 320
+        ):
+            raise ValueError(f"도시 {city_id}번 시설 {stored_id}번 영역 레이아웃을 검증하지 못했습니다.")
+        records.append(record)
+        previous_city_id = city_id
+        seen_facilities.add((city_id, stored_id))
+    if {record.city_id for record in records} != set(range(CITY_RECORD_COUNT)):
+        raise ValueError("도시별 시설 영역 표에서 도시 ID 범위를 검증하지 못했습니다.")
+    return tuple(records)
+
+
+def read_facility_area_records(target: Path) -> tuple[FacilityAreaRecord, ...]:
+    """Read each city's facility map areas from a supported executable."""
+    return _read_facility_area_records_from_data(target.resolve(strict=True).read_bytes())
+
+
+def apply_facility_area_edits(
+    data: bytearray, edits: tuple[FacilityAreaRecord, ...] | None,
+) -> bool:
+    """Update only city-specific facility-layout coordinates and dimensions."""
+    if edits is None:
+        return False
+    if len(edits) != FACILITY_LAYOUT_RECORD_COUNT:
+        raise ValueError("도시별 시설 영역 레코드가 원본 개수와 일치하지 않습니다.")
+    if tuple(edit.table_index for edit in edits) != tuple(range(FACILITY_LAYOUT_RECORD_COUNT)):
+        raise ValueError("도시별 시설 영역 인덱스가 올바르지 않습니다.")
+    current = _read_facility_area_records_from_data(bytes(data))
+    if tuple((edit.city_id, edit.identifier) for edit in edits) != tuple(
+        (record.city_id, record.identifier) for record in current
+    ):
+        raise ValueError("도시별 시설 영역 ID가 원본 실행 파일과 일치하지 않습니다.")
+    for edit in edits:
+        left, top, rect_width, rect_height = edit.hit_rect
+        if (
+            not -400 <= edit.x <= 800 or not -320 <= edit.y <= 640
+            or not 2 <= edit.width <= 800 or not 2 <= edit.height <= 640
+            or rect_width <= 0 or rect_height <= 0
+            or left < 0 or top < 0
+            or left + rect_width > 400 or top + rect_height > 320
+        ):
+            raise ValueError(f"시설 {edit.identifier}번 영역은 도시 이미지(400×320) 안에 있어야 합니다.")
+    if current == edits:
+        return False
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        table_offset = pe.get_offset_from_rva(
+            FACILITY_LAYOUT_TABLE_VA - pe.OPTIONAL_HEADER.ImageBase,
+        )
+    finally:
+        pe.close()
+    for edit in edits:
+        offset = table_offset + edit.table_index * FACILITY_LAYOUT_RECORD_SIZE
+        struct.pack_into(
+            "<4i", data, offset + FACILITY_LAYOUT_X_OFFSET,
+            edit.x, edit.y, edit.width, edit.height,
+        )
+    return True
 
 
 def read_trade_good_names(target: Path) -> tuple[str, ...]:
@@ -7481,6 +7919,8 @@ def apply_all(
     person_ability_limit: int | None = None,
     person_vitality_limit: int | None = None,
     cannon_edit: CannonEdit | None = None,
+    facility_area_edits: tuple[FacilityAreaRecord, ...] | None = None,
+    troop_combat_edit: TroopCombatEdit | None = None,
 ) -> Path | None:
     """Apply all selected settings atomically and create one original backup."""
     target = target.resolve(strict=True)
@@ -7565,7 +8005,9 @@ def apply_all(
     apply_person_edit(updated, person_edit)
     apply_ship_type_edit(updated, ship_type_edit)
     apply_cannon_edit(updated, cannon_edit)
+    apply_troop_combat_edit(updated, troop_combat_edit)
     apply_city_edit(updated, city_edit)
+    apply_facility_area_edits(updated, facility_area_edits)
     apply_trade_region_goods(updated, trade_region_goods)
     apply_item_edit(updated, item_edit)
     apply_fake_item_edit(updated, fake_item_edit)

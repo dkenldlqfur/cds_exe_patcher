@@ -155,6 +155,12 @@ CANNON_MASTER_SLOT_SIZE = 0x100
 CANNON_NAME_SLOT_OFFSET = 0x4F100
 CANNON_NAME_SLOT_STRIDE = 0x20
 PATCH_SECTION_CANNON_MASTER_SIZE = 0x4F200
+# Land-unit attack and defense formulas are hard-coded switch branches in the
+# executable. Store editable coefficients and generated per-unit formula stubs
+# after the cannon data, leaving all earlier fixed slots unchanged.
+TROOP_COMBAT_SLOT_OFFSET = 0x4F200
+TROOP_COMBAT_SLOT_SIZE = 0x2000
+PATCH_SECTION_TROOP_COMBAT_SIZE = TROOP_COMBAT_SLOT_OFFSET + TROOP_COMBAT_SLOT_SIZE
 
 
 @dataclass(frozen=True)
