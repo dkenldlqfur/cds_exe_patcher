@@ -20,6 +20,7 @@ from slave_patch import (  # noqa: E402
     LIBRARY_BRANCH_ORIGINAL,
     LIBRARY_VALUE_OFFSET,
     LIBRARY_VALUE_ORIGINAL,
+    SLAVE_HINT_BOOK_YEAR_OFFSET,
     SAVEDATA_LIBRARY_OFFSET,
     SAVEDATA_LIBRARY_PATCHED,
     SLAVE_DISCOVERY_MARKER_OFFSET,
@@ -59,6 +60,14 @@ class SaveSlotCompanionPathTests(unittest.TestCase):
                 (root / f"SAVEDATA{slot:02d}.CDS").write_bytes(save)
 
             apply_library_hint(exe, True)
+            self.assertEqual(
+                2,
+                int.from_bytes(
+                    exe.read_bytes()[SLAVE_HINT_BOOK_YEAR_OFFSET:SLAVE_HINT_BOOK_YEAR_OFFSET + 4],
+                    "little",
+                    signed=True,
+                ),
+            )
 
             for slot in (1, 10):
                 data = (root / f"SAVEDATA{slot:02d}.CDS").read_bytes()
@@ -67,6 +76,16 @@ class SaveSlotCompanionPathTests(unittest.TestCase):
                     data[SAVEDATA_LIBRARY_OFFSET:SAVEDATA_LIBRARY_OFFSET + 2],
                 )
                 self.assertEqual(UNDISCOVERED_STATE, data[SLAVE_DISCOVERY_MARKER_OFFSET])
+
+            apply_library_hint(exe, False)
+            self.assertEqual(
+                0,
+                int.from_bytes(
+                    exe.read_bytes()[SLAVE_HINT_BOOK_YEAR_OFFSET:SLAVE_HINT_BOOK_YEAR_OFFSET + 4],
+                    "little",
+                    signed=True,
+                ),
+            )
 
     def test_kaaba_repair_uses_existing_slot_files_without_base_save(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

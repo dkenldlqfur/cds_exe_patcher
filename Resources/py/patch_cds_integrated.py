@@ -52,6 +52,7 @@ from pe_patch_section import (
     PATCH_SECTION_JUDGMENT_FIX_SIZE,
     PATCH_SECTION_PLAYER_FAME_LIMIT_SIZE,
     PATCH_SECTION_SHIP_PURCHASE_BLANK_SELECTION_FIX_SIZE,
+    PATCH_SECTION_BRIBE_ITEM_DUPLICATE_FIX_SIZE,
     PATCH_SECTION_SHIP_REUSE_FIX_SIZE,
     PATCH_SECTION_NPC_DAILY_DEPARTURE_SIZE,
     ITEM_NAME_SLOT_OFFSET,
@@ -93,6 +94,8 @@ from pe_patch_section import (
     SHIP_REUSE_FIX_SLOT_SIZE,
     SHIP_PURCHASE_BLANK_SELECTION_FIX_SLOT_OFFSET,
     SHIP_PURCHASE_BLANK_SELECTION_FIX_SLOT_SIZE,
+    BRIBE_ITEM_DUPLICATE_FIX_SLOT_OFFSET,
+    BRIBE_ITEM_DUPLICATE_FIX_SLOT_SIZE,
     clear_slot,
     ensure_patch_section,
     find_patch_section,
@@ -413,6 +416,23 @@ SHIP_PURCHASE_BLANK_SELECTION_RESUME_VA = 0x44B631
 SHIP_PURCHASE_BLANK_SELECTION_FIX_MAGIC = b"CDSSBS1\0"
 SHIP_PURCHASE_BLANK_SELECTION_FIX_VERSION = 1
 SHIP_PURCHASE_BLANK_SELECTION_FIX_WRAPPER_OFFSET = 0x20
+
+# The inspector-bribe result's deferred recovery call re-adds flagged discovery
+# items after the counterfeit report. Suppress only that append call; the
+# following loop still clears the temporary 0x20 flags.
+BRIBE_ITEM_DUPLICATE_HOOK_VA = 0x41C4BB
+BRIBE_ITEM_DUPLICATE_ORIGINAL_CALL = bytes.fromhex("E8 50 52 09 00")
+BRIBE_ITEM_DUPLICATE_SUPPRESSED_CALL = b"\x90" * 5
+BRIBE_ITEM_DUPLICATE_MAGIC = b"CDSBD1\0\0"
+BRIBE_ITEM_DUPLICATE_VERSION = 1
+BRIBE_ITEM_DUPLICATE_WRAPPER_OFFSET = 0x10
+
+# Discovery 41 (우국사 철탑) and discovery 190 (경교의 십자가) both point
+# to item 185 as their reward. DISEV registers both in the cross event, so
+# disable only the redundant reward link on discovery 41.
+NESTORIAN_CROSS_DUPLICATE_REWARD_VA = 0x51D42C
+NESTORIAN_CROSS_DUPLICATE_REWARD_ITEM = 185
+NO_DISCOVERY_REWARD_ITEM = 0xFFFFFFFF
 
 # Random naval-combat encounter denominators.  The western region produces
 # pirate or pursuit-fleet encounters; the eastern region produces Islamic
@@ -1146,7 +1166,10 @@ SPONSOR_FACE_CODE_MAX = 412
 SPONSOR_APPEARANCE_YEAR_REFERENCE = 1480
 SPONSOR_APPEARANCE_YEAR_MIN = 1480
 SPONSOR_APPEARANCE_YEAR_MAX = 1600
-SPONSOR_NATION_ID_MAX = 18
+SPONSOR_NATION_ID_MAX = 77
+ERASMUS_SPONSOR_ID = 70
+SPONSOR_BUILDING_HARBOR_ID = 0
+SPONSOR_BUILDING_CHURCH_ID = 3
 SPONSOR_JOB_ID_MIN = 14
 SPONSOR_JOB_ID_MAX = 21
 SPONSOR_CITY_ID_MAX = 225
@@ -1169,6 +1192,7 @@ PERSON_FACE_CODE_OFFSET = 0x08
 PERSON_GENDER_OFFSET = 0x0C
 PERSON_AGE_AT_1480_OFFSET = 0x10
 PERSON_NATION_ID_OFFSET = 0x18
+PERSON_NATION_ID_MAX = 77
 PERSON_JOB_ID_OFFSET = 0x1C
 PERSON_FAME_OFFSET = 0x24
 PERSON_INFAMY_OFFSET = 0x28
@@ -4175,6 +4199,262 @@ def apply_ship_purchase_blank_selection_fix(data: bytearray, enabled: bool) -> b
     return True
 
 
+def _build_bribe_item_duplicate_fix_payload(slot_va: int) -> bytes:
+    """Build a narrow wrapper that removes existing items from the bribe queue."""
+    wrapper = bytearray(bytes.fromhex(
+        "55 89 E5 "                         # push ebp; mov ebp, esp
+        "53 56 57 "                         # preserve ebx, esi, edi
+        "81 EC 00 04 00 00 "                # 0x400-byte local candidate buffer
+        "8B 75 08 "                         # esi = incoming item IDs
+        "8B 7D 0C "                         # edi = incoming count
+        "31 DB "                            # ebx = filtered count
+        "C7 45 EC 00 00 00 00 "             # outer index = 0
+        "8B 45 EC "                         # outer_loop:
+        "39 F8 "                            # cmp eax, edi
+        "7D 60 "                            # jge finish
+        "8B 0C 86 "                         # ecx = incoming[outer]
+        "89 4D F0 "                         # save item ID
+        "83 F9 FF "                         # cmp item ID, -1
+        "74 50 "                            # skip invalid item
+        "C7 45 E8 00 00 00 00 "             # inventory index = 0
+        "8B 45 E8 "                         # inventory_loop:
+        "83 F8 10 "                         # cmp eax, 16
+        "7D 15 "                            # jge pending_list_scan
+        "50 "                               # push inventory index
+        "B9 A0 60 5B 00 "                   # ecx = player object
+        "E8 00 00 00 00 "                   # call inventory-slot getter
+        "3B 45 F0 "                         # cmp eax, saved item ID
+        "74 31 "                            # skip if already carried
+        "FF 45 E8 "                         # ++inventory index
+        "EB E3 "                            # loop inventory_loop
+        "C7 45 E4 00 00 00 00 "             # pending index = 0
+        "8B 45 E4 "                         # pending_loop:
+        "39 D8 "                            # cmp eax, filtered count
+        "7D 13 "                            # jge append_item
+        "8D 8D F4 FB FF FF "                # ecx = local buffer base
+        "8B 14 81 "                         # edx = filtered[pending]
+        "3B 55 F0 "                         # cmp edx, saved item ID
+        "74 10 "                            # skip duplicate pending item
+        "FF 45 E4 "                         # ++pending index
+        "EB E6 "                            # loop pending_loop
+        "8B 45 F0 "                         # append_item: eax = item ID
+        "89 84 9D F4 FB FF FF "             # filtered[ebx] = eax
+        "43 "                               # ++filtered count
+        "FF 45 EC "                         # next_item: ++outer index
+        "EB 99 "                            # loop outer_loop
+        "85 DB "                            # finish: test filtered count
+        "7E 15 "                            # no_items if empty
+        "FF 75 10 "                         # push original third argument
+        "53 "                               # push filtered count
+        "8D 85 F4 FB FF FF "                # eax = local buffer base
+        "50 "                               # push filtered list
+        "E8 00 00 00 00 "                   # call shared append routine
+        "83 C4 0C "                         # discard wrapper call arguments
+        "EB 05 "                            # done
+        "B8 01 00 00 00 "                   # no_items: report success
+        "81 C4 00 04 00 00 "                # release local buffer
+        "5F 5E 5B "                         # restore edi, esi, ebx
+        "89 EC 5D C3"                       # restore frame; return to caller
+    ))
+    wrapper_va = slot_va + BRIBE_ITEM_DUPLICATE_WRAPPER_OFFSET
+    for displacement_offset, instruction_end, target_va in (
+        (0x43, 0x47, 0x47CDD0),  # generic inventory-slot getter
+        (0x92, 0x96, 0x4B1710),  # existing shared append routine
+    ):
+        struct.pack_into(
+            "<i", wrapper, displacement_offset,
+            target_va - (wrapper_va + instruction_end),
+        )
+    if (
+        BRIBE_ITEM_DUPLICATE_WRAPPER_OFFSET + len(wrapper)
+        > BRIBE_ITEM_DUPLICATE_FIX_SLOT_SIZE
+    ):
+        raise AssertionError("감찰관 매수 중복 수정 래퍼가 예약 공간을 초과했습니다.")
+
+    payload = bytearray(BRIBE_ITEM_DUPLICATE_FIX_SLOT_SIZE)
+    payload[:len(BRIBE_ITEM_DUPLICATE_MAGIC)] = BRIBE_ITEM_DUPLICATE_MAGIC
+    struct.pack_into(
+        "<I", payload, len(BRIBE_ITEM_DUPLICATE_MAGIC),
+        BRIBE_ITEM_DUPLICATE_VERSION,
+    )
+    payload[
+        BRIBE_ITEM_DUPLICATE_WRAPPER_OFFSET:
+        BRIBE_ITEM_DUPLICATE_WRAPPER_OFFSET + len(wrapper)
+    ] = wrapper
+    return bytes(payload)
+
+
+def _bribe_item_duplicate_fix_hook(wrapper_va: int) -> bytes:
+    return b"\xE8" + struct.pack(
+        "<i", wrapper_va - (BRIBE_ITEM_DUPLICATE_HOOK_VA + 5),
+    )
+
+
+def _bribe_item_duplicate_fix_state(data: bytes | bytearray) -> str:
+    """Return off, suppressed, or legacy-wrapper state for this bug fix."""
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        if pe.FILE_HEADER.Machine != 0x14C or pe.OPTIONAL_HEADER.ImageBase != 0x400000:
+            raise ValueError("지원하는 32비트 CDS III 실행 파일이 아닙니다.")
+        hook_offset = pe.get_offset_from_rva(
+            BRIBE_ITEM_DUPLICATE_HOOK_VA - pe.OPTIONAL_HEADER.ImageBase
+        )
+    finally:
+        pe.close()
+
+    current_hook = bytes(data[
+        hook_offset:hook_offset + len(BRIBE_ITEM_DUPLICATE_ORIGINAL_CALL)
+    ])
+    section = find_patch_section(data)
+    if current_hook == BRIBE_ITEM_DUPLICATE_ORIGINAL_CALL:
+        if (
+            section is not None
+            and section.raw_size >= (
+                BRIBE_ITEM_DUPLICATE_FIX_SLOT_OFFSET
+                + BRIBE_ITEM_DUPLICATE_FIX_SLOT_SIZE
+            )
+            and bytes(data[
+                section.raw_offset + BRIBE_ITEM_DUPLICATE_FIX_SLOT_OFFSET:
+                section.raw_offset + BRIBE_ITEM_DUPLICATE_FIX_SLOT_OFFSET
+                + len(BRIBE_ITEM_DUPLICATE_MAGIC)
+            ]) == BRIBE_ITEM_DUPLICATE_MAGIC
+        ):
+            raise ValueError("감찰관 매수 중복 수정 코드가 남아 있지만 호출부가 원본 상태입니다.")
+        return "off"
+    if current_hook == BRIBE_ITEM_DUPLICATE_SUPPRESSED_CALL:
+        if (
+            section is not None
+            and section.raw_size >= (
+                BRIBE_ITEM_DUPLICATE_FIX_SLOT_OFFSET
+                + BRIBE_ITEM_DUPLICATE_FIX_SLOT_SIZE
+            )
+            and bytes(data[
+                section.raw_offset + BRIBE_ITEM_DUPLICATE_FIX_SLOT_OFFSET:
+                section.raw_offset + BRIBE_ITEM_DUPLICATE_FIX_SLOT_OFFSET
+                + len(BRIBE_ITEM_DUPLICATE_MAGIC)
+            ]) == BRIBE_ITEM_DUPLICATE_MAGIC
+        ):
+            raise ValueError("감찰관 매수 수정 코드케이브가 남아 있지만 호출은 차단된 상태입니다.")
+        return "suppressed"
+    if (
+        section is None
+        or section.raw_size < (
+            BRIBE_ITEM_DUPLICATE_FIX_SLOT_OFFSET
+            + BRIBE_ITEM_DUPLICATE_FIX_SLOT_SIZE
+        )
+        or section.virtual_size < (
+            BRIBE_ITEM_DUPLICATE_FIX_SLOT_OFFSET
+            + BRIBE_ITEM_DUPLICATE_FIX_SLOT_SIZE
+        )
+    ):
+        raise ValueError("감찰관 매수 중복 수정 호출이 있으나 .patch 데이터를 찾지 못했습니다.")
+    slot_offset, slot_va = section.slot(
+        BRIBE_ITEM_DUPLICATE_FIX_SLOT_OFFSET,
+        BRIBE_ITEM_DUPLICATE_FIX_SLOT_SIZE,
+    )
+    expected_payload = _build_bribe_item_duplicate_fix_payload(slot_va)
+    expected_hook = _bribe_item_duplicate_fix_hook(
+        slot_va + BRIBE_ITEM_DUPLICATE_WRAPPER_OFFSET
+    )
+    if (
+        current_hook != expected_hook
+        or bytes(data[
+            slot_offset:slot_offset + BRIBE_ITEM_DUPLICATE_FIX_SLOT_SIZE
+        ]) != expected_payload
+    ):
+        raise ValueError("감찰관 매수 중복 수정 상태를 검증하지 못했습니다.")
+    return "legacy-wrapper"
+
+
+def _bribe_item_duplicate_fix_patch_info(data: bytes | bytearray) -> bool:
+    """Return whether the inspector-bribe re-addition bug fix is active."""
+    return _bribe_item_duplicate_fix_state(data) != "off"
+
+
+def apply_bribe_item_duplicate_fix(data: bytearray, enabled: bool) -> bool:
+    """Suppress only the deferred inventory append after inspector bribery."""
+    current_state = _bribe_item_duplicate_fix_state(data)
+    if (enabled and current_state == "suppressed") or (not enabled and current_state == "off"):
+        return False
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        hook_offset = pe.get_offset_from_rva(
+            BRIBE_ITEM_DUPLICATE_HOOK_VA - pe.OPTIONAL_HEADER.ImageBase
+        )
+    finally:
+        pe.close()
+
+    if enabled:
+        if current_state == "legacy-wrapper":
+            section = find_patch_section(data)
+            if section is None:
+                raise ValueError("기존 감찰관 매수 중복 수정의 복원 데이터를 찾지 못했습니다.")
+            clear_slot(
+                data, section,
+                BRIBE_ITEM_DUPLICATE_FIX_SLOT_OFFSET,
+                BRIBE_ITEM_DUPLICATE_FIX_SLOT_SIZE,
+            )
+        data[
+            hook_offset:hook_offset + len(BRIBE_ITEM_DUPLICATE_SUPPRESSED_CALL)
+        ] = BRIBE_ITEM_DUPLICATE_SUPPRESSED_CALL
+    else:
+        data[
+            hook_offset:hook_offset + len(BRIBE_ITEM_DUPLICATE_ORIGINAL_CALL)
+        ] = BRIBE_ITEM_DUPLICATE_ORIGINAL_CALL
+        if current_state == "legacy-wrapper":
+            section = find_patch_section(data)
+            if section is None:
+                raise ValueError("기존 감찰관 매수 중복 수정의 복원 데이터를 찾지 못했습니다.")
+            clear_slot(
+                data, section,
+                BRIBE_ITEM_DUPLICATE_FIX_SLOT_OFFSET,
+                BRIBE_ITEM_DUPLICATE_FIX_SLOT_SIZE,
+            )
+    return True
+
+
+def _nestorian_cross_duplicate_reward_offset(data: bytes | bytearray) -> int:
+    """Resolve and validate the 우국사 철탑 reward-item field by VA."""
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        if pe.FILE_HEADER.Machine != 0x14C or pe.OPTIONAL_HEADER.ImageBase != 0x400000:
+            raise ValueError("지원하는 32비트 CDS III 실행 파일이 아닙니다.")
+        return pe.get_offset_from_rva(
+            NESTORIAN_CROSS_DUPLICATE_REWARD_VA - pe.OPTIONAL_HEADER.ImageBase
+        )
+    finally:
+        pe.close()
+
+
+def read_nestorian_cross_duplicate_reward_fix(data: bytes | bytearray) -> bool:
+    """Read whether discovery 41's duplicate item-185 reward is disabled."""
+    offset = _nestorian_cross_duplicate_reward_offset(data)
+    reward_item = struct.unpack_from("<I", data, offset)[0]
+    if reward_item == NESTORIAN_CROSS_DUPLICATE_REWARD_ITEM:
+        return False
+    if reward_item == NO_DISCOVERY_REWARD_ITEM:
+        return True
+    raise ValueError(
+        "우국사 철탑 발견 보상 필드 값이 원본(185) 또는 패치값(FFFFFFFF)이 아닙니다."
+    )
+
+
+def apply_nestorian_cross_duplicate_reward_fix(
+    data: bytearray, enabled: bool,
+) -> bool:
+    """Remove the redundant item-185 reward link while retaining discovery registration."""
+    current_enabled = read_nestorian_cross_duplicate_reward_fix(data)
+    if current_enabled == enabled:
+        return False
+    offset = _nestorian_cross_duplicate_reward_offset(data)
+    reward_item = (
+        NO_DISCOVERY_REWARD_ITEM
+        if enabled else NESTORIAN_CROSS_DUPLICATE_REWARD_ITEM
+    )
+    struct.pack_into("<I", data, offset, reward_item)
+    return True
+
+
 def _read_npc_activity_ages_from_data(data: bytes) -> tuple[int, int]:
     """Read the inclusive age range used by the NPC activity predicate."""
     pe = pefile.PE(data=data, fast_load=True)
@@ -5407,7 +5687,7 @@ def _read_person_records_from_data(data: bytes) -> tuple[PersonRecord, ...]:
             hire_cost_coefficient = struct.unpack_from("<I", data, offset + PERSON_HIRE_COST_COEFFICIENT_OFFSET)[0]
             abilities = struct.unpack_from(f"<{PERSON_ABILITY_COUNT}I", data, offset + PERSON_ABILITIES_OFFSET)
             skills = struct.unpack_from(f"<{PERSON_SKILL_COUNT}I", data, offset + PERSON_SKILLS_OFFSET)
-            if gender not in (0, 1) or not (-1 <= face <= (143 if gender else 413)) or not -100 <= age <= 100 or not 0 <= nation <= 18 or not 0 <= job <= 3 or not 0 <= fame <= 65535 or not 0 <= infamy <= 65535 or employment_state not in (0, 1, 2) or not -1 <= city <= 225 or not 0 <= building <= 15 or not 0 <= blood <= 3 or not 0 <= vitality <= PERSON_VITALITY_MAX or not 0 <= hire_cost_coefficient <= PERSON_HIRE_COST_COEFFICIENT_MAX or any(not 0 <= value <= PERSON_ABILITY_MAX for value in abilities) or any(not 0 <= value <= PERSON_SKILL_MAX for value in skills):
+            if gender not in (0, 1) or not (-1 <= face <= (143 if gender else 413)) or not -100 <= age <= 100 or not 0 <= nation <= PERSON_NATION_ID_MAX or not 0 <= job <= 3 or not 0 <= fame <= 65535 or not 0 <= infamy <= 65535 or employment_state not in (0, 1, 2) or not -1 <= city <= 225 or not 0 <= building <= 15 or not 0 <= blood <= 3 or not 0 <= vitality <= PERSON_VITALITY_MAX or not 0 <= hire_cost_coefficient <= PERSON_HIRE_COST_COEFFICIENT_MAX or any(not 0 <= value <= PERSON_ABILITY_MAX for value in abilities) or any(not 0 <= value <= PERSON_SKILL_MAX for value in skills):
                 raise ValueError(f"인물 {identifier}번 마스터 값을 검증하지 못했습니다.")
             records.append(PersonRecord(identifier, f"{first} {last}".strip(), face, gender, age, nation, job, fame, infamy, employment_state, city, building, blood, vitality, hire_cost_coefficient, abilities, skills))
         return tuple(records)
@@ -5422,7 +5702,7 @@ def read_person_records(target: Path) -> tuple[PersonRecord, ...]:
 def apply_person_edit(data: bytearray, edit: PersonEdit | None) -> bool:
     if edit is None:
         return False
-    if not 0 <= edit.identifier < PERSON_RECORD_COUNT or edit.gender not in (0, 1) or not -1 <= edit.face_code <= (143 if edit.gender else 413) or not -100 <= edit.age_at_1480 <= 100 or not 0 <= edit.nation_id <= 18 or not 0 <= edit.job_id <= 3 or not 0 <= edit.fame <= 65535 or not 0 <= edit.infamy <= 65535 or edit.employment_state not in (0, 1, 2) or not -1 <= edit.city_id <= 225 or not 0 <= edit.building_id <= 15 or not 0 <= edit.blood_id <= 3 or not 0 <= edit.vitality <= PERSON_VITALITY_MAX or not 0 <= edit.hire_cost_coefficient <= PERSON_HIRE_COST_COEFFICIENT_MAX or len(edit.abilities) != PERSON_ABILITY_COUNT or any(not 0 <= value <= PERSON_ABILITY_MAX for value in edit.abilities) or len(edit.skills) != PERSON_SKILL_COUNT or any(not 0 <= value <= PERSON_SKILL_MAX for value in edit.skills):
+    if not 0 <= edit.identifier < PERSON_RECORD_COUNT or edit.gender not in (0, 1) or not -1 <= edit.face_code <= (143 if edit.gender else 413) or not -100 <= edit.age_at_1480 <= 100 or not 0 <= edit.nation_id <= PERSON_NATION_ID_MAX or not 0 <= edit.job_id <= 3 or not 0 <= edit.fame <= 65535 or not 0 <= edit.infamy <= 65535 or edit.employment_state not in (0, 1, 2) or not -1 <= edit.city_id <= 225 or not 0 <= edit.building_id <= 15 or not 0 <= edit.blood_id <= 3 or not 0 <= edit.vitality <= PERSON_VITALITY_MAX or not 0 <= edit.hire_cost_coefficient <= PERSON_HIRE_COST_COEFFICIENT_MAX or len(edit.abilities) != PERSON_ABILITY_COUNT or any(not 0 <= value <= PERSON_ABILITY_MAX for value in edit.abilities) or len(edit.skills) != PERSON_SKILL_COUNT or any(not 0 <= value <= PERSON_SKILL_MAX for value in edit.skills):
         raise ValueError("인물 입력값을 확인해 주세요.")
     current = _read_person_records_from_data(bytes(data))[edit.identifier]
     if (current.face_code, current.gender, current.age_at_1480, current.nation_id, current.job_id, current.fame, current.infamy, current.employment_state, current.city_id, current.building_id, current.blood_id, current.vitality, current.hire_cost_coefficient, current.abilities, current.skills) == (edit.face_code, edit.gender, edit.age_at_1480, edit.nation_id, edit.job_id, edit.fame, edit.infamy, edit.employment_state, edit.city_id, edit.building_id, edit.blood_id, edit.vitality, edit.hire_cost_coefficient, edit.abilities, edit.skills):
@@ -7499,6 +7779,40 @@ def read_sponsor_records(target: Path) -> tuple[SponsorRecord, ...]:
     return _read_sponsor_records_from_data(target.read_bytes())
 
 
+def read_erasmus_location_bug_fix_state(data: bytes | bytearray) -> bool:
+    """Return whether Erasmus's sponsor record currently points to a church."""
+    records = _read_sponsor_records_from_data(bytes(data))
+    record = records[ERASMUS_SPONSOR_ID]
+    if "에라스무스" not in record.name:
+        raise ValueError("에라스무스 후원자 레코드 위치를 검증하지 못했습니다.")
+    return record.building_id == SPONSOR_BUILDING_CHURCH_ID
+
+
+def apply_erasmus_location_bug_fix(data: bytearray, enabled: bool) -> bool:
+    """Move Erasmus from the harbor to the church, or restore the harbor."""
+    records = _read_sponsor_records_from_data(bytes(data))
+    record = records[ERASMUS_SPONSOR_ID]
+    if "에라스무스" not in record.name:
+        raise ValueError("에라스무스 후원자 레코드 위치를 검증하지 못했습니다.")
+    target_building = (
+        SPONSOR_BUILDING_CHURCH_ID if enabled else SPONSOR_BUILDING_HARBOR_ID
+    )
+    if record.building_id == target_building:
+        return False
+    if not enabled and record.building_id != SPONSOR_BUILDING_CHURCH_ID:
+        return False
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        table_offset = pe.get_offset_from_rva(SPONSOR_TABLE_VA - pe.OPTIONAL_HEADER.ImageBase)
+        record_offset = table_offset + ERASMUS_SPONSOR_ID * SPONSOR_RECORD_SIZE
+        struct.pack_into(
+            "<i", data, record_offset + SPONSOR_BUILDING_ID_OFFSET, target_building,
+        )
+    finally:
+        pe.close()
+    return True
+
+
 def apply_sponsor_edit(data: bytearray, edit: SponsorEdit | None) -> bool:
     """Write one selected sponsor's supported static master settings."""
     if edit is None:
@@ -7791,7 +8105,7 @@ def read_settings(
 ) -> tuple[
     str, tuple[tuple[int, int], ...], int, int, bool, int, int, int, int, int,
     int, int, int, int, int, int, int, bool, PirateVarietySettings, bool, Decimal, bool,
-    bool, bool, bool, bool, bool, bool, bool, bool, bool,
+    bool, bool, bool, bool, bool, bool, bool, bool, bool, bool,
 ]:
     """Read the settings currently encoded in a selected executable."""
     target = target.resolve(strict=True)
@@ -7840,6 +8154,8 @@ def read_settings(
             read_tavern_hint_bug_fix_state(data),
             _disev_language_fix_patch_info(data),
             _history_elapsed_years_fix_patch_info(data),
+            _bribe_item_duplicate_fix_patch_info(data),
+            read_nestorian_cross_duplicate_reward_fix(data),
             read_discover_avi_patch_state(data),
             read_save_slot_selector_patch_state(data),
             read_load_slot_selector_patch_state(data),
@@ -7900,6 +8216,8 @@ def apply_all(
     tavern_hint_bug_fix_enabled: bool = False,
     disev_language_fix_enabled: bool = False,
     history_elapsed_years_fix_enabled: bool = False,
+    bribe_item_duplicate_fix_enabled: bool = False,
+    nestorian_cross_duplicate_reward_fix_enabled: bool = False,
     discover_avi_enabled: bool = False,
     save_slot_selector_enabled: bool = False,
     load_slot_selector_enabled: bool = False,
@@ -7921,6 +8239,7 @@ def apply_all(
     cannon_edit: CannonEdit | None = None,
     facility_area_edits: tuple[FacilityAreaRecord, ...] | None = None,
     troop_combat_edit: TroopCombatEdit | None = None,
+    erasmus_location_bug_fix_enabled: bool = False,
 ) -> Path | None:
     """Apply all selected settings atomically and create one original backup."""
     target = target.resolve(strict=True)
@@ -7932,6 +8251,8 @@ def apply_all(
     ship_purchase_blank_selection_fix_was_enabled = _ship_purchase_blank_selection_fix_patch_info(original)
     tavern_hint_bug_fix_was_enabled = read_tavern_hint_bug_fix_state(original)
     history_elapsed_years_fix_was_enabled = _history_elapsed_years_fix_patch_info(original)
+    bribe_item_duplicate_fix_was_enabled = _bribe_item_duplicate_fix_patch_info(original)
+    erasmus_location_bug_fix_was_enabled = read_erasmus_location_bug_fix_state(original)
     discover_avi_was_enabled = read_discover_avi_patch_state(original)
     save_slot_selector_was_enabled = read_save_slot_selector_patch_state(original)
     load_slot_selector_was_enabled = read_load_slot_selector_patch_state(original)
@@ -7954,6 +8275,10 @@ def apply_all(
         apply_tavern_hint_bug_fix(before_coordinate, False)
     if history_elapsed_years_fix_was_enabled:
         apply_history_elapsed_years_fix(before_coordinate, False)
+    if bribe_item_duplicate_fix_was_enabled:
+        apply_bribe_item_duplicate_fix(before_coordinate, False)
+    if erasmus_location_bug_fix_was_enabled:
+        apply_erasmus_location_bug_fix(before_coordinate, False)
     if save_slot_selector_was_enabled:
         apply_save_slot_selector_patch(before_coordinate, False)
     if load_slot_selector_was_enabled:
@@ -7973,6 +8298,10 @@ def apply_all(
     apply_ship_purchase_blank_selection_fix(updated, ship_purchase_blank_selection_fix_enabled)
     apply_disev_language_fix(updated, disev_language_fix_enabled)
     apply_history_elapsed_years_fix(updated, history_elapsed_years_fix_enabled)
+    apply_bribe_item_duplicate_fix(updated, bribe_item_duplicate_fix_enabled)
+    apply_nestorian_cross_duplicate_reward_fix(
+        updated, nestorian_cross_duplicate_reward_fix_enabled,
+    )
     apply_gameplay_options(
         updated,
         long_rest_max,
@@ -8021,6 +8350,8 @@ def apply_all(
         apply_failed_pottery_patch(updated, failed_pottery_enabled)
     if tavern_hint_bug_fix_enabled or tavern_hint_bug_fix_was_enabled:
         apply_tavern_hint_bug_fix(updated, tavern_hint_bug_fix_enabled)
+    if erasmus_location_bug_fix_enabled or erasmus_location_bug_fix_was_enabled:
+        apply_erasmus_location_bug_fix(updated, erasmus_location_bug_fix_enabled)
     if discover_avi_enabled or discover_avi_was_enabled:
         apply_discover_avi_patch(updated, discover_avi_enabled)
     if save_slot_selector_enabled or save_slot_selector_was_enabled:

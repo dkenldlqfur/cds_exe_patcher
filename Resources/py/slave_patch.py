@@ -13,6 +13,7 @@ from datetime import datetime
 import os
 from pathlib import Path
 import shutil
+import struct
 import tempfile
 
 from app_update import bundled_resource_path
@@ -26,6 +27,11 @@ LIBRARY_BRANCH_PATCHED = b"\xEB"
 LIBRARY_VALUE_OFFSET = 0xC50EC
 LIBRARY_VALUE_ORIGINAL = b"\xFF\xFF\xFF\xFF"
 LIBRARY_VALUE_PATCHED = b"\xB8\x00\x00\x00"
+# Library book 103 is the source for hint 184 (노예).  Its year is stored as
+# a signed offset from 1480; set +2 so it first appears in 1482.
+SLAVE_HINT_BOOK_YEAR_OFFSET = 0xC50D0
+SLAVE_HINT_BOOK_YEAR_ORIGINAL = 0
+SLAVE_HINT_BOOK_YEAR_PATCHED = 2
 
 SAVEDATA_LIBRARY_OFFSET = 0x18CFD
 SAVEDATA_LIBRARY_ORIGINAL = b"\xFF\xFF"
@@ -147,6 +153,13 @@ def apply_library_hint(
         updated_exe[LIBRARY_VALUE_OFFSET:LIBRARY_VALUE_OFFSET + 4] = (
             LIBRARY_VALUE_PATCHED if enabled else LIBRARY_VALUE_ORIGINAL
         )
+    if len(updated_exe) < SLAVE_HINT_BOOK_YEAR_OFFSET + 4:
+        raise SlavePatchError("노예 힌트 출처 책의 출현 연도 필드를 찾지 못했습니다.")
+    book_year_delta = struct.unpack_from("<i", updated_exe, SLAVE_HINT_BOOK_YEAR_OFFSET)[0]
+    if enabled:
+        struct.pack_into("<i", updated_exe, SLAVE_HINT_BOOK_YEAR_OFFSET, SLAVE_HINT_BOOK_YEAR_PATCHED)
+    elif book_year_delta == SLAVE_HINT_BOOK_YEAR_PATCHED:
+        struct.pack_into("<i", updated_exe, SLAVE_HINT_BOOK_YEAR_OFFSET, SLAVE_HINT_BOOK_YEAR_ORIGINAL)
     changes: dict[Path, bytes] = {exe_path: bytes(updated_exe)}
     for savedata_path in savedata_paths:
         savedata = savedata_path.read_bytes()

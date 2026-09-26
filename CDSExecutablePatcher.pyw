@@ -76,6 +76,7 @@ from patch_cds_integrated import (
     PERSON_ABILITY_MAX,
     PERSON_HIRE_COST_COEFFICIENT_MAX,
     PERSON_VITALITY_MAX,
+    ERASMUS_SPONSOR_ID,
     ShipTypeEdit,
     ShipTypeRecord,
     CannonEdit,
@@ -116,6 +117,7 @@ from patch_cds_integrated import (
     read_barmaid_child_aptitudes,
     read_barmaid_records,
     read_sponsor_records,
+    read_erasmus_location_bug_fix_state,
     read_person_records,
     read_person_stat_limits,
     read_ship_type_records,
@@ -255,6 +257,31 @@ HISTORY_ELAPSED_YEARS_FIX_DETAILS = """발견 후 경과 연수 조건 수정
 체크 해제 시 위 수정 사항을 원본 상태로 복원합니다.
 """
 
+BRIBE_ITEM_DUPLICATE_FIX_DETAILS = """감찰관 매수 후 모조품 보고 증거품 재추가 방지
+
+- 감찰관 매수 처리에서 표시한 발견물을 후원자에게 보고한 뒤 소지품에 다시 추가하지 않습니다.
+- 발견물의 처리 플래그 초기화와 상점 구매 등 다른 아이템 추가 기능은 유지합니다.
+
+체크 해제 시 위 수정 사항을 원본 상태로 복원합니다.
+"""
+
+NESTORIAN_CROSS_DUPLICATE_REWARD_FIX_DETAILS = """우국사 철탑·경교의 십자가 보상 중복 수정
+
+- 우국사 철탑과 경교의 십자가가 모두 아이템 ID 185(경교의 십자가)를 보상으로 지정한 연결을 수정합니다.
+- 우국사 철탑의 보상 아이템 연결만 해제해, 두 발견물을 함께 등록하는 이벤트에서 경교의 십자가가 중복 입수되지 않게 합니다.
+- 발견물 등록과 경교의 십자가 자체 발견 보상은 유지합니다.
+
+체크 해제 시 우국사 철탑의 원래 보상 아이템 연결을 복원합니다.
+"""
+
+ERASMUS_LOCATION_FIX_DETAILS = """에라스무스 출현 시설 수정
+
+- 후원자 에라스무스의 출현 시설을 항구에서 교회로 변경합니다.
+- 후원자 레코드의 다른 정보는 변경하지 않습니다.
+
+체크 해제 시 에라스무스의 출현 시설을 항구로 복원합니다.
+"""
+
 GEOGRAPHIC_DISCOVERY_STILL_FIX_DETAILS = """지리 발견 정지 이미지 추가
 
 - 인도·향료제도·중국·지팡그 발견 이벤트에 EVSTILL 4번 이미지를 표시합니다.
@@ -307,6 +334,7 @@ SLAVE_DETAILS = """by ladyous
 노예 발견물
 
 - EXE의 도서관 힌트 조건 두 곳을 수정해 노예 힌트를 열람할 수 있게 합니다.
+- 힌트 ID 184의 출처 책(도서관 책 103번)이 1482년에 출현하도록 변경합니다.
 - 존재하는 `SAVEDATA.CDS`와 `SAVEDATA01.CDS`~`SAVEDATA10.CDS`의 도서관 힌트 상태를 함께 설정합니다.
 - 각 세이브의 노예 발견물 상태가 미등록(00)이면 발견·보고 날짜에 맞춰 미발견·발견·보고 완료 상태로 보정합니다.
 - DISEV.CDS의 이벤트 파트 229에 노예 발견 대사·분기를 추가합니다.
@@ -368,28 +396,26 @@ def _load_barmaid_city_names() -> tuple[str, ...]:
 BARMAID_CITY_NAMES = _load_barmaid_city_names()
 
 
-def _load_sponsor_reference() -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
-    """Load the name tables used by the sponsor editor's comboboxes."""
+def _load_sponsor_reference() -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Load sponsor-specific job and building labels."""
     try:
         reference = json.loads(
             bundled_resource_path("Resources", "data", "sponsor_reference.json").read_text(encoding="utf-8")
         )
-        nations = reference["nation_names"]
         jobs = reference["job_names"]
         buildings = reference["building_names"]
     except (OSError, KeyError, TypeError, json.JSONDecodeError) as error:
         raise RuntimeError("후원자 참조 데이터를 읽지 못했습니다.") from error
     if not (
-        isinstance(nations, list) and len(nations) == 19
-        and isinstance(jobs, list) and len(jobs) == 8
+        isinstance(jobs, list) and len(jobs) == 8
         and isinstance(buildings, list) and len(buildings) == 16
-        and all(isinstance(value, str) and value for values in (nations, jobs, buildings) for value in values)
+        and all(isinstance(value, str) and value for values in (jobs, buildings) for value in values)
     ):
         raise RuntimeError("후원자 참조 데이터가 올바르지 않습니다.")
-    return tuple(nations), tuple(jobs), tuple(buildings)
+    return tuple(jobs), tuple(buildings)
 
 
-SPONSOR_NATION_NAMES, SPONSOR_JOB_NAMES, SPONSOR_BUILDING_NAMES = _load_sponsor_reference()
+SPONSOR_JOB_NAMES, SPONSOR_BUILDING_NAMES = _load_sponsor_reference()
 
 
 def _load_city_reference() -> tuple[
@@ -938,6 +964,9 @@ class CDSExecutablePatcher(tk.Tk):
         self.tavern_hint_bug_fix_enabled = tk.BooleanVar(value=False)
         self.disev_language_fix_enabled = tk.BooleanVar(value=False)
         self.history_elapsed_years_fix_enabled = tk.BooleanVar(value=False)
+        self.bribe_item_duplicate_fix_enabled = tk.BooleanVar(value=False)
+        self.nestorian_cross_duplicate_reward_fix_enabled = tk.BooleanVar(value=False)
+        self.erasmus_location_fix_enabled = tk.BooleanVar(value=False)
         self.geographic_discovery_still_fix_enabled = tk.BooleanVar(value=False)
         self.discover_avi_enabled = tk.BooleanVar(value=False)
         self.save_slot_selector_enabled = tk.BooleanVar(value=False)
@@ -2048,7 +2077,7 @@ class CDSExecutablePatcher(tk.Tk):
             if label == "얼굴 코드": self.person_face_entry = entry
         for row, label, variable, values, width in (
             (1, "성별", self.person_gender, SPONSOR_GENDER_NAMES, 8),
-            (2, "국가", self.person_nation, SPONSOR_NATION_NAMES, 16),
+            (2, "국가", self.person_nation, CITY_NATION_NAMES, 18),
             (3, "직업", self.person_job, PERSON_JOB_NAMES, 8),
             (4, "등용 상태", self.person_employment_state, PERSON_EMPLOYMENT_STATE_NAMES, 10),
             (6, "혈액형", self.person_blood, PERSON_BLOOD_NAMES, 8),
@@ -3399,7 +3428,7 @@ class CDSExecutablePatcher(tk.Tk):
         self._bind_combobox_arrow_selection(self.sponsor_gender_selector)
         ttk.Label(sponsor_box, text="국가:").grid(row=2, column=0, pady=(8, 0), sticky="w")
         self.sponsor_nation_selector = ttk.Combobox(
-            sponsor_box, textvariable=self.sponsor_nation, values=SPONSOR_NATION_NAMES, width=18, state="disabled",
+            sponsor_box, textvariable=self.sponsor_nation, values=CITY_NATION_NAMES, width=18, state="disabled",
         )
         self.sponsor_nation_selector.grid(row=2, column=1, padx=(6, 0), pady=(8, 0), sticky="w")
         self._bind_combobox_arrow_selection(self.sponsor_nation_selector)
@@ -3768,7 +3797,7 @@ class CDSExecutablePatcher(tk.Tk):
                         tree.selection_remove(*other_selection)
         record = self._selected_person_record()
         if not record: return
-        self.person_name.set(record.name); self.person_gender.set(SPONSOR_GENDER_NAMES[record.gender]); self.person_face_code.set(str(record.face_code)); self.person_age.set(str(record.age_at_1480)); self.person_nation.set(SPONSOR_NATION_NAMES[record.nation_id]); self.person_job.set(PERSON_JOB_NAMES[record.job_id]); self.person_fame.set(str(record.fame)); self.person_infamy.set(str(record.infamy)); self.person_employment_state.set(PERSON_EMPLOYMENT_STATE_NAMES[record.employment_state]); self.person_city.set("도시 없음" if record.city_id < 0 else BARMAID_CITY_NAMES[record.city_id]); self.person_building.set(SPONSOR_BUILDING_NAMES[record.building_id]); self.person_blood.set(PERSON_BLOOD_NAMES[record.blood_id]); self.person_hire_cost_coefficient.set(str(record.hire_cost_coefficient))
+        self.person_name.set(record.name); self.person_gender.set(SPONSOR_GENDER_NAMES[record.gender]); self.person_face_code.set(str(record.face_code)); self.person_age.set(str(record.age_at_1480)); self.person_nation.set(CITY_NATION_NAMES[record.nation_id]); self.person_job.set(PERSON_JOB_NAMES[record.job_id]); self.person_fame.set(str(record.fame)); self.person_infamy.set(str(record.infamy)); self.person_employment_state.set(PERSON_EMPLOYMENT_STATE_NAMES[record.employment_state]); self.person_city.set("도시 없음" if record.city_id < 0 else BARMAID_CITY_NAMES[record.city_id]); self.person_building.set(SPONSOR_BUILDING_NAMES[record.building_id]); self.person_blood.set(PERSON_BLOOD_NAMES[record.blood_id]); self.person_hire_cost_coefficient.set(str(record.hire_cost_coefficient))
         for variable, value in zip(self.person_abilities, record.abilities): variable.set(str(value))
         self.person_vitality.set(str(record.vitality))
         for variable, value in zip(self.person_skill_levels, record.skills): variable.set(str(value))
@@ -3809,7 +3838,7 @@ class CDSExecutablePatcher(tk.Tk):
             skills = tuple(int(variable.get()) for variable in self.person_skill_levels)
             if not -1 <= face_code <= self._portrait_max_code(female=gender == 1):
                 raise ValueError("인물 얼굴 코드가 선택한 성별의 이미지 범위를 벗어났습니다.")
-            return PersonEdit(record.identifier, face_code, gender, int(self.person_age.get()), SPONSOR_NATION_NAMES.index(self.person_nation.get()), PERSON_JOB_NAMES.index(self.person_job.get()), int(self.person_fame.get()), int(self.person_infamy.get()), PERSON_EMPLOYMENT_STATE_NAMES.index(self.person_employment_state.get()), city, SPONSOR_BUILDING_NAMES.index(self.person_building.get()), PERSON_BLOOD_NAMES.index(self.person_blood.get()), int(self.person_vitality.get()), int(self.person_hire_cost_coefficient.get()), abilities, skills)
+            return PersonEdit(record.identifier, face_code, gender, int(self.person_age.get()), CITY_NATION_NAMES.index(self.person_nation.get()), PERSON_JOB_NAMES.index(self.person_job.get()), int(self.person_fame.get()), int(self.person_infamy.get()), PERSON_EMPLOYMENT_STATE_NAMES.index(self.person_employment_state.get()), city, SPONSOR_BUILDING_NAMES.index(self.person_building.get()), PERSON_BLOOD_NAMES.index(self.person_blood.get()), int(self.person_vitality.get()), int(self.person_hire_cost_coefficient.get()), abilities, skills)
         except (ValueError, IndexError) as error: raise ValueError("인물 입력값을 확인해 주세요.") from error
 
     def _set_ship_type_controls_enabled(self, enabled: bool) -> None:
@@ -6563,7 +6592,7 @@ class CDSExecutablePatcher(tk.Tk):
             raise ValueError(
                 f"후원자 얼굴 코드는 0~{maximum_face_code} 사이의 정수여야 합니다."
             )
-        if nation_id not in range(len(SPONSOR_NATION_NAMES)):
+        if nation_id not in range(len(CITY_NATION_NAMES)):
             raise ValueError("후원자 국가를 선택해 주세요.")
         if job_index not in range(len(SPONSOR_JOB_NAMES)):
             raise ValueError("후원자 직업을 선택해 주세요.")
@@ -6596,6 +6625,19 @@ class CDSExecutablePatcher(tk.Tk):
         )
         self._sponsor_by_identifier = {record.identifier: record for record in self._sponsor_records}
         self._refresh_sponsor_list()
+
+    def _sync_erasmus_sponsor_record(self, target: Path) -> None:
+        """Refresh Erasmus's row after the coordinated location fix runs."""
+        actual = read_sponsor_records(target)[ERASMUS_SPONSOR_ID]
+        self._sponsor_records = tuple(
+            actual if record.identifier == ERASMUS_SPONSOR_ID else record
+            for record in self._sponsor_records
+        )
+        self._sponsor_by_identifier = {record.identifier: record for record in self._sponsor_records}
+        self._refresh_sponsor_list()
+        selected = self.sponsor_list.selection()
+        if selected and int(selected[0]) == ERASMUS_SPONSOR_ID:
+            self._on_sponsor_selected()
 
     def _bug_fix_options(self) -> tuple[tuple[str, tk.BooleanVar, str], ...]:
         """Return the independently selectable fixes shown in the details dialog."""
@@ -6635,6 +6677,21 @@ class CDSExecutablePatcher(tk.Tk):
                 "발견 후 경과 연수 조건 수정",
                 self.history_elapsed_years_fix_enabled,
                 HISTORY_ELAPSED_YEARS_FIX_DETAILS,
+            ),
+            (
+                "감찰관 매수 증거품 재추가 방지",
+                self.bribe_item_duplicate_fix_enabled,
+                BRIBE_ITEM_DUPLICATE_FIX_DETAILS,
+            ),
+            (
+                "우국사 철탑·경교의 십자가 보상 중복 수정",
+                self.nestorian_cross_duplicate_reward_fix_enabled,
+                NESTORIAN_CROSS_DUPLICATE_REWARD_FIX_DETAILS,
+            ),
+            (
+                "에라스무스 출현 시설 수정",
+                self.erasmus_location_fix_enabled,
+                ERASMUS_LOCATION_FIX_DETAILS,
             ),
         )
 
@@ -6863,6 +6920,8 @@ class CDSExecutablePatcher(tk.Tk):
                     tavern_hint_bug_fix_enabled,
                     disev_language_fix_enabled,
                     history_elapsed_years_fix_enabled,
+                    bribe_item_duplicate_fix_enabled,
+                    nestorian_cross_duplicate_reward_fix_enabled,
                     discover_avi_enabled,
                     save_slot_selector_enabled,
                     load_slot_selector_enabled,
@@ -6871,6 +6930,9 @@ class CDSExecutablePatcher(tk.Tk):
                 barmaid_records = read_barmaid_records(target)
                 barmaid_child_aptitudes = read_barmaid_child_aptitudes(target)
                 sponsor_records = read_sponsor_records(target)
+                erasmus_location_bug_fix_enabled = read_erasmus_location_bug_fix_state(
+                    target.read_bytes(),
+                )
                 person_records = read_person_records(target)
                 ship_type_records = read_ship_type_records(target)
                 cannon_records = read_cannon_records(target)
@@ -6948,6 +7010,11 @@ class CDSExecutablePatcher(tk.Tk):
             self.tavern_hint_bug_fix_enabled.set(tavern_hint_bug_fix_enabled)
             self.disev_language_fix_enabled.set(disev_language_fix_enabled)
             self.history_elapsed_years_fix_enabled.set(history_elapsed_years_fix_enabled)
+            self.bribe_item_duplicate_fix_enabled.set(bribe_item_duplicate_fix_enabled)
+            self.nestorian_cross_duplicate_reward_fix_enabled.set(
+                nestorian_cross_duplicate_reward_fix_enabled,
+            )
+            self.erasmus_location_fix_enabled.set(erasmus_location_bug_fix_enabled)
             self.save_slot_selector_enabled.set(
                 save_slot_selector_enabled or load_slot_selector_enabled,
             )
@@ -6960,6 +7027,8 @@ class CDSExecutablePatcher(tk.Tk):
                 tavern_hint_bug_fix_enabled,
                 disev_language_fix_enabled,
                 history_elapsed_years_fix_enabled,
+                bribe_item_duplicate_fix_enabled,
+                erasmus_location_bug_fix_enabled,
             )))
             self._update_bug_fix_control_states()
             discovery_errors: list[str] = []
@@ -7456,6 +7525,9 @@ class CDSExecutablePatcher(tk.Tk):
                 self.bug_fixes_enabled.get() and self.tavern_hint_bug_fix_enabled.get(),
                 self.bug_fixes_enabled.get() and self.disev_language_fix_enabled.get(),
                 self.bug_fixes_enabled.get() and self.history_elapsed_years_fix_enabled.get(),
+                self.bug_fixes_enabled.get() and self.bribe_item_duplicate_fix_enabled.get(),
+                self.bug_fixes_enabled.get()
+                and self.nestorian_cross_duplicate_reward_fix_enabled.get(),
                 self.discover_avi_enabled.get(),
                 self.save_slot_selector_enabled.get(),
                 self.save_slot_selector_enabled.get(),
@@ -7477,6 +7549,9 @@ class CDSExecutablePatcher(tk.Tk):
                 cannon_edit=cannon_edit,
                 facility_area_edits=self._current_facility_area_edits(),
                 troop_combat_edit=troop_combat_edit,
+                erasmus_location_bug_fix_enabled=(
+                    self.bug_fixes_enabled.get() and self.erasmus_location_fix_enabled.get()
+                ),
             )
             if backup is not None:
                 backed_up_paths.add(target.resolve())
@@ -7558,6 +7633,7 @@ class CDSExecutablePatcher(tk.Tk):
             self._show_centered_popup("완료", "\n\n".join(details))
         self._remember_barmaid_edit(barmaid_edit)
         self._remember_sponsor_edit(sponsor_edit)
+        self._sync_erasmus_sponsor_record(target)
         self._remember_ship_type_edit(ship_type_edit)
         self._remember_cannon_edit(cannon_edit)
         self._remember_troop_combat_edit(troop_combat_edit)

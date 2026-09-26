@@ -95,6 +95,10 @@ PLAYER_FAME_LIMIT_SLOT_SIZE = 0x100
 # to the list instead of indexing past the temporary candidate array.
 SHIP_PURCHASE_BLANK_SELECTION_FIX_SLOT_OFFSET = 0x14500
 SHIP_PURCHASE_BLANK_SELECTION_FIX_SLOT_SIZE = 0x100
+# Prevent the evidence-item recovery path after bribing an inspector from
+# inserting an item that is still present in the player's inventory.
+BRIBE_ITEM_DUPLICATE_FIX_SLOT_OFFSET = 0x14600
+BRIBE_ITEM_DUPLICATE_FIX_SLOT_SIZE = 0x200
 # Discovery descriptions are independent pointer strings.  A fixed 512-byte
 # row leaves room beyond every original Korean description while keeping each
 # discovery edit isolated from its neighbours.
@@ -135,6 +139,7 @@ PATCH_SECTION_SHIP_REUSE_FIX_SIZE = 0x14300
 PATCH_SECTION_HISTORY_ELAPSED_YEARS_FIX_SIZE = 0x14400
 PATCH_SECTION_PLAYER_FAME_LIMIT_SIZE = 0x15000
 PATCH_SECTION_SHIP_PURCHASE_BLANK_SELECTION_FIX_SIZE = 0x14600
+PATCH_SECTION_BRIBE_ITEM_DUPLICATE_FIX_SIZE = 0x14800
 PATCH_SECTION_DISCOVERY_DESCRIPTIONS_SIZE = 0x32000
 PATCH_SECTION_LIBRARY_HINT_NAMES_SIZE = 0x37000
 PATCH_SECTION_LIBRARY_BOOKS_SIZE = 0x41000
