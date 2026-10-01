@@ -120,6 +120,8 @@ from patch_cds_integrated import (
     read_barmaid_records,
     read_sponsor_records,
     read_erasmus_location_bug_fix_state,
+    read_city_discovery_notice_patch_state,
+    read_high_speed_map_fix_state,
     read_tunis_book_event_location_fix_state,
     read_person_records,
     read_person_stat_limits,
@@ -149,6 +151,18 @@ APP_UPDATE_CONFIG = load_update_config()
 APP_VERSION = APP_UPDATE_CONFIG.version
 UPDATE_HISTORY_MIN_VERSION = (1, 0, 0)
 UPDATE_HISTORY_SEPARATOR = "\n\n" + "─" * 56 + "\n\n"
+
+CITY_DISCOVERY_NOTICE_DETAILS = """월드 지도 도시 이름 표시
+
+월드 지도에서 발견된 도시의 그림 위에 도시 이름을 표시합니다.
+도시 이름 위에는 [국가 이름]을 표시하며, 두 행 모두 도시 그림의
+가운데를 기준으로 실제 글자 폭에 맞춰 정렬합니다.
+국가는 현재 소속을 읽으므로 역사 이벤트로 소속이 바뀌면 반영됩니다.
+미발견·숨김 상태의 도시는 표시하지 않으며, 지도 스크롤에 맞춰 이동합니다.
+도시 이름을 수정하면 지도 표시에도 반영됩니다.
+기존 도시 발견 대사·알림은 유지하고, 추가 공용 팝업은 표시하지 않습니다.
+이전 버전의 추가 팝업 패치도 저장 시 제거합니다.
+체크 해제 후 저장하면 지도 이름 표시가 제거됩니다."""
 
 MISTRANSLATION_DETAILS = """by kseokjung, 오쌍, ladyous
 
@@ -230,6 +244,17 @@ SHIP_PURCHASE_BLANK_SELECTION_FIX_DETAILS = """선박 구입 빈 슬롯 종료 �
 - 취소와 정상적인 선박 선택·구입 흐름은 변경하지 않습니다.
 
 체크 해제 시 위 수정 사항을 원본 상태로 복원합니다.
+"""
+
+HIGH_SPEED_MAP_FIX_DETAILS = """고속 항해 지도 갱신 버그 수정
+
+항해속도가 높을 때 화면 왼쪽을 넘어간 위치를 세계 경계 이동으로
+잘못 판단하여 지도가 반대로 움직이거나, 지도 추적이 뒤처지는 문제를 수정합니다.
+
+항해속도와 총 이동 거리는 유지합니다. 한 번의 큰 이동을 축별 최대
+32픽셀의 작은 이동으로 나누어 원래 지도 추적과 경계 처리를 실행합니다.
+날짜 진행·도시 발견·랜덤 조우 판정을 추가로 실행하지 않습니다.
+체크 해제 후 저장하면 원래 이동 호출로 되돌립니다.
 """
 
 TAVERN_HINT_BUG_FIX_DETAILS = """주점 힌트 버그 수정
@@ -973,6 +998,7 @@ class CDSExecutablePatcher(tk.Tk):
         self.cannon_accuracy_fix_enabled = tk.BooleanVar(value=False)
         self.ship_reuse_fix_enabled = tk.BooleanVar(value=False)
         self.ship_purchase_blank_selection_fix_enabled = tk.BooleanVar(value=False)
+        self.high_speed_map_fix_enabled = tk.BooleanVar(value=False)
         self.tavern_hint_bug_fix_enabled = tk.BooleanVar(value=False)
         self.tunis_book_event_location_fix_enabled = tk.BooleanVar(value=False)
         self.disev_language_fix_enabled = tk.BooleanVar(value=False)
@@ -983,6 +1009,7 @@ class CDSExecutablePatcher(tk.Tk):
         self.geographic_discovery_still_fix_enabled = tk.BooleanVar(value=False)
         self.discover_avi_enabled = tk.BooleanVar(value=False)
         self.save_slot_selector_enabled = tk.BooleanVar(value=False)
+        self.city_discovery_notice_enabled = tk.BooleanVar(value=False)
         self.pirate_fame_middle = tk.StringVar(value="0")
         self.pirate_fame_high = tk.StringVar(value="0")
         self.pirate_western_stage2_first_probability = tk.StringVar(value="0")
@@ -1159,8 +1186,12 @@ class CDSExecutablePatcher(tk.Tk):
         self._fake_item_controls: list[tk.Widget | NativeWinEdit] = []
         self._fake_item_target_names_by_code: dict[int, str] = {}
         self._fake_item_target_codes_by_name: dict[str, int] = {}
+        self.include_fake_discoveries = tk.BooleanVar(value=False)
+        self._active_discovery_identifier: int | None = None
         self.discovery_name = tk.StringVar()
         self.discovery_category = tk.StringVar()
+        self.discovery_game_id = tk.StringVar()
+        self.discovery_coordinate_presence = tk.StringVar()
         self.discovery_still_slot = tk.StringVar()
         self.discovery_value = tk.StringVar()
         self.discovery_min_x = tk.StringVar()
@@ -1177,7 +1208,6 @@ class CDSExecutablePatcher(tk.Tk):
         self._discovery_records: tuple[DiscoveryRecord, ...] = ()
         self._discovery_by_identifier: dict[int, DiscoveryRecord] = {}
         self._discovery_controls: list[tk.Widget | NativeWinEdit] = []
-        self._discovery_coordinate_controls: list[tk.Widget | NativeWinEdit] = []
         self._discovery_still_slot_count = 85
         self._discovery_hint_links: tuple[DiscoveryHintLink, ...] = ()
         self._discovery_hint_by_identifier: dict[str, DiscoveryHintLink] = {}
@@ -1964,6 +1994,18 @@ class CDSExecutablePatcher(tk.Tk):
                 "10개 슬롯 저장/불러오기", SAVE_SLOT_SELECTOR_DETAILS,
             ),
         ).grid(row=2, column=1, padx=(10, 0), pady=(6, 0), sticky="e")
+        ttk.Checkbutton(
+            translation_box,
+            text="월드 지도 도시 이름 표시",
+            variable=self.city_discovery_notice_enabled,
+        ).grid(row=3, column=0, pady=(6, 0), sticky="w")
+        ttk.Button(
+            translation_box,
+            text="내용…",
+            command=lambda: self.show_patch_details(
+                "월드 지도 도시 이름 표시", CITY_DISCOVERY_NOTICE_DETAILS,
+            ),
+        ).grid(row=3, column=1, padx=(10, 0), pady=(6, 0), sticky="e")
         discovery_box = ttk.LabelFrame(additional_left_column, text="발견물", padding=10)
         discovery_box.grid(row=0, column=0, sticky="ew")
 
@@ -2691,16 +2733,19 @@ class CDSExecutablePatcher(tk.Tk):
         fake_item_list_frame = ttk.Frame(fake_item_list_box)
         fake_item_list_frame.grid(row=1, column=0, columnspan=2, pady=(8, 0), sticky="nsew")
         self.fake_item_list = ttk.Treeview(
-            fake_item_list_frame, columns=("id", "name", "city"), show="headings",
+            fake_item_list_frame, columns=("id", "game_id", "name", "city"), show="headings",
             height=17, selectmode="browse",
         )
         self.fake_item_list.heading("id", text="번호")
+        self.fake_item_list.heading("game_id", text="그룹 ID")
         self.fake_item_list.heading("name", text="이름")
         self.fake_item_list.heading("city", text="판매 도시")
         self._enable_treeview_text_sort(self.fake_item_list, "id", "번호")
+        self._enable_treeview_text_sort(self.fake_item_list, "game_id", "그룹 ID")
         self._enable_treeview_text_sort(self.fake_item_list, "name", "이름")
         self._enable_treeview_text_sort(self.fake_item_list, "city", "판매 도시")
         self.fake_item_list.column("id", width=48, anchor="center", stretch=False)
+        self.fake_item_list.column("game_id", width=62, anchor="center", stretch=False)
         self.fake_item_list.column("name", width=180, anchor="w", stretch=False)
         self.fake_item_list.column("city", width=105, anchor="w", stretch=False)
         fake_item_scroll = ttk.Scrollbar(
@@ -2910,25 +2955,36 @@ class CDSExecutablePatcher(tk.Tk):
         discovery_tab.grid_rowconfigure(2, weight=1)
         discovery_list_box.columnconfigure(0, weight=1)
         discovery_list_box.rowconfigure(1, weight=1)
-        ttk.Label(discovery_list_box, text="검색:").grid(row=0, column=0, sticky="w")
-        discovery_search_host = tk.Frame(discovery_list_box, width=160, height=23)
-        discovery_search_host.grid(row=0, column=1, padx=(6, 0), sticky="w")
+        discovery_search_bar = ttk.Frame(discovery_list_box)
+        discovery_search_bar.grid(row=0, column=0, columnspan=3, sticky="w")
+        ttk.Label(discovery_search_bar, text="검색:").pack(side="left")
+        discovery_search_host = tk.Frame(discovery_search_bar, width=160, height=23)
+        discovery_search_host.pack(side="left", padx=(6, 0))
         self.discovery_search_entry = NativeWinEdit(
             discovery_search_host, self._schedule_discovery_list_refresh, width=160, height=23,
         )
+        ttk.Checkbutton(
+            discovery_search_bar,
+            text="모조품 포함",
+            variable=self.include_fake_discoveries,
+            command=self._refresh_discovery_list,
+        ).pack(side="left", padx=(8, 0))
         discovery_list_frame = ttk.Frame(discovery_list_box)
         discovery_list_frame.grid(row=1, column=0, columnspan=2, pady=(8, 0), sticky="nsew")
         self.discovery_list = ttk.Treeview(
-            discovery_list_frame, columns=("id", "category", "name"), show="headings",
+            discovery_list_frame, columns=("id", "game_id", "category", "name"), show="headings",
             height=16, selectmode="browse",
         )
         self.discovery_list.heading("id", text="번호")
+        self.discovery_list.heading("game_id", text="그룹 ID")
         self.discovery_list.heading("category", text="분류")
         self.discovery_list.heading("name", text="이름")
         self._enable_treeview_text_sort(self.discovery_list, "id", "번호")
+        self._enable_treeview_text_sort(self.discovery_list, "game_id", "그룹 ID")
         self._enable_treeview_text_sort(self.discovery_list, "category", "분류")
         self._enable_treeview_text_sort(self.discovery_list, "name", "이름")
         self.discovery_list.column("id", width=48, anchor="center", stretch=False)
+        self.discovery_list.column("game_id", width=62, anchor="center", stretch=False)
         self.discovery_list.column("category", width=58, anchor="center", stretch=False)
         self.discovery_list.column("name", width=150, anchor="w", stretch=True)
         discovery_scroll = ttk.Scrollbar(
@@ -2958,6 +3014,21 @@ class CDSExecutablePatcher(tk.Tk):
         discovery_name_host.grid(row=0, column=1, padx=(6, 0), sticky="w")
         self.discovery_name_entry = NativeWinEdit(discovery_name_host, lambda: None, width=230, height=23)
         self.discovery_name_entry.max_bytes = 31
+        ttk.Label(discovery_box, text="좌표:").grid(row=1, column=0, pady=(5, 0), sticky="w")
+        self.discovery_coordinate_presence_selector = ttk.Combobox(
+            discovery_box,
+            textvariable=self.discovery_coordinate_presence,
+            values=("좌표 있음", "좌표 없음"),
+            width=12,
+            state="disabled",
+        )
+        self.discovery_coordinate_presence_selector.grid(
+            row=1, column=1, padx=(6, 0), pady=(5, 0), sticky="w",
+        )
+        self._bind_combobox_arrow_selection(self.discovery_coordinate_presence_selector)
+        self.discovery_coordinate_presence_selector.bind(
+            "<<ComboboxSelected>>", self._on_discovery_coordinate_presence_changed,
+        )
         self.discovery_media_label = ttk.Label(discovery_box, text="미디어 번호:")
         self.discovery_media_label.grid(row=0, column=2, padx=(14, 0), sticky="w")
         self.discovery_still_slot_entry = ttk.Spinbox(
@@ -2980,9 +3051,23 @@ class CDSExecutablePatcher(tk.Tk):
         )
         self.discovery_value_entry.grid(row=2, column=3, padx=(6, 0), pady=3, sticky="w")
         self._limit_integer_input(self.discovery_value_entry, 0, 99_999_999)
+        ttk.Label(discovery_box, text="그룹 ID:").grid(
+            row=3, column=2, padx=(14, 0), pady=3, sticky="w",
+        )
+        self.discovery_game_id_entry = ttk.Spinbox(
+            discovery_box, from_=0, to=0xFFFF,
+            textvariable=self.discovery_game_id, width=11, state="disabled",
+        )
+        self.discovery_game_id_entry.grid(
+            row=3, column=3, padx=(6, 0), pady=3, sticky="w",
+        )
+        self._limit_integer_input(self.discovery_game_id_entry, 0, 0xFFFF)
 
         discovery_coordinates_box = ttk.Frame(discovery_box)
-        discovery_coordinates_box.grid(row=1, column=0, rowspan=2, columnspan=2, pady=(3, 0), sticky="nw")
+        self.discovery_coordinates_box = discovery_coordinates_box
+        discovery_coordinates_box.grid(
+            row=2, column=0, rowspan=2, columnspan=2, pady=(3, 0), sticky="nw",
+        )
         for row, (axis, directions, first_direction, first, second_direction, second, high) in enumerate((
             ("위도", ("북위", "남위"), self.discovery_min_y_direction, self.discovery_min_y,
              self.discovery_max_y_direction, self.discovery_max_y, 90),
@@ -3014,9 +3099,6 @@ class CDSExecutablePatcher(tk.Tk):
             second_entry.grid(row=row, column=5, padx=(4, 0), pady=3, sticky="w")
             self._limit_decimal_input(second_entry, 0, high)
             self._discovery_controls.extend((
-                first_direction_selector, first_entry, second_direction_selector, second_entry,
-            ))
-            self._discovery_coordinate_controls.extend((
                 first_direction_selector, first_entry, second_direction_selector, second_entry,
             ))
 
@@ -3076,10 +3158,10 @@ class CDSExecutablePatcher(tk.Tk):
             self, self.discovery_image_preview,
         )
         self._discovery_controls.extend((
-            self.discovery_search_entry,
             self.discovery_name_entry,
-            self.discovery_list,
+            self.discovery_coordinate_presence_selector,
             self.discovery_category_selector,
+            self.discovery_game_id_entry,
             self.discovery_value_entry,
             self.discovery_still_slot_entry,
             self.discovery_description_editor,
@@ -5355,11 +5437,12 @@ class CDSExecutablePatcher(tk.Tk):
                 query
                 and query not in record.name.casefold()
                 and query not in city_name.casefold()
+                and query not in str(record.target_code)
             ):
                 continue
             tree.insert(
                 "", "end", iid=str(record.identifier),
-                values=(f"{record.identifier:03d}", record.name, city_name),
+                values=(f"{record.identifier:03d}", record.target_code, record.name, city_name),
             )
         self._reapply_treeview_text_sort(tree, "name")
         if selected_identifier and tree.exists(selected_identifier):
@@ -5375,6 +5458,24 @@ class CDSExecutablePatcher(tk.Tk):
         self._fake_item_records = records
         self._fake_item_by_identifier = {record.identifier: record for record in records}
         self.fake_item_search_entry.set("")
+        self._configure_fake_item_target_values()
+        self.fake_item_item_selector.configure(
+            values=tuple(record.name for record in self._item_records),
+        )
+        self.fake_item_city_selector.configure(
+            values=BARMAID_CITY_NAMES,
+        )
+        self._refresh_fake_item_list()
+        self._set_fake_item_controls_enabled(bool(records))
+        if records:
+            first_identifier = str(records[0].identifier)
+            self.fake_item_list.selection_set(first_identifier)
+            self.fake_item_list.focus(first_identifier)
+            self._on_fake_item_selected()
+        if hasattr(self, "discovery_list"):
+            self._refresh_discovery_list()
+
+    def _configure_fake_item_target_values(self) -> None:
         # Several map/location discoveries share a game ID with the tangible
         # discovery that a fake imitates.  Prefer the verified 103~131 item
         # discovery range so code 122, for example, is shown as 땅의 여신상.
@@ -5392,22 +5493,7 @@ class CDSExecutablePatcher(tk.Tk):
         self._fake_item_target_codes_by_name = {
             name: code for code, name in self._fake_item_target_names_by_code.items()
         }
-        self.fake_item_target_entry.configure(
-            values=tuple(self._fake_item_target_codes_by_name),
-        )
-        self.fake_item_item_selector.configure(
-            values=tuple(record.name for record in self._item_records),
-        )
-        self.fake_item_city_selector.configure(
-            values=BARMAID_CITY_NAMES,
-        )
-        self._refresh_fake_item_list()
-        self._set_fake_item_controls_enabled(bool(records))
-        if records:
-            first_identifier = str(records[0].identifier)
-            self.fake_item_list.selection_set(first_identifier)
-            self.fake_item_list.focus(first_identifier)
-            self._on_fake_item_selected()
+        self.fake_item_target_entry.configure(values=tuple(self._fake_item_target_codes_by_name))
 
     def _on_fake_item_selected(self, _event: tk.Event | None = None) -> None:
         record = self._selected_fake_item_record()
@@ -5471,6 +5557,13 @@ class CDSExecutablePatcher(tk.Tk):
         self._refresh_fake_item_list()
 
     def _set_discovery_controls_enabled(self, enabled: bool) -> None:
+        was_enabled = getattr(self, "_discovery_controls_enabled", False)
+        tab_state = "normal" if enabled else "disabled"
+        for tab_index in range(self.discovery_details_notebook.index("end")):
+            self.discovery_details_notebook.tab(tab_index, state=tab_state)
+        if enabled and not was_enabled:
+            self.discovery_details_notebook.select(0)
+        self._discovery_controls_enabled = enabled
         for control in self._discovery_controls:
             if isinstance(control, NativeWinEdit):
                 control.set_enabled(enabled)
@@ -5500,21 +5593,55 @@ class CDSExecutablePatcher(tk.Tk):
         query = self.discovery_search_entry.get().strip().casefold()
         for record in self._discovery_records:
             category = DISCOVERY_CATEGORY_NAMES[record.category_id]
-            if query and query not in record.name.casefold() and query not in category.casefold():
+            if query and (
+                query not in record.name.casefold()
+                and query not in category.casefold()
+                and query not in str(record.game_id)
+                and query not in str(record.identifier)
+            ):
                 continue
             tree.insert(
                 "", "end", iid=str(record.identifier),
-                values=(f"{record.identifier:03d}", category, record.name),
+                values=(f"{record.identifier:03d}", record.game_id, category, record.name),
             )
+        if self.include_fake_discoveries.get():
+            for record in self._fake_item_records:
+                category = DISCOVERY_CATEGORY_NAMES[record.category_id]
+                query_values = (
+                    record.name.casefold(), category.casefold(),
+                    str(record.identifier), str(record.target_code), "모조품",
+                )
+                if query and not any(query in value for value in query_values):
+                    continue
+                tree.insert(
+                    "", "end", iid=f"fake:{record.identifier}",
+                    values=(
+                        f"모조 {record.identifier:03d}", record.target_code,
+                        category, record.name,
+                    ),
+                )
         self._reapply_treeview_text_sort(tree, "name")
         if selected_identifier and tree.exists(selected_identifier):
             tree.selection_set(selected_identifier)
             tree.focus(selected_identifier)
             tree.see(selected_identifier)
+        elif self._active_discovery_identifier is not None:
+            active_identifier = str(self._active_discovery_identifier)
+            if tree.exists(active_identifier):
+                tree.selection_set(active_identifier)
+                tree.focus(active_identifier)
+                tree.see(active_identifier)
 
     def _selected_discovery_record(self) -> DiscoveryRecord | None:
         selection = self.discovery_list.selection()
-        return self._discovery_by_identifier.get(int(selection[0])) if selection else None
+        if not selection:
+            return None
+        selected_identifier = selection[0]
+        if selected_identifier.startswith("fake:"):
+            if self._active_discovery_identifier is None:
+                return None
+            return self._discovery_by_identifier.get(self._active_discovery_identifier)
+        return self._discovery_by_identifier.get(int(selected_identifier))
 
     def _load_discovery_records(self, records: tuple[DiscoveryRecord, ...]) -> None:
         self._discovery_records = records
@@ -5533,6 +5660,15 @@ class CDSExecutablePatcher(tk.Tk):
             self._on_item_selected()
 
     def _on_discovery_selected(self, _event: tk.Event | None = None) -> None:
+        selection = self.discovery_list.selection()
+        if not selection:
+            return
+        selected_identifier = selection[0]
+        if selected_identifier.startswith("fake:"):
+            self._set_discovery_controls_enabled(False)
+            return
+        self._set_discovery_controls_enabled(bool(self._discovery_records))
+        self._active_discovery_identifier = int(selected_identifier)
         record = self._selected_discovery_record()
         if record is None:
             return
@@ -5551,6 +5687,7 @@ class CDSExecutablePatcher(tk.Tk):
             ["!disabled"] if media_value is not None else ["disabled"]
         )
         self.discovery_category.set(DISCOVERY_CATEGORY_NAMES[record.category_id])
+        self.discovery_game_id.set(str(record.game_id))
         self.discovery_value.set(str(record.value))
         self.discovery_description_editor.configure(state="normal")
         self.discovery_description_editor.delete("1.0", tk.END)
@@ -5575,9 +5712,18 @@ class CDSExecutablePatcher(tk.Tk):
         ):
             direction.set("" if value is None else (positive if value >= 0 else negative))
             variable.set("" if value is None else f"{abs(value):.3f}")
-        coordinate_state = ["!disabled"] if record.min_x is not None else ["disabled"]
-        for control in self._discovery_coordinate_controls:
-            control.state(coordinate_state)
+        self.discovery_coordinate_presence.set(
+            "좌표 있음" if record.min_x is not None else "좌표 없음",
+        )
+        self._on_discovery_coordinate_presence_changed()
+
+    def _on_discovery_coordinate_presence_changed(
+        self, _event: tk.Event | None = None,
+    ) -> None:
+        if self.discovery_coordinate_presence.get() == "좌표 있음":
+            self.discovery_coordinates_box.grid()
+        else:
+            self.discovery_coordinates_box.grid_remove()
 
     def _on_discovery_description_modified(
         self, _event: tk.Event | None = None,
@@ -5739,9 +5885,12 @@ class CDSExecutablePatcher(tk.Tk):
                 self.discovery_min_y.get(), self.discovery_max_y.get(),
                 self.discovery_min_x.get(), self.discovery_max_x.get(),
             )
-            coordinates = (
-                (None, None, None, None) if not any(raw_coordinates)
-                else (
+            if self.discovery_coordinate_presence.get() == "좌표 없음":
+                coordinates = (None, None, None, None)
+            elif self.discovery_coordinate_presence.get() == "좌표 있음":
+                if not all(raw_coordinates):
+                    raise ValueError("좌표가 있으면 위도와 경도 범위를 모두 입력해 주세요.")
+                coordinates = (
                     longitude_to_world_x(self._discovery_directional_degree(
                         self.discovery_min_x.get(), self.discovery_min_x_direction.get(),
                         "동경", "서경", "경도",
@@ -5759,11 +5908,13 @@ class CDSExecutablePatcher(tk.Tk):
                         "북위", "남위", "위도",
                     )),
                 )
-            )
+            else:
+                raise ValueError("좌표 있음 또는 좌표 없음을 선택해 주세요.")
             return DiscoveryEdit(
                 record.identifier,
                 self.discovery_name_entry.get().strip(),
                 DISCOVERY_CATEGORY_NAMES.index(self.discovery_category.get()),
+                int(self.discovery_game_id.get()),
                 int(self.discovery_value.get()),
                 *coordinates,
                 still_slot,
@@ -5779,7 +5930,7 @@ class CDSExecutablePatcher(tk.Tk):
             return
         self._discovery_records = tuple(
             DiscoveryRecord(
-                record.identifier, edit.name, edit.category_id, record.game_id, edit.value,
+                record.identifier, edit.name, edit.category_id, edit.game_id, edit.value,
                 edit.min_x, edit.min_y, edit.max_x, edit.max_y,
                 edit.still_slot, edit.avi_id, edit.animation_part, edit.description,
             ) if record.identifier == edit.identifier else record
@@ -5787,8 +5938,11 @@ class CDSExecutablePatcher(tk.Tk):
         )
         self._discovery_by_identifier = {record.identifier: record for record in self._discovery_records}
         self._refresh_discovery_list()
+        self._configure_fake_item_target_values()
         self._configure_hint_target_values()
         self._refresh_hint_list()
+        if self.fake_item_list.selection():
+            self._on_fake_item_selected()
 
     def _set_discovery_hint_controls_enabled(self, enabled: bool) -> None:
         for control in self._discovery_hint_controls:
@@ -6906,6 +7060,11 @@ class CDSExecutablePatcher(tk.Tk):
                 TAVERN_HINT_BUG_FIX_DETAILS,
             ),
             (
+                "고속 항해 지도 갱신 버그 수정",
+                self.high_speed_map_fix_enabled,
+                HIGH_SPEED_MAP_FIX_DETAILS,
+            ),
+            (
                 "튀니스 주점 아이템 이벤트 장소 수정",
                 self.tunis_book_event_location_fix_enabled,
                 TUNIS_BOOK_EVENT_LOCATION_FIX_DETAILS,
@@ -7204,6 +7363,12 @@ class CDSExecutablePatcher(tk.Tk):
                 erasmus_location_bug_fix_enabled = read_erasmus_location_bug_fix_state(
                     target.read_bytes(),
                 )
+                city_discovery_notice_enabled = read_city_discovery_notice_patch_state(
+                    target.read_bytes(),
+                )
+                high_speed_map_fix_enabled = read_high_speed_map_fix_state(
+                    target.read_bytes(),
+                )
                 person_records = read_person_records(target)
                 ship_type_records = read_ship_type_records(target)
                 cannon_records = read_cannon_records(target)
@@ -7291,6 +7456,8 @@ class CDSExecutablePatcher(tk.Tk):
                 nestorian_cross_duplicate_reward_fix_enabled,
             )
             self.erasmus_location_fix_enabled.set(erasmus_location_bug_fix_enabled)
+            self.city_discovery_notice_enabled.set(city_discovery_notice_enabled)
+            self.high_speed_map_fix_enabled.set(high_speed_map_fix_enabled)
             self.save_slot_selector_enabled.set(
                 save_slot_selector_enabled or load_slot_selector_enabled,
             )
@@ -7306,6 +7473,7 @@ class CDSExecutablePatcher(tk.Tk):
                 history_elapsed_years_fix_enabled,
                 bribe_item_duplicate_fix_enabled,
                 erasmus_location_bug_fix_enabled,
+                high_speed_map_fix_enabled,
             )))
             self._update_bug_fix_control_states()
             discovery_errors: list[str] = []
@@ -7831,6 +7999,10 @@ class CDSExecutablePatcher(tk.Tk):
                 troop_combat_edit=troop_combat_edit,
                 erasmus_location_bug_fix_enabled=(
                     self.bug_fixes_enabled.get() and self.erasmus_location_fix_enabled.get()
+                ),
+                city_discovery_notice_enabled=self.city_discovery_notice_enabled.get(),
+                high_speed_map_fix_enabled=(
+                    self.bug_fixes_enabled.get() and self.high_speed_map_fix_enabled.get()
                 ),
             )
             if backup is not None:

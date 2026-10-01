@@ -15,6 +15,15 @@ from ctypes import wintypes
 
 import pefile
 
+from city_discovery_notice_patch import (
+    apply_city_discovery_notice_patch,
+    read_city_discovery_notice_patch_state,
+)
+from high_speed_map_patch import (
+    apply_high_speed_map_fix,
+    read_high_speed_map_fix_state,
+)
+
 from patch_coordinate_decimal import (
     DECIMAL_FORMAT,
     KOREAN_DIRECTION_3_FORMAT,
@@ -886,6 +895,7 @@ class DiscoveryEdit:
     identifier: int
     name: str
     category_id: int
+    game_id: int
     value: int
     min_x: int | None
     min_y: int | None
@@ -7183,6 +7193,7 @@ def apply_discovery_edit(data: bytearray, edit: DiscoveryEdit | None) -> bool:
     if (
         not 0 <= edit.identifier < DISCOVERY_RECORD_COUNT
         or not 0 <= edit.category_id <= DISCOVERY_CATEGORY_MAX
+        or not 0 <= edit.game_id <= 0xFFFF
         or not 0 <= edit.value <= DISCOVERY_VALUE_MAX
         or (any(value is None for value in coordinates) and any(value is not None for value in coordinates))
         or (
@@ -7195,11 +7206,11 @@ def apply_discovery_edit(data: bytearray, edit: DiscoveryEdit | None) -> bool:
         raise ValueError("발견물 입력값을 확인해 주세요.")
     current = _read_discovery_records_from_data(bytes(data))[edit.identifier]
     if (
-        current.name, current.category_id, current.value, current.min_x, current.min_y,
+        current.name, current.category_id, current.game_id, current.value, current.min_x, current.min_y,
         current.max_x, current.max_y, current.still_slot, current.avi_id,
         current.animation_part, current.description,
     ) == (
-        name, edit.category_id, edit.value, edit.min_x, edit.min_y, edit.max_x, edit.max_y,
+        name, edit.category_id, edit.game_id, edit.value, edit.min_x, edit.min_y, edit.max_x, edit.max_y,
         edit.still_slot, edit.avi_id, edit.animation_part, edit.description,
     ):
         return False
@@ -7263,9 +7274,16 @@ def apply_discovery_edit(data: bytearray, edit: DiscoveryEdit | None) -> bool:
         struct.pack_into(
             "<I", data, description_table_offset + edit.identifier * 4, slot_va,
         )
-    if edit.min_x is not None:
-        struct.pack_into("<iiii", data, coordinate_offset, edit.min_x, edit.min_y, edit.max_x, edit.max_y)
+    if edit.min_x is None:
+        if current.min_x is not None:
+            struct.pack_into("<iiii", data, coordinate_offset, -1, -1, -1, -1)
+    else:
+        struct.pack_into(
+            "<iiii", data, coordinate_offset,
+            edit.min_x, edit.min_y, edit.max_x, edit.max_y,
+        )
     struct.pack_into("<I", data, metadata_offset + DISCOVERY_CATEGORY_OFFSET, edit.category_id)
+    struct.pack_into("<I", data, metadata_offset + DISCOVERY_GAME_ID_OFFSET, edit.game_id)
     struct.pack_into("<I", data, metadata_offset + DISCOVERY_VALUE_OFFSET, edit.value)
     if image_record_offset is not None:
         struct.pack_into("<I", data, image_record_offset + DISCOVERY_MEDIA_STILL_OFFSET, edit.still_slot)
@@ -8411,6 +8429,8 @@ def apply_all(
     facility_event_edits: tuple[FacilityEventRecord, ...] | None = None,
     troop_combat_edit: TroopCombatEdit | None = None,
     erasmus_location_bug_fix_enabled: bool = False,
+    city_discovery_notice_enabled: bool = False,
+    high_speed_map_fix_enabled: bool = False,
 ) -> Path | None:
     """Apply all selected settings atomically and create one original backup."""
     target = target.resolve(strict=True)
@@ -8428,6 +8448,8 @@ def apply_all(
     discover_avi_was_enabled = read_discover_avi_patch_state(original)
     save_slot_selector_was_enabled = read_save_slot_selector_patch_state(original)
     load_slot_selector_was_enabled = read_load_slot_selector_patch_state(original)
+    city_discovery_notice_was_enabled = read_city_discovery_notice_patch_state(original)
+    high_speed_map_fix_was_enabled = read_high_speed_map_fix_state(original)
     # Coordinate-style restoration may clear extensions after its own payload.
     # Temporarily remove relocatable patches, apply the requested coordinate
     # style, then recreate all selected payloads in their reserved slots.
@@ -8457,6 +8479,10 @@ def apply_all(
         apply_save_slot_selector_patch(before_coordinate, False)
     if load_slot_selector_was_enabled:
         apply_load_slot_selector_patch(before_coordinate, False)
+    if city_discovery_notice_was_enabled:
+        apply_city_discovery_notice_patch(before_coordinate, False)
+    if high_speed_map_fix_was_enabled:
+        apply_high_speed_map_fix(before_coordinate, False)
     if _eclipse_patch_info(bytes(before_coordinate))[0]:
         apply_eclipse_polar_caps(before_coordinate, False)
     if _npc_daily_departure_patch_info(before_coordinate):
@@ -8470,6 +8496,7 @@ def apply_all(
     apply_cannon_accuracy_fix(updated, cannon_accuracy_fix_enabled)
     apply_ship_reuse_fix(updated, ship_reuse_fix_enabled)
     apply_ship_purchase_blank_selection_fix(updated, ship_purchase_blank_selection_fix_enabled)
+    apply_high_speed_map_fix(updated, high_speed_map_fix_enabled)
     apply_disev_language_fix(updated, disev_language_fix_enabled)
     apply_history_elapsed_years_fix(updated, history_elapsed_years_fix_enabled)
     apply_bribe_item_duplicate_fix(updated, bribe_item_duplicate_fix_enabled)
@@ -8564,6 +8591,8 @@ def apply_all(
         apply_save_slot_selector_patch(updated, save_slot_selector_enabled)
     if load_slot_selector_enabled or load_slot_selector_was_enabled:
         apply_load_slot_selector_patch(updated, load_slot_selector_enabled)
+    if city_discovery_notice_enabled or city_discovery_notice_was_enabled:
+        apply_city_discovery_notice_patch(updated, city_discovery_notice_enabled)
     if bytes(updated) == original:
         return None
 
