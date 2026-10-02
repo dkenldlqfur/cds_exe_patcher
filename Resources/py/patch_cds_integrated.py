@@ -18,10 +18,17 @@ import pefile
 from city_discovery_notice_patch import (
     apply_city_discovery_notice_patch,
     read_city_discovery_notice_patch_state,
+    read_city_label_colors,
+    read_city_label_outline,
+    read_city_label_show_nation,
 )
 from high_speed_map_patch import (
     apply_high_speed_map_fix,
     read_high_speed_map_fix_state,
+)
+from world_map_follow_patch import (
+    apply_world_map_follow_patch,
+    read_world_map_follow_patch_state,
 )
 
 from patch_coordinate_decimal import (
@@ -8431,11 +8438,16 @@ def apply_all(
     erasmus_location_bug_fix_enabled: bool = False,
     city_discovery_notice_enabled: bool = False,
     high_speed_map_fix_enabled: bool = False,
+    city_label_colors: tuple[int, ...] | None = None,
+    city_label_outline: tuple[int, int] | None = None,
+    city_label_show_nation: bool | None = None,
+    world_map_follow_enabled: bool = False,
 ) -> Path | None:
     """Apply all selected settings atomically and create one original backup."""
     target = target.resolve(strict=True)
     original = target.read_bytes()
     before_coordinate = bytearray(original)
+    world_map_follow_was_enabled = read_world_map_follow_patch_state(original)
     failed_pottery_was_enabled = read_failed_pottery_patch_state(original)
     judgment_fix_was_enabled = _judgment_fix_patch_info(original)
     ship_reuse_fix_was_enabled = _ship_reuse_fix_patch_info(original)
@@ -8449,10 +8461,22 @@ def apply_all(
     save_slot_selector_was_enabled = read_save_slot_selector_patch_state(original)
     load_slot_selector_was_enabled = read_load_slot_selector_patch_state(original)
     city_discovery_notice_was_enabled = read_city_discovery_notice_patch_state(original)
+    if city_label_colors is None:
+        city_label_colors = read_city_label_colors(original)
+    if city_label_outline is None:
+        city_label_outline = read_city_label_outline(original)
+    # Outline is optional, with a fixed 1px width when enabled. Keep both the
+    # disabled state and its colour; migrate legacy nonzero widths to 1px.
+    city_label_outline = (0 if city_label_outline[0] == 0 else 1, city_label_outline[1])
+    if city_label_show_nation is None:
+        city_label_show_nation = read_city_label_show_nation(original)
     high_speed_map_fix_was_enabled = read_high_speed_map_fix_state(original)
     # Coordinate-style restoration may clear extensions after its own payload.
     # Temporarily remove relocatable patches, apply the requested coordinate
     # style, then recreate all selected payloads in their reserved slots.
+    # Camera hooks can wrap other map patches, so unwrap them first.
+    if world_map_follow_was_enabled:
+        apply_world_map_follow_patch(before_coordinate, False)
     if _pirate_selection_patch_info(original)[0]:
         apply_pirate_variety(before_coordinate, False)
     if read_mistranslation_patch_state(bytes(before_coordinate)):
@@ -8592,7 +8616,12 @@ def apply_all(
     if load_slot_selector_enabled or load_slot_selector_was_enabled:
         apply_load_slot_selector_patch(updated, load_slot_selector_enabled)
     if city_discovery_notice_enabled or city_discovery_notice_was_enabled:
-        apply_city_discovery_notice_patch(updated, city_discovery_notice_enabled)
+        apply_city_discovery_notice_patch(
+            updated, city_discovery_notice_enabled, city_label_colors,
+            city_label_outline, city_label_show_nation,
+        )
+    # Capture the final city-label/map rendering code only after other patches.
+    apply_world_map_follow_patch(updated, world_map_follow_enabled)
     if bytes(updated) == original:
         return None
 

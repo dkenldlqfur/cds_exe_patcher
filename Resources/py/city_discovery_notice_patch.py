@@ -1,4 +1,4 @@
-"""Centre city/current-nation labels; migrate legacy discovery popups away."""
+"""Centre and colour city/current-nation labels; migrate legacy popups away."""
 
 from __future__ import annotations
 
@@ -17,7 +17,30 @@ from pe_patch_section import (
 
 
 MAGIC = b"CDSCTN1\0"
-VERSION = 4
+VERSION = 8
+COLORS_OFFSET = 0x10
+OUTLINE_SETTINGS_OFFSET = 0x16
+SHOW_NATION_OFFSET = 0x18
+DEFAULT_SHOW_NATION = True
+DEFAULT_LABEL_OUTLINE = (1, 73)  # thickness in pixels, common-palette colour
+MIN_OUTLINE_WIDTH = 0
+MAX_OUTLINE_WIDTH = 3
+RELATION_OFFSET = 0x480
+OUTLINE_STROKES_OFFSET = 0x400
+OUTLINE_TEXT_OFFSET = 0x500
+# A 1px four-neighbour outline around the original two-stroke bold text.
+# Paint the whole border first, then restore both coloured foreground strokes.
+OUTLINE_STROKES = ((-1, 0), (2, 0), (0, -1), (1, -1), (0, 1), (1, 1), (0, 0), (1, 0))
+# Nation own/friendly/enemy, then city own/friendly/enemy. Keep the old white
+# appearance until the user explicitly chooses other colours.
+DEFAULT_LABEL_COLORS = (10, 10, 10, 10, 10, 10)
+PALETTE_VA = 0x4FFDD8
+TREATY_TEST_VA = 0x469880
+TREATY_TEST_CODE = bytes.fromhex(
+    "81 3D 20 4D 5A 00 D6 05 00 00 7C 25 8B 44 24 04 85 C0 75 09 "
+    "83 3D 4C 39 5B 00 01 74 0E 83 F8 01 75 0F 83 3D 4C 39 5B 00 00 "
+    "75 06 B8 01 00 00 00 C3 33 C0 C3"
+)
 PIXEL_TEXT_OFFSET = 0x20
 PIXEL_TEXT_VA = 0x406800
 NATION_TABLE_VA = 0x4CA370
@@ -255,24 +278,35 @@ class _Code:
         return bytes(self.code)
 
 
-def _pixel_text_code(code_va: int) -> bytes:
-    """thiscall(view, centreX, pixelY, text), exact CP949 centring, ret 12.
+def _pixel_text_code(code_va: int, colored: bool = False,
+                     outline_va: int | None = None,
+                     outline_width: int | None = None) -> bytes:
+    """thiscall(view, centreX, pixelY, text[, color]), exact CP949 centring.
 
-    Preserve the viewport drawing origin like 0x426860, but call the same
-    outlined text function with pixel coordinates instead of rounded tiles.
-    Leave one pixel for the outline on each horizontal edge.
+    Preserve the viewport drawing origin like 0x426860. v6+ use a private
+    outline renderer; older versions use 0x406800. v7 supplies a configurable
+    outline width, including zero for no border. Reserve an
+    additional pixel for the original bold text's second foreground stroke.
+    Colour-aware helpers return with ret 16; byte-exact v4 keeps ret 12.
     """
     c = _Code(code_va)
     e, b, l = c.emit, c.branch, c.label
     e("56 57 53 55 83 EC 10 8B F1 8B 7C 24 2C")
     e("B9 FF FF FF FF 31 C0 FC F2 AE F7 D1 49 C1 E1 03 8B D9")
-    e("8B 96 EC 00 00 00 C1 E2 04 83 EA 02 3B DA")
+    e("8B 96 EC 00 00 00 C1 E2 04")
+    if outline_width is None:
+        e("83 EA 03" if outline_va is not None else "83 EA 02")
+    else:
+        e(f"83 EA {1 + 2 * outline_width:02X}")
+    e("3B DA")
     b("0F 8F", "done")
-    e("8B 6C 24 24 8B C3 D1 E8 2B E8 83 FD 01")
+    margin = 1 if outline_width is None else outline_width
+    e(f"8B 6C 24 24 8B C3 D1 E8 2B E8 83 FD {margin:02X}")
     b("0F 8D", "left_ok")
-    e("BD 01 00 00 00")
+    e("BD" + struct.pack("<I", margin).hex())
     l("left_ok")
-    e("42 2B D3 3B EA")
+    e("42" if outline_width is None else f"83 C2 {outline_width:02X}")
+    e("2B D3 3B EA")
     b("0F 8E", "right_ok")
     e("8B EA")
     l("right_ok")
@@ -280,19 +314,24 @@ def _pixel_text_code(code_va: int) -> bytes:
     e("8B 46 28 03 46 54 89 44 24 08 8B 46 2C 03 46 58 89 44 24 0C")
     e("8D 44 24 08 50 B9 F0 B2 62 00")
     c.call(0x4B5B77)
-    e("6A 0A FF 74 24 30 FF 74 24 30 55")  # color,text,Y,X
-    c.call(PIXEL_TEXT_VA)
+    e("FF 74 24 30" if colored else "6A 0A")  # fourth argument or legacy white
+    e("FF 74 24 30 FF 74 24 30 55")  # text,Y,X
+    c.call(PIXEL_TEXT_VA if outline_va is None else outline_va)
     e("83 C4 10 8D 04 24 50 B9 F0 B2 62 00")
     c.call(0x4B5B77)
     l("done")
-    e("83 C4 10 5D 5B 5F 5E C2 0C 00")
+    e("83 C4 10 5D 5B 5F 5E")
+    e("C2 10 00" if colored else "C2 0C 00")
     return c.finish()
 
 
-def _map_labels_code(code_va: int, pixel_text_va: int) -> bytes:
+def _map_labels_code(code_va: int, pixel_text_va: int,
+                     relation_va: int | None = None, colors_va: int = 0,
+                     outlined: bool = False, outline_width: int | None = None,
+                     show_nation: bool = DEFAULT_SHOW_NATION) -> bytes:
     """City name plus [current nation], individually centred in pixels.
 
-    Locals: city Y, centre X, current nation ID, first/end dirty row.
+    Locals: city Y, centre X, current nation ID, first/end dirty row, relation.
     +0x20 holds a bounded 128-byte nation label (including brackets and NUL).
     """
     c = _Code(code_va)
@@ -336,16 +375,32 @@ def _map_labels_code(code_va: int, pixel_text_va: int) -> bytes:
     b("0F 8D", "next")
     e("8B C8 03 4E 0C 85 C9")
     b("0F 8E", "next")
-    e("48 C1 E0 04 83 F8 11")
+    e("48 C1 E0 04")
+    top_margin = (19 if outlined else 17) if outline_width is None else 16 + 3 * outline_width
+    if not show_nation and outline_width is not None:
+        top_margin = outline_width  # only the city's own upper border needs room
+    bottom_margin = 17 if outline_width is None else 16 + outline_width
+    line_spacing = (18 if outlined else 16) if outline_width is None else 16 + 2 * outline_width
+    e(f"83 F8 {top_margin:02X}")
     b("0F 8D", "top_ok")
-    e("B8 11 00 00 00")
+    e("B8" + struct.pack("<I", top_margin).hex())
     l("top_ok")
-    e("8B 95 F0 00 00 00 C1 E2 04 83 EA 11 3B C2")
+    e(f"8B 95 F0 00 00 00 C1 E2 04 83 EA {bottom_margin:02X} 3B C2")
     b("0F 8E", "bottom_ok")
     e("8B C2")
     l("bottom_ok")
-    e("89 04 24 FF 36 FF 74 24 04 FF 74 24 0C 8B CD")
+    e("89 04 24")
+    if relation_va is None:
+        e("FF 36 FF 74 24 04 FF 74 24 0C 8B CD")
+    else:
+        e("8B 4C 24 08")  # ECX=current nation, not the city's initial master nation
+        c.call(relation_va)
+        e("89 44 24 14 0F B6 80")  # save relation; city colour table
+        e(struct.pack("<I", colors_va + 3).hex())
+        e("50 FF 36 FF 74 24 08 FF 74 24 10 8B CD")
     c.call(pixel_text_va)
+    if not show_nation:
+        b("E9", "dirty")  # preserve city relationship colours, omit only the nation row
     e("8B 44 24 08 83 F8 4E")
     b("0F 83", "dirty")  # negative or out-of-range nation: city only
     e("6B C0 18 8B 80 70 A3 4C 00 85 C0")
@@ -360,16 +415,33 @@ def _map_labels_code(code_va: int, pixel_text_va: int) -> bytes:
     b("0F 85", "copy")
     b("E9", "dirty")  # overlong country name: no truncated CP949 label
     l("bracket")
-    e("66 C7 07 5D 00 8D 44 24 20 50 8B 44 24 04 83 E8 10 50")
-    e("FF 74 24 0C 8B CD")
+    e("66 C7 07 5D 00")
+    if relation_va is None:
+        e("8D 44 24 20 50 8B 44 24 04 83 E8 10 50 FF 74 24 0C 8B CD")
+    else:
+        e("8D 54 24 20 8B 44 24 14 0F B6 80")
+        e(struct.pack("<I", colors_va).hex())
+        e("50 52 8B 44 24 08")
+        e(f"83 E8 {line_spacing:02X}")  # 16px glyph + top/bottom border
+        e("50 FF 74 24 10 8B CD")
     c.call(pixel_text_va)
     l("dirty")
     # Invalidate both label rows plus outline neighbours, clamped to cache.
-    e("8B 04 24 C1 F8 04 83 E8 02 85 C0")
+    if outline_width is None:
+        e("8B 04 24 C1 F8 04 83 E8 02 85 C0")
+    else:
+        # Exact pixel bounds, including the nation's upper and city's lower
+        # outline. A 2/3px lower border can cross one more cache row than v6.
+        e(f"8B 04 24 83 E8 {top_margin:02X} C1 F8 04 85 C0")
     b("0F 89", "dirty_start")
     e("31 C0")
     l("dirty_start")
-    e("89 44 24 0C 8B 04 24 C1 F8 04 83 C0 02 3B 85 F0 00 00 00")
+    e("89 44 24 0C 8B 04 24")
+    if outline_width is None:
+        e("C1 F8 04 83 C0 02")
+    else:
+        e(f"83 C0 {15 + outline_width:02X} C1 F8 04 40")
+    e("3B 85 F0 00 00 00")
     b("0F 8E", "dirty_end")
     e("8B 85 F0 00 00 00")
     l("dirty_end")
@@ -388,11 +460,145 @@ def _map_labels_code(code_va: int, pixel_text_va: int) -> bytes:
     return c.finish()
 
 
-def _payload(slot_va: int, version: int = VERSION) -> bytes:
+def _outline_text_code(code_va: int, strokes_va: int, stroke_count: int = 8,
+                       outline_color: int = 73, compact: bool = False) -> bytes:
+    """cdecl(x, y, text, color); a private renderer, leaving other game text alone.
+
+    Mirror 0x406800's native graphics calls and text cursor updates. Its
+    horizontal-only offsets (-1,2,0,1) become border strokes followed by two
+    foreground strokes. Defaults reproduce v6's fixed 1px black outline;
+    v7 uses compact signed-byte offsets and configurable colour/count. No
+    palette, font, or shared offset table is modified.
+    """
+    c = _Code(code_va)
+    e, b, l = c.emit, c.branch, c.label
+    e("53 56 57 55 31 F6 8B 7C 24 14 8B 5C 24 18 8B 6C 24 1C")
+    l("stroke")
+    e("0F BE 04 75" if compact else "8B 04 F5")
+    e(struct.pack("<I", strokes_va).hex())
+    e("0F BE 14 75" if compact else "8B 14 F5")
+    e(struct.pack("<I", strokes_va + (1 if compact else 4)).hex())
+    e("03 C7 03 D3 A3 18 01 58 00 A3 D0 B2 62 00 89 15 D4 B2 62 00")
+    e("B8" + struct.pack("<I", outline_color).hex())
+    e(f"83 FE {stroke_count - 2:02X}")
+    b("0F 82", "color")
+    e("8B 44 24 20")
+    l("color")
+    e("6A 04 6A 0F 50 B9 F0 B2 62 00")
+    c.call(0x4B5DEA)
+    e("68 FF FF FF 7F 55 B9 F0 B2 62 00")
+    c.call(0x4B6071)
+    e(f"46 83 FE {stroke_count:02X}")
+    b("0F 82", "stroke")
+    e("5D 5F 5E 5B C3")
+    return c.finish()
+
+
+def _outline_strokes(width: int) -> tuple[tuple[int, int], ...]:
+    """Four-neighbour dilation of the original two-stroke foreground.
+
+    Include inner offsets too, so thicker outlines have no gaps around thin
+    glyphs. Width zero draws only the unchanged two foreground strokes.
+    """
+    if type(width) is not int or not MIN_OUTLINE_WIDTH <= width <= MAX_OUTLINE_WIDTH:
+        raise ValueError("테두리 굵기는 0~3픽셀로 지정해야 합니다.")
+    if width == 1:
+        return OUTLINE_STROKES
+    foreground = ((0, 0), (1, 0))
+    border = {
+        (x + dx, dy)
+        for x, _ in foreground
+        for dx in range(-width, width + 1)
+        for dy in range(-width, width + 1)
+        if abs(dx) + abs(dy) <= width
+    } - set(foreground)
+    return tuple(sorted(border, key=lambda point: (point[1], point[0]))) + foreground
+
+
+def _relation_code(code_va: int) -> bytes:
+    """ECX=nation ID, EAX=own(0)/friendly(1)/enemy(2); nonvolatile preserved.
+
+    This is a map display classification, not a new diplomacy mechanic.
+    Own affiliation takes precedence. Other nations use the live approach
+    gate's entry policy (0x429D90) and its treaty test (0x46AB90/0x469880).
+    Religion and nation+8 (treaty violation history) are not hostility tests.
+    """
+    c = _Code(code_va)
+    e, b, l = c.emit, c.branch, c.label
+    e("83 F9 4E")
+    b("0F 83", "friendly")  # includes negative IDs: do not index the nation table
+    e("3B 0D 4C 39 5B 00")
+    b("0F 84", "own")
+    e("8B C1 C1 E0 04 83 B8 CC 59 58 00 00")
+    b("0F 8F", "enemy")  # live nation +0x0C > 0, same as 0x4687F4 approach
+    e("51")
+    c.call(TREATY_TEST_VA)  # cdecl; checks year and current affiliation itself
+    e("83 C4 04 85 C0")
+    b("0F 85", "enemy")
+    l("friendly")
+    e("B8 01 00 00 00 C3")
+    l("own")
+    e("31 C0 C3")
+    l("enemy")
+    e("B8 02 00 00 00 C3")
+    return c.finish()
+
+
+def _validated_colors(colors) -> tuple[int, ...]:
+    result = tuple(colors)
+    if len(result) != 6 or any(type(color) is not int or not 10 <= color <= 73 for color in result):
+        raise ValueError("도시 이름 색상은 공용 팔레트 10~73 중 6개를 지정해야 합니다.")
+    return result
+
+
+def _validated_outline(outline) -> tuple[int, int]:
+    result = tuple(outline)
+    if (len(result) != 2 or any(type(value) is not int for value in result)
+            or not MIN_OUTLINE_WIDTH <= result[0] <= MAX_OUTLINE_WIDTH
+            or not 10 <= result[1] <= 73):
+        raise ValueError("테두리 굵기는 0~3픽셀, 색상은 공용 팔레트 10~73으로 지정해야 합니다.")
+    return result
+
+
+def _validated_show_nation(show_nation: bool) -> bool:
+    if type(show_nation) is not bool:
+        raise ValueError("국가 이름 표시 여부는 켜기/끄기로 지정해야 합니다.")
+    return show_nation
+
+
+def read_city_label_palette(data: bytes | bytearray) -> tuple[tuple[int, int, int], ...]:
+    """The game's fixed 64-colour palette, slots 10..73, stored as B-R-G."""
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        offset = pe.get_offset_from_rva(PALETTE_VA - pe.OPTIONAL_HEADER.ImageBase)
+        raw = data[offset:offset + 192]
+        if len(raw) != 192:
+            raise ValueError("게임 공용 팔레트를 읽지 못했습니다.")
+        return tuple((raw[i + 1], raw[i + 2], raw[i]) for i in range(0, 192, 3))
+    finally:
+        pe.close()
+
+
+def _validate_relation_code(data: bytes | bytearray) -> None:
+    pe = pefile.PE(data=bytes(data), fast_load=True)
+    try:
+        offset = pe.get_offset_from_rva(TREATY_TEST_VA - pe.OPTIONAL_HEADER.ImageBase)
+        if data[offset:offset + len(TREATY_TEST_CODE)] != TREATY_TEST_CODE:
+            raise ValueError("도시 이름 색상에 사용하는 조약 판정 코드를 검증하지 못했습니다.")
+    finally:
+        pe.close()
+
+
+def _payload(slot_va: int, version: int = VERSION,
+             colors: tuple[int, ...] = DEFAULT_LABEL_COLORS,
+             outline: tuple[int, int] = DEFAULT_LABEL_OUTLINE,
+             show_nation: bool = DEFAULT_SHOW_NATION) -> bytes:
+    width, outline_color = _validated_outline(outline) if version >= 7 else DEFAULT_LABEL_OUTLINE
+    show_nation = _validated_show_nation(show_nation) if version >= 8 else DEFAULT_SHOW_NATION
     payload = bytearray(CITY_DISCOVERY_NOTICE_SLOT_SIZE)
     if version == 2:
         payload[:LEGACY_SLOT_SIZE] = _popup_payload(slot_va, version)
-    elif version in (3, VERSION):
+    elif version in (3, 4, 5, 6, 7, VERSION):
         payload[:len(MAGIC)] = MAGIC
         struct.pack_into("<I", payload, len(MAGIC), version)
     else:
@@ -407,14 +613,48 @@ def _payload(slot_va: int, version: int = VERSION) -> bytes:
     if version in (2, 3):
         code = _legacy_map_labels_code(slot_va + MAP_LABELS_OFFSET)
     else:
-        helper = _pixel_text_code(slot_va + PIXEL_TEXT_OFFSET)
+        helper = _pixel_text_code(
+            slot_va + PIXEL_TEXT_OFFSET, colored=version >= 5,
+            outline_va=slot_va + OUTLINE_TEXT_OFFSET if version >= 6 else None,
+            outline_width=width if version >= 7 else None,
+        )
         if PIXEL_TEXT_OFFSET + len(helper) > MAP_WRAPPER_OFFSET:
             raise AssertionError("도시 이름 가운데 정렬 코드가 예약 공간을 초과했습니다.")
         payload[PIXEL_TEXT_OFFSET:PIXEL_TEXT_OFFSET + len(helper)] = helper
-        code = _map_labels_code(slot_va + MAP_LABELS_OFFSET, slot_va + PIXEL_TEXT_OFFSET)
-    if MAP_LABELS_OFFSET + len(code) > len(payload):
+        code = _map_labels_code(
+            slot_va + MAP_LABELS_OFFSET, slot_va + PIXEL_TEXT_OFFSET,
+            slot_va + RELATION_OFFSET if version >= 5 else None, slot_va + COLORS_OFFSET,
+            outlined=version >= 6,
+            outline_width=width if version >= 7 else None,
+            show_nation=show_nation,
+        )
+    labels_end = OUTLINE_STROKES_OFFSET if version >= 6 else RELATION_OFFSET if version >= 5 else len(payload)
+    if MAP_LABELS_OFFSET + len(code) > labels_end:
         raise AssertionError("도시 지도 이름 표시 코드가 예약 공간을 초과했습니다.")
     payload[MAP_LABELS_OFFSET:MAP_LABELS_OFFSET + len(code)] = code
+    if version >= 5:
+        payload[COLORS_OFFSET:COLORS_OFFSET + 6] = bytes(_validated_colors(colors))
+        relation = _relation_code(slot_va + RELATION_OFFSET)
+        if RELATION_OFFSET + len(relation) > (OUTLINE_TEXT_OFFSET if version >= 6 else len(payload)):
+            raise AssertionError("도시 국가 관계 판정 코드가 예약 공간을 초과했습니다.")
+        payload[RELATION_OFFSET:RELATION_OFFSET + len(relation)] = relation
+    if version >= 6:
+        offsets = _outline_strokes(width) if version >= 7 else OUTLINE_STROKES
+        strokes = b"".join(struct.pack("<bb" if version >= 7 else "<ii", *stroke) for stroke in offsets)
+        if OUTLINE_STROKES_OFFSET + len(strokes) > RELATION_OFFSET:
+            raise AssertionError("도시 이름 테두리 좌표가 예약 공간을 초과했습니다.")
+        payload[OUTLINE_STROKES_OFFSET:OUTLINE_STROKES_OFFSET + len(strokes)] = strokes
+        outline_code = _outline_text_code(
+            slot_va + OUTLINE_TEXT_OFFSET, slot_va + OUTLINE_STROKES_OFFSET,
+            stroke_count=len(offsets), outline_color=outline_color, compact=version >= 7,
+        )
+        if OUTLINE_TEXT_OFFSET + len(outline_code) > len(payload):
+            raise AssertionError("도시 이름 테두리 코드가 예약 공간을 초과했습니다.")
+        payload[OUTLINE_TEXT_OFFSET:OUTLINE_TEXT_OFFSET + len(outline_code)] = outline_code
+    if version >= 7:
+        payload[OUTLINE_SETTINGS_OFFSET:OUTLINE_SETTINGS_OFFSET + 2] = bytes((width, outline_color))
+    if version >= 8:
+        payload[SHOW_NATION_OFFSET] = int(show_nation)
     return bytes(payload)
 
 
@@ -471,8 +711,20 @@ def _patch_version(data: bytes | bytearray) -> int:
             return 2
         if current == original and payload == _payload(va, 3):
             return 3
-        if current == original and payload == _payload(va):
-            return VERSION
+        if current == original and payload == _payload(va, 4):
+            return 4
+        colors = tuple(payload[COLORS_OFFSET:COLORS_OFFSET + 6])
+        version = struct.unpack_from("<I", payload, len(MAGIC))[0]
+        outline = tuple(payload[OUTLINE_SETTINGS_OFFSET:OUTLINE_SETTINGS_OFFSET + 2]) if version >= 7 else DEFAULT_LABEL_OUTLINE
+        show_nation = DEFAULT_SHOW_NATION
+        if version == VERSION:
+            if payload[SHOW_NATION_OFFSET] not in (0, 1):
+                raise ValueError("저장된 국가 이름 표시 설정이 올바르지 않습니다.")
+            show_nation = bool(payload[SHOW_NATION_OFFSET])
+        if (current == original and version in (5, 6, 7, VERSION)
+                and payload == _payload(va, version, colors=colors, outline=outline, show_nation=show_nation)):
+            _validate_relation_code(data)
+            return version
     raise ValueError("도시 지도 이름 표시 패치 상태를 검증하지 못했습니다.")
 
 
@@ -480,18 +732,54 @@ def read_city_discovery_notice_patch_state(data: bytes | bytearray) -> bool:
     return _patch_version(data) != 0
 
 
-def apply_city_discovery_notice_patch(data: bytearray, enabled: bool) -> bool:
+def read_city_label_colors(data: bytes | bytearray) -> tuple[int, ...]:
+    if _patch_version(data) < 5:
+        return DEFAULT_LABEL_COLORS
+    section = find_patch_section(data)
+    offset, _ = section.slot(CITY_DISCOVERY_NOTICE_SLOT_OFFSET, CITY_DISCOVERY_NOTICE_SLOT_SIZE)
+    return tuple(data[offset + COLORS_OFFSET:offset + COLORS_OFFSET + 6])
+
+
+def read_city_label_outline(data: bytes | bytearray) -> tuple[int, int]:
+    if _patch_version(data) < 7:
+        return DEFAULT_LABEL_OUTLINE
+    section = find_patch_section(data)
+    offset, _ = section.slot(CITY_DISCOVERY_NOTICE_SLOT_OFFSET, CITY_DISCOVERY_NOTICE_SLOT_SIZE)
+    return tuple(data[offset + OUTLINE_SETTINGS_OFFSET:offset + OUTLINE_SETTINGS_OFFSET + 2])
+
+
+def read_city_label_show_nation(data: bytes | bytearray) -> bool:
+    if _patch_version(data) < 8:
+        return DEFAULT_SHOW_NATION
+    section = find_patch_section(data)
+    offset, _ = section.slot(CITY_DISCOVERY_NOTICE_SLOT_OFFSET, CITY_DISCOVERY_NOTICE_SLOT_SIZE)
+    return bool(data[offset + SHOW_NATION_OFFSET])
+
+
+def apply_city_discovery_notice_patch(data: bytearray, enabled: bool,
+                                     colors: tuple[int, ...] | None = None,
+                                     outline: tuple[int, int] | None = None,
+                                     show_nation: bool | None = None) -> bool:
     version = _patch_version(data)
-    if (version == VERSION and enabled) or (version == 0 and not enabled):
+    previous_colors = read_city_label_colors(data)
+    previous_outline = read_city_label_outline(data)
+    previous_show_nation = read_city_label_show_nation(data)
+    colors = previous_colors if colors is None else _validated_colors(colors)
+    outline = previous_outline if outline is None else _validated_outline(outline)
+    show_nation = previous_show_nation if show_nation is None else _validated_show_nation(show_nation)
+    if (version == VERSION and enabled and colors == previous_colors and outline == previous_outline
+            and show_nation == previous_show_nation) or (version == 0 and not enabled):
         return False
-    if version in (1, 2, 3) and enabled:
+    if enabled:
+        _validate_relation_code(data)
+    if version and enabled:
         # Restore both old popup CALLs and erase their code before installing
         # current map labels, without changing the user's checkbox state.
         apply_city_discovery_notice_patch(data, False)
     if enabled:
         section, _ = ensure_patch_section(data, PATCH_SECTION_CITY_DISCOVERY_NOTICE_SIZE)
         offset, va = section.slot(CITY_DISCOVERY_NOTICE_SLOT_OFFSET, CITY_DISCOVERY_NOTICE_SLOT_SIZE)
-        payload = _payload(va)
+        payload = _payload(va, colors=colors, outline=outline, show_nation=show_nation)
         present = bytes(data[offset:offset + CITY_DISCOVERY_NOTICE_SLOT_SIZE])
         if any(present) and present != payload:
             raise ValueError("도시 발견 알림용 .patch 슬롯이 다른 데이터로 사용 중입니다.")

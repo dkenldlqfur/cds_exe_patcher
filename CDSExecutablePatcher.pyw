@@ -64,6 +64,15 @@ from discovery_hint_links import (
 from discovery_reader import DiscoveryImageReadError, discovery_still_count, read_discovery_still
 from item_reader import ItemImageReadError, read_item_image
 from portrait_reader import PortraitReadError, portrait_count, read_portrait
+from city_discovery_notice_patch import (
+    DEFAULT_LABEL_COLORS,
+    DEFAULT_LABEL_OUTLINE,
+    DEFAULT_SHOW_NATION,
+    read_city_label_colors,
+    read_city_label_outline,
+    read_city_label_palette,
+    read_city_label_show_nation,
+)
 
 from patch_cds_integrated import (
     BarmaidEdit,
@@ -122,6 +131,7 @@ from patch_cds_integrated import (
     read_erasmus_location_bug_fix_state,
     read_city_discovery_notice_patch_state,
     read_high_speed_map_fix_state,
+    read_world_map_follow_patch_state,
     read_tunis_book_event_location_fix_state,
     read_person_records,
     read_person_stat_limits,
@@ -155,8 +165,12 @@ UPDATE_HISTORY_SEPARATOR = "\n\n" + "─" * 56 + "\n\n"
 CITY_DISCOVERY_NOTICE_DETAILS = """월드 지도 도시 이름 표시
 
 월드 지도에서 발견된 도시의 그림 위에 도시 이름을 표시합니다.
-도시 이름 위에는 [국가 이름]을 표시하며, 두 행 모두 도시 그림의
-가운데를 기준으로 실제 글자 폭에 맞춰 정렬합니다.
+국가 이름 표시를 선택하면 도시 이름 위에 [국가 이름]도 표시합니다.
+표시하는 이름은 도시 그림 가운데를 기준으로 실제 글자 폭에 맞춰 정렬합니다.
+국가명과 도시명의 공통 테두리 표시 여부와 색상을 설정할 수 있습니다.
+테두리 표시를 선택하면 상하좌우 1픽셀 두께로 표시하며, 기본 색상은 검정입니다.
+테두리 표시를 해제해도 선택한 테두리 색상은 유지됩니다.
+설정한 글자 색상과 기존 굵기는 유지하며 다른 메뉴 글자는 변경하지 않습니다.
 국가는 현재 소속을 읽으므로 역사 이벤트로 소속이 바뀌면 반영됩니다.
 미발견·숨김 상태의 도시는 표시하지 않으며, 지도 스크롤에 맞춰 이동합니다.
 도시 이름을 수정하면 지도 표시에도 반영됩니다.
@@ -338,6 +352,20 @@ DISCOVER_AVI_DETAILS = """DISCOVER 대신 AVI 사용
 
 체크 해제 시 EXE 미디어 연결과 DISEV.CDS 발견 이벤트 명령을 원래 DISCOVER 재생으로 복원합니다.
 복사된 AVI 파일은 다시 적용할 수 있도록 게임의 AVI 폴더에 유지합니다.
+"""
+
+WORLD_MAP_FOLLOW_DETAILS = """월드 지도 선박 중앙 추적
+
+- 월드 지도에서 내 배가 화면 중앙에 있도록 이동할 때마다 지도를 갱신합니다.
+- 타일 사이의 이동도 픽셀 단위로 반영하며, 다른 배·해류·구름·도시 이름·지도 클릭 위치도 함께 맞춥니다.
+- 이동 사이에 중간 화면을 추가하여 지도 스크롤이 부드럽게 이어지도록 합니다.
+- 이동 갱신 간격이 흔들려도 소수 위치와 표시 기한을 이어 받아 주기적인 속도 변화를 줄입니다.
+- 항해와 육상 이동 모두 적용됩니다. 이동 속도와 시간 진행은 변경하지 않습니다.
+- 비·눈이 올 때도 지도 이동을 보간합니다. 날씨 효과는 원래 주기로 진행하고 중간 화면에는 직전 그림을 다시 표시합니다.
+- 특수 연출 중이거나 날씨 그림을 안전하게 재사용할 수 없을 때는 원래 화면 갱신 주기를 유지합니다.
+- 북쪽·남쪽 지도 끝에서는 빈 화면이 나오지 않도록 카메라 이동을 제한합니다.
+
+체크 해제 시 화면 가장자리에 도달하면 지도를 넘기던 원래 방식으로 복원합니다.
 """
 
 SAVE_SLOT_SELECTOR_DETAILS = """10개 슬롯 저장/불러오기
@@ -1010,6 +1038,11 @@ class CDSExecutablePatcher(tk.Tk):
         self.discover_avi_enabled = tk.BooleanVar(value=False)
         self.save_slot_selector_enabled = tk.BooleanVar(value=False)
         self.city_discovery_notice_enabled = tk.BooleanVar(value=False)
+        self.world_map_follow_enabled = tk.BooleanVar(value=False)
+        self.city_label_colors = DEFAULT_LABEL_COLORS
+        self.city_label_outline = DEFAULT_LABEL_OUTLINE
+        self.city_label_show_nation = DEFAULT_SHOW_NATION
+        self.city_label_palette: tuple[tuple[int, int, int], ...] = ()
         self.pirate_fame_middle = tk.StringVar(value="0")
         self.pirate_fame_high = tk.StringVar(value="0")
         self.pirate_western_stage2_first_probability = tk.StringVar(value="0")
@@ -2002,10 +2035,20 @@ class CDSExecutablePatcher(tk.Tk):
         ttk.Button(
             translation_box,
             text="내용…",
-            command=lambda: self.show_patch_details(
-                "월드 지도 도시 이름 표시", CITY_DISCOVERY_NOTICE_DETAILS,
-            ),
+            command=self.show_city_label_details,
         ).grid(row=3, column=1, padx=(10, 0), pady=(6, 0), sticky="e")
+        ttk.Checkbutton(
+            translation_box,
+            text="월드 지도 선박 중앙 추적",
+            variable=self.world_map_follow_enabled,
+        ).grid(row=4, column=0, pady=(6, 0), sticky="w")
+        ttk.Button(
+            translation_box,
+            text="내용…",
+            command=lambda: self.show_patch_details(
+                "월드 지도 선박 중앙 추적", WORLD_MAP_FOLLOW_DETAILS,
+            ),
+        ).grid(row=4, column=1, padx=(10, 0), pady=(6, 0), sticky="e")
         discovery_box = ttk.LabelFrame(additional_left_column, text="발견물", padding=10)
         discovery_box.grid(row=0, column=0, sticky="ew")
 
@@ -7228,6 +7271,283 @@ class CDSExecutablePatcher(tk.Tk):
         window.deiconify()
         window.grab_set()
 
+    def _city_label_color_hex(self, palette_index: int) -> str:
+        if not self.city_label_palette:
+            return "#000000" if palette_index == 73 else "#FFFFFF"
+        red, green, blue = self.city_label_palette[palette_index - 10]
+        return f"#{red:02X}{green:02X}{blue:02X}"
+
+    @staticmethod
+    def _city_label_color_foreground(color: str) -> str:
+        red, green, blue = (int(color[start:start + 2], 16) for start in (1, 3, 5))
+        return "#000000" if red * 299 + green * 587 + blue * 114 >= 128000 else "#FFFFFF"
+
+    def _choose_city_label_color(
+        self, parent: tk.Toplevel, title: str, palette_index: int,
+        *, show_nation: bool = DEFAULT_SHOW_NATION,
+    ) -> int | None:
+        """Choose one of the loaded game's 64 text colors without changing settings."""
+        window = tk.Toplevel(parent)
+        window.withdraw()
+        window.title(title)
+        window.transient(parent)
+        window.resizable(False, False)
+        frame = ttk.Frame(window, padding=12)
+        frame.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(frame, text="게임 팔레트에서 색상을 선택하세요. (10–73)").pack(anchor="w")
+        swatches = ttk.Frame(frame)
+        swatches.pack(pady=(10, 8))
+        selected = palette_index
+        result: int | None = None
+        buttons: dict[int, tk.Button] = {}
+        selection_text = tk.StringVar(window)
+        preview = tk.Label(
+            frame, text="[국가 이름]  도시 이름" if show_nation else "도시 이름",
+            background="#202830",
+            font=("맑은 고딕", 11, "bold"), padx=12, pady=10,
+        )
+
+        def select(index: int) -> None:
+            nonlocal selected
+            selected = index
+            for button_index, button in buttons.items():
+                button.configure(relief=tk.SUNKEN if button_index == index else tk.RAISED)
+            selection_text.set(f"선택한 색상: {index}" + (" (기본 흰색)" if index == 10 else ""))
+            preview.configure(foreground=self._city_label_color_hex(index))
+
+        for offset in range(len(self.city_label_palette)):
+            index = offset + 10
+            color = self._city_label_color_hex(index)
+            foreground = self._city_label_color_foreground(color)
+            button = tk.Button(
+                swatches, text=str(index), width=5, height=1,
+                background=color, foreground=foreground,
+                activebackground=color, activeforeground=foreground,
+                borderwidth=3, command=lambda value=index: select(value),
+            )
+            button.grid(row=offset // 8, column=offset % 8, padx=2, pady=2)
+            buttons[index] = button
+        ttk.Label(frame, textvariable=selection_text).pack(anchor="w", pady=(0, 6))
+        preview.pack(fill=tk.X)
+        select(selected)
+
+        def close(accept: bool = False) -> None:
+            nonlocal result
+            if accept:
+                result = selected
+            window.grab_release()
+            window.destroy()
+
+        actions = ttk.Frame(frame)
+        actions.pack(fill=tk.X, pady=(12, 0))
+        ttk.Button(actions, text="취소", command=close).pack(side=tk.RIGHT)
+        ttk.Button(actions, text="확인", command=lambda: close(True)).pack(
+            side=tk.RIGHT, padx=(0, 6),
+        )
+        window.protocol("WM_DELETE_WINDOW", close)
+        window.bind("<Escape>", lambda _event: close())
+        self._center_dialog(window)
+        window.deiconify()
+        window.grab_set()
+        window.focus_set()
+        self.wait_window(window)
+        if parent.winfo_exists():
+            parent.grab_set()
+            parent.focus_set()
+        return result
+
+    def show_city_label_details(self) -> None:
+        window = tk.Toplevel(self)
+        window.withdraw()
+        window.title("월드 지도 도시 이름 표시")
+        window.transient(self)
+        frame = ttk.Frame(window, padding=12)
+        frame.pack(fill=tk.BOTH, expand=True)
+        description_frame = ttk.Frame(frame)
+        description_frame.pack(fill=tk.BOTH, expand=True)
+        description = tk.Text(
+            description_frame, width=72, height=8, wrap=tk.WORD,
+            padx=8, pady=8, spacing1=2, spacing3=2,
+        )
+        scrollbar = ttk.Scrollbar(description_frame, command=description.yview)
+        description.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        description.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        description.insert("1.0", CITY_DISCOVERY_NOTICE_DETAILS)
+        description.configure(state=tk.DISABLED)
+
+        show_nation = tk.BooleanVar(window, value=self.city_label_show_nation)
+        display_frame = ttk.Frame(frame)
+        display_frame.pack(fill=tk.X, pady=(8, 0))
+        ttk.Checkbutton(
+            display_frame, text="국가 이름 표시", variable=show_nation,
+            command=lambda: refresh(),
+        ).pack(side=tk.LEFT)
+        ttk.Label(display_frame, text="해제하면 도시 이름만 표시합니다.").pack(
+            side=tk.LEFT, padx=(12, 0),
+        )
+        color_frame = ttk.LabelFrame(frame, text="국가 관계별 글자 색상", padding=10)
+        color_frame.pack(fill=tk.X, pady=(8, 0))
+        for column, label in enumerate(("관계", "국가명", "도시명", "미리보기")):
+            ttk.Label(color_frame, text=label).grid(row=0, column=column, padx=8, pady=(0, 6))
+        draft = list(self.city_label_colors)
+        outline_draft = [int(bool(self.city_label_outline[0])), self.city_label_outline[1]]
+        show_outline = tk.BooleanVar(window, value=bool(outline_draft[0]))
+        color_buttons: dict[int, tk.Button] = {}
+        previews: dict[int, tk.Canvas] = {}
+        relation_names = ("자국", "우호국", "적국")
+        samples = ("[국가 이름]", "도시 이름")
+        preview_font = tkfont.Font(window, family="맑은 고딕", size=10)
+        preview_width = max(preview_font.measure(sample) for sample in samples) + 24
+        preview_height = preview_font.metrics("linespace") + 2
+
+        def refresh() -> None:
+            outline_draft[0] = int(show_outline.get())
+            outline_color = self._city_label_color_hex(outline_draft[1])
+            outline_foreground = self._city_label_color_foreground(outline_color)
+            outline_button.configure(
+                text=f"색상 {outline_draft[1]}" + (" · 검정" if outline_draft[1] == 73 else ""),
+                background=outline_color, foreground=outline_foreground,
+                activebackground=outline_color, activeforeground=outline_foreground,
+                state=tk.NORMAL if self.city_label_palette and show_outline.get() else tk.DISABLED,
+            )
+            for index, button in color_buttons.items():
+                palette_index = draft[index]
+                color = self._city_label_color_hex(palette_index)
+                foreground = self._city_label_color_foreground(color)
+                button.configure(
+                    text=f"색상 {palette_index}" + (" · 흰색" if palette_index == 10 else ""),
+                    background=color, foreground=foreground,
+                    activebackground=color, activeforeground=foreground,
+                    state=(
+                        tk.NORMAL if self.city_label_palette and (index >= 3 or show_nation.get())
+                        else tk.DISABLED
+                    ),
+                )
+                preview = previews[index]
+                preview.delete("all")
+                if index < 3:
+                    if not show_nation.get():
+                        preview.pack_forget()
+                        continue
+                    if not preview.winfo_manager():
+                        preview.pack(before=previews[index + 3])
+                sample = samples[index // 3]
+                radius = outline_draft[0]
+                for dy in range(-radius, radius + 1):
+                    for dx in range(-radius, radius + 1):
+                        if 0 < abs(dx) + abs(dy) <= radius:
+                            preview.create_text(
+                                preview_width // 2 + dx, preview_height // 2 + dy,
+                                text=sample, font=preview_font, fill=outline_color,
+                                tags="outline",
+                            )
+                preview.create_text(
+                    preview_width // 2, preview_height // 2,
+                    text=sample, font=preview_font, fill=color, tags="foreground",
+                )
+
+        def choose(index: int) -> None:
+            label = "국가명" if index < 3 else "도시명"
+            chosen = self._choose_city_label_color(
+                window, f"{label} · {relation_names[index % 3]} 색상", draft[index],
+                show_nation=show_nation.get(),
+            )
+            if chosen is not None:
+                draft[index] = chosen
+                refresh()
+
+        for relation_index, relation in enumerate(relation_names):
+            row = relation_index + 1
+            ttk.Label(color_frame, text=relation).grid(row=row, column=0, padx=8, pady=4)
+            preview_frame = tk.Frame(color_frame, background="#202830", padx=12, pady=3)
+            preview_frame.grid(row=row, column=3, padx=8, pady=4, sticky="ew")
+            for kind_index, sample in enumerate(samples):
+                index = kind_index * 3 + relation_index
+                button = tk.Button(
+                    color_frame, width=15, command=lambda value=index: choose(value),
+                    state=tk.NORMAL if self.city_label_palette else tk.DISABLED,
+                )
+                button.grid(row=row, column=kind_index + 1, padx=8, pady=4, sticky="ew")
+                color_buttons[index] = button
+                preview = tk.Canvas(
+                    preview_frame, background="#202830", highlightthickness=0,
+                    width=preview_width, height=preview_height,
+                )
+                preview.pack()
+                previews[index] = preview
+
+        outline_frame = ttk.LabelFrame(frame, text="공통 테두리 · 국가명 / 도시명", padding=8)
+        outline_frame.pack(fill=tk.X, pady=(8, 0))
+        ttk.Checkbutton(
+            outline_frame, text="테두리 표시", variable=show_outline,
+            command=refresh,
+        ).pack(side=tk.LEFT)
+        ttk.Label(outline_frame, text="두께: 1px (고정)").pack(side=tk.LEFT, padx=(16, 0))
+        ttk.Label(outline_frame, text="색상:").pack(side=tk.LEFT, padx=(22, 6))
+
+        def choose_outline() -> None:
+            chosen = self._choose_city_label_color(
+                window, "공통 테두리 색상", outline_draft[1],
+                show_nation=show_nation.get(),
+            )
+            if chosen is not None:
+                outline_draft[1] = chosen
+                refresh()
+
+        outline_button = tk.Button(
+            outline_frame, width=15, command=choose_outline,
+            state=tk.NORMAL if self.city_label_palette else tk.DISABLED,
+        )
+        outline_button.pack(side=tk.LEFT)
+
+        refresh()
+        ttk.Label(
+            frame,
+            text=(
+                "자국: 주인공의 현재 소속국\n"
+                "적국: 도시 진입 제한 국가 및 1494년부터 포르투갈·에스파냐의 조약 상대국\n"
+                "우호국: 자국·적국에 해당하지 않는 나머지 국가"
+            ),
+            justify=tk.LEFT, wraplength=640,
+        ).pack(anchor="w", pady=(8, 0))
+        ttk.Label(
+            frame,
+            text=(
+                "색상을 누르면 게임 팔레트에서 선택합니다. 확인 후 EXE에 저장하면 적용됩니다."
+                if self.city_label_palette else "EXE 파일을 먼저 선택하면 게임 팔레트로 색상을 설정할 수 있습니다."
+            ),
+            wraplength=640,
+        ).pack(anchor="w", pady=(6, 0))
+
+        def reset() -> None:
+            draft[:] = DEFAULT_LABEL_COLORS
+            outline_draft[:] = DEFAULT_LABEL_OUTLINE
+            show_outline.set(bool(DEFAULT_LABEL_OUTLINE[0]))
+            show_nation.set(DEFAULT_SHOW_NATION)
+            refresh()
+
+        def close(accept: bool = False) -> None:
+            if accept:
+                self.city_label_colors = tuple(draft)
+                self.city_label_outline = (int(show_outline.get()), outline_draft[1])
+                self.city_label_show_nation = show_nation.get()
+            window.grab_release()
+            window.destroy()
+
+        actions = ttk.Frame(frame)
+        actions.pack(fill=tk.X, pady=(12, 0))
+        ttk.Button(actions, text="기본값으로 초기화", command=reset).pack(side=tk.LEFT)
+        ttk.Button(actions, text="취소", command=close).pack(side=tk.RIGHT)
+        ttk.Button(actions, text="확인", command=lambda: close(True)).pack(
+            side=tk.RIGHT, padx=(0, 6),
+        )
+        window.protocol("WM_DELETE_WINDOW", close)
+        window.bind("<Escape>", lambda _event: close())
+        self._center_dialog(window)
+        window.deiconify()
+        window.grab_set()
+
     def _update_pirate_control_states(self) -> None:
         enabled = self.pirate_variety_enabled.get()
         state = ["!disabled"] if enabled else ["disabled"]
@@ -7363,9 +7683,13 @@ class CDSExecutablePatcher(tk.Tk):
                 erasmus_location_bug_fix_enabled = read_erasmus_location_bug_fix_state(
                     target.read_bytes(),
                 )
-                city_discovery_notice_enabled = read_city_discovery_notice_patch_state(
-                    target.read_bytes(),
-                )
+                city_label_data = target.read_bytes()
+                city_discovery_notice_enabled = read_city_discovery_notice_patch_state(city_label_data)
+                city_label_colors = read_city_label_colors(city_label_data)
+                city_label_outline = read_city_label_outline(city_label_data)
+                city_label_show_nation = read_city_label_show_nation(city_label_data)
+                city_label_palette = read_city_label_palette(city_label_data)
+                world_map_follow_enabled = read_world_map_follow_patch_state(city_label_data)
                 high_speed_map_fix_enabled = read_high_speed_map_fix_state(
                     target.read_bytes(),
                 )
@@ -7457,6 +7781,11 @@ class CDSExecutablePatcher(tk.Tk):
             )
             self.erasmus_location_fix_enabled.set(erasmus_location_bug_fix_enabled)
             self.city_discovery_notice_enabled.set(city_discovery_notice_enabled)
+            self.world_map_follow_enabled.set(world_map_follow_enabled)
+            self.city_label_colors = city_label_colors
+            self.city_label_outline = (int(bool(city_label_outline[0])), city_label_outline[1])
+            self.city_label_show_nation = city_label_show_nation
+            self.city_label_palette = city_label_palette
             self.high_speed_map_fix_enabled.set(high_speed_map_fix_enabled)
             self.save_slot_selector_enabled.set(
                 save_slot_selector_enabled or load_slot_selector_enabled,
@@ -8001,6 +8330,10 @@ class CDSExecutablePatcher(tk.Tk):
                     self.bug_fixes_enabled.get() and self.erasmus_location_fix_enabled.get()
                 ),
                 city_discovery_notice_enabled=self.city_discovery_notice_enabled.get(),
+                world_map_follow_enabled=self.world_map_follow_enabled.get(),
+                city_label_colors=self.city_label_colors,
+                city_label_outline=self.city_label_outline,
+                city_label_show_nation=self.city_label_show_nation,
                 high_speed_map_fix_enabled=(
                     self.bug_fixes_enabled.get() and self.high_speed_map_fix_enabled.get()
                 ),

@@ -180,6 +180,13 @@ HIGH_SPEED_MAP_FIX_SLOT_SIZE = 0x200
 PATCH_SECTION_HIGH_SPEED_MAP_FIX_SIZE = (
     HIGH_SPEED_MAP_FIX_SLOT_OFFSET + HIGH_SPEED_MAP_FIX_SLOT_SIZE
 )
+# Keep the centred camera independent of the movement repair and map labels.
+# Its tail holds zero-initialized runtime state (not save-game data).
+WORLD_MAP_FOLLOW_SLOT_OFFSET = PATCH_SECTION_HIGH_SPEED_MAP_FIX_SIZE
+WORLD_MAP_FOLLOW_SLOT_SIZE = 0x8000
+PATCH_SECTION_WORLD_MAP_FOLLOW_SIZE = (
+    WORLD_MAP_FOLLOW_SLOT_OFFSET + WORLD_MAP_FOLLOW_SLOT_SIZE
+)
 
 
 @dataclass(frozen=True)
