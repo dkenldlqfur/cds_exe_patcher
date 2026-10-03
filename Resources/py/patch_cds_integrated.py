@@ -15,6 +15,10 @@ from ctypes import wintypes
 
 import pefile
 
+from localization_patch import apply_extended_localization, read_extended_localization_state
+from landing_ship_image_patch import apply_landing_ship_image_fix, read_landing_ship_image_fix_state
+from all_city_inn_save_patch import apply_all_city_inn_save_patch, read_all_city_inn_save_state
+
 from city_discovery_notice_patch import (
     apply_city_discovery_notice_patch,
     read_city_discovery_notice_patch_state,
@@ -1900,6 +1904,7 @@ def _validate_mistranslation_layout(data: bytes | bytearray) -> None:
 
 def read_mistranslation_patch_state(data: bytes) -> bool:
     """Recognize the current or previous localization patch for migration."""
+    read_extended_localization_state(data)  # Validate a journal when present.
     _validate_mistranslation_layout(data)
     if any(
         data[offset:offset + len(_translation_bytes(corrected))] != _translation_bytes(corrected)
@@ -1929,7 +1934,19 @@ def read_mistranslation_patch_state(data: bytes) -> bool:
     )
 
 
-def apply_mistranslation_fixes(data: bytearray, enabled: bool) -> bool:
+def apply_mistranslation_fixes(
+    data: bytearray, enabled: bool, *, include_extended: bool = True,
+) -> bool:
+    """Validate and apply localization atomically, including longer names."""
+    updated = bytearray(data)
+    changed = _apply_legacy_mistranslation_fixes(updated, enabled)
+    if include_extended:
+        changed = apply_extended_localization(updated, enabled) or changed
+    data[:] = updated
+    return changed
+
+
+def _apply_legacy_mistranslation_fixes(data: bytearray, enabled: bool) -> bool:
     """Apply or remove the verified Korean localization corrections."""
     _validate_mistranslation_layout(data)
     was_enabled = read_mistranslation_patch_state(bytes(data))
@@ -3238,6 +3255,9 @@ def _save_slot_selector_patch_info(data: bytes | bytearray) -> bool:
 
 def apply_save_slot_selector_patch(data: bytearray, enabled: bool) -> bool:
     """Install or remove the native ten-slot save destination selector."""
+    # .patch is shared with landing direction and camera runtime data.
+    # Removing this selector must preserve the section's existing permissions:
+    # checking only the load selector cannot establish ownership of WRITE.
     hook_offset = _save_slot_selector_hook_offset(data)
     section = find_patch_section(data)
     if _is_legacy_save_slot_selector_patch(data, section, hook_offset):
@@ -3248,9 +3268,6 @@ def apply_save_slot_selector_patch(data: bytearray, enabled: bool) -> bool:
         clear_slot(
             data, section, SAVE_SLOT_SELECTOR_SLOT_OFFSET, SAVE_SLOT_SELECTOR_SLOT_SIZE,
         )
-        if not read_load_slot_selector_patch_state(data):
-            characteristics = struct.unpack_from("<I", data, section.header_offset + 36)[0]
-            struct.pack_into("<I", data, section.header_offset + 36, characteristics & ~0x80000000)
         if not enabled:
             return True
     current_enabled = _save_slot_selector_patch_info(data)
@@ -3284,9 +3301,6 @@ def apply_save_slot_selector_patch(data: bytearray, enabled: bool) -> bool:
         clear_slot(
             data, section, SAVE_SLOT_SELECTOR_SLOT_OFFSET, SAVE_SLOT_SELECTOR_SLOT_SIZE,
         )
-        if not read_load_slot_selector_patch_state(data):
-            characteristics = struct.unpack_from("<I", data, section.header_offset + 36)[0]
-            struct.pack_into("<I", data, section.header_offset + 36, characteristics & ~0x80000000)
     return True
 
 
@@ -3918,6 +3932,8 @@ def _load_slot_selector_patch_info(data: bytes | bytearray) -> bool:
 
 def apply_load_slot_selector_patch(data: bytearray, enabled: bool) -> bool:
     """Install or remove the native ten-slot load selector."""
+    # Preserve shared .patch permissions on removal, as the save selector does.
+    # Landing direction/camera state may still require WRITE without any slots.
     legacy_enabled = _is_legacy_load_slot_selector_patch(data)
     current_enabled = _load_slot_selector_patch_info(data)
     if current_enabled == enabled and not legacy_enabled:
@@ -3954,9 +3970,6 @@ def apply_load_slot_selector_patch(data: bytearray, enabled: bool) -> bool:
             data, section, LOAD_SLOT_SELECTOR_SLOT_OFFSET, LOAD_SLOT_SELECTOR_SLOT_SIZE,
         )
         if not enabled:
-            if not read_save_slot_selector_patch_state(data):
-                characteristics = struct.unpack_from("<I", data, section.header_offset + 36)[0]
-                struct.pack_into("<I", data, section.header_offset + 36, characteristics & ~0x80000000)
             return True
     if enabled:
         section, _created = ensure_patch_section(
@@ -4025,9 +4038,6 @@ def apply_load_slot_selector_patch(data: bytearray, enabled: bool) -> bool:
         clear_slot(
             data, section, LOAD_SLOT_SELECTOR_SLOT_OFFSET, LOAD_SLOT_SELECTOR_SLOT_SIZE,
         )
-        if not read_save_slot_selector_patch_state(data):
-            characteristics = struct.unpack_from("<I", data, section.header_offset + 36)[0]
-            struct.pack_into("<I", data, section.header_offset + 36, characteristics & ~0x80000000)
     return True
 
 
@@ -8442,10 +8452,16 @@ def apply_all(
     city_label_outline: tuple[int, int] | None = None,
     city_label_show_nation: bool | None = None,
     world_map_follow_enabled: bool = False,
+    landing_ship_image_fix_enabled: bool | None = None,
+    all_city_inn_save_enabled: bool | None = None,
 ) -> Path | None:
     """Apply all selected settings atomically and create one original backup."""
     target = target.resolve(strict=True)
     original = target.read_bytes()
+    if landing_ship_image_fix_enabled is None:
+        landing_ship_image_fix_enabled = read_landing_ship_image_fix_state(original)
+    if all_city_inn_save_enabled is None:
+        all_city_inn_save_enabled = read_all_city_inn_save_state(original)
     before_coordinate = bytearray(original)
     world_map_follow_was_enabled = read_world_map_follow_patch_state(original)
     failed_pottery_was_enabled = read_failed_pottery_patch_state(original)
@@ -8480,7 +8496,7 @@ def apply_all(
     if _pirate_selection_patch_info(original)[0]:
         apply_pirate_variety(before_coordinate, False)
     if read_mistranslation_patch_state(bytes(before_coordinate)):
-        apply_mistranslation_fixes(before_coordinate, False)
+        apply_mistranslation_fixes(before_coordinate, False, include_extended=False)
     if failed_pottery_was_enabled:
         apply_failed_pottery_patch(before_coordinate, False)
     if judgment_fix_was_enabled:
@@ -8551,7 +8567,7 @@ def apply_all(
         islamic_encounter_denominator,
     )
     apply_pirate_variety(updated, pirate_variety_enabled, pirate_variety_settings)
-    apply_mistranslation_fixes(updated, mistranslation_fixes_enabled)
+    apply_mistranslation_fixes(updated, mistranslation_fixes_enabled, include_extended=False)
     apply_eclipse_polar_caps(updated, eclipse_enabled, eclipse_latitude)
     apply_figurehead_effect_settings(updated, figurehead_effect_settings)
     apply_barmaid_edit(updated, barmaid_edit)
@@ -8599,6 +8615,11 @@ def apply_all(
     apply_hint_edit(updated, hint_edit)
     apply_discovery_hint_edit(updated, discovery_hint_edit)
     apply_library_book_edits(updated, library_book_edits)
+    # Apply after editors: unchanged values copied from an open tab must not
+    # undo localization; genuinely customized text is left alone.
+    apply_extended_localization(updated, mistranslation_fixes_enabled)
+    apply_landing_ship_image_fix(updated, landing_ship_image_fix_enabled)
+    apply_all_city_inn_save_patch(updated, all_city_inn_save_enabled)
     # Coordinated bug fixes intentionally win over direct edits to their rows
     # so a checked feature can never be saved half-applied.
     if failed_pottery_enabled or failed_pottery_was_enabled:

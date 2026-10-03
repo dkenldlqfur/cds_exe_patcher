@@ -64,6 +64,7 @@ from discovery_hint_links import (
 from discovery_reader import DiscoveryImageReadError, discovery_still_count, read_discovery_still
 from item_reader import ItemImageReadError, read_item_image
 from portrait_reader import PortraitReadError, portrait_count, read_portrait
+from localization_catalog import localization_details
 from city_discovery_notice_patch import (
     DEFAULT_LABEL_COLORS,
     DEFAULT_LABEL_OUTLINE,
@@ -131,6 +132,8 @@ from patch_cds_integrated import (
     read_erasmus_location_bug_fix_state,
     read_city_discovery_notice_patch_state,
     read_high_speed_map_fix_state,
+    read_landing_ship_image_fix_state,
+    read_all_city_inn_save_state,
     read_world_map_follow_patch_state,
     read_tunis_book_event_location_fix_state,
     read_person_records,
@@ -216,6 +219,8 @@ MISTRANSLATION_DETAILS = """by kseokjung, 오쌍, ladyous
 산속 도시 방향 북동쪽 → 북서쪽
 """
 
+MISTRANSLATION_DETAILS += "\n" + localization_details()
+
 FAILED_POTTERY_FIX_DETAILS = """실패작 도자기 등장
 
 - 주점 힌트의 중국 항주 표기를 중국 남경으로 수정합니다.
@@ -258,6 +263,19 @@ SHIP_PURCHASE_BLANK_SELECTION_FIX_DETAILS = """선박 구입 빈 슬롯 종료 �
 - 취소와 정상적인 선박 선택·구입 흐름은 변경하지 않습니다.
 
 체크 해제 시 위 수정 사항을 원본 상태로 복원합니다.
+"""
+
+LANDING_SHIP_IMAGE_FIX_DETAILS = """상륙 후 선박 이미지 오류 수정
+
+- 육지에 상륙한 뒤 해안에 남은 배가 기함 선종과 다른 기본형으로 보이는 문제를 수정합니다.
+- DirectDraw 그림 번호에 누락된 기함의 선종별 이미지 그룹을 반영합니다.
+- 상륙이 확정될 때 배의 방향을 별도로 보관해 두 출력 방식 모두 상륙 직전 방향으로 표시합니다.
+- 육상 이동 방향이 바뀌어도 해안에 남은 배의 방향은 바뀌지 않습니다.
+- 이미 육지에서 저장된 파일을 불러오면 이전 상륙 방향은 알 수 없어 기존 고정 방향으로 표시합니다. 다시 승선·상륙하면 방향이 보관됩니다.
+- 이전 패치는 체크된 상태로 다시 저장하면 새 방식으로 교체됩니다.
+- 항해 중 배의 표시, 선종·함선 능력치·세이브 데이터는 변경하지 않습니다.
+
+체크 해제 후 저장하면 원본 표시 코드로 복원합니다.
 """
 
 HIGH_SPEED_MAP_FIX_DETAILS = """고속 항해 지도 갱신 버그 수정
@@ -366,6 +384,16 @@ WORLD_MAP_FOLLOW_DETAILS = """월드 지도 선박 중앙 추적
 - 북쪽·남쪽 지도 끝에서는 빈 화면이 나오지 않도록 카메라 이동을 제한합니다.
 
 체크 해제 시 화면 가장자리에 도달하면 지도를 넘기던 원래 방식으로 복원합니다.
+"""
+
+ALL_CITY_INN_SAVE_DETAILS = """모든 도시 여관에서 저장
+
+- 주인공 국적과 도시 소속 국가가 달라도 여관에서 일반 저장을 할 수 있습니다.
+- 외국 도시에서 표시되던 '중단' 항목을 '저장'으로 바꾸고, 임시 저장 후 종료 대신 일반 저장을 실행합니다.
+- '10개 슬롯 저장/불러오기'를 함께 켜면 기존 슬롯 선택 목록으로 저장합니다. 끄면 원래 단일 SAVEDATA.CDS에 저장합니다.
+- 도시 소속 국가, 주인공 국적, 여관 출입 조건과 다른 임시 저장 기능은 변경하지 않습니다.
+
+체크 해제 후 저장하면 원래의 국가별 저장/중단 판정으로 복원합니다.
 """
 
 SAVE_SLOT_SELECTOR_DETAILS = """10개 슬롯 저장/불러오기
@@ -1034,9 +1062,11 @@ class CDSExecutablePatcher(tk.Tk):
         self.bribe_item_duplicate_fix_enabled = tk.BooleanVar(value=False)
         self.nestorian_cross_duplicate_reward_fix_enabled = tk.BooleanVar(value=False)
         self.erasmus_location_fix_enabled = tk.BooleanVar(value=False)
+        self.landing_ship_image_fix_enabled = tk.BooleanVar(value=False)
         self.geographic_discovery_still_fix_enabled = tk.BooleanVar(value=False)
         self.discover_avi_enabled = tk.BooleanVar(value=False)
         self.save_slot_selector_enabled = tk.BooleanVar(value=False)
+        self.all_city_inn_save_enabled = tk.BooleanVar(value=False)
         self.city_discovery_notice_enabled = tk.BooleanVar(value=False)
         self.world_map_follow_enabled = tk.BooleanVar(value=False)
         self.city_label_colors = DEFAULT_LABEL_COLORS
@@ -2029,26 +2059,38 @@ class CDSExecutablePatcher(tk.Tk):
         ).grid(row=2, column=1, padx=(10, 0), pady=(6, 0), sticky="e")
         ttk.Checkbutton(
             translation_box,
-            text="월드 지도 도시 이름 표시",
-            variable=self.city_discovery_notice_enabled,
+            text="모든 도시 여관에서 저장",
+            variable=self.all_city_inn_save_enabled,
         ).grid(row=3, column=0, pady=(6, 0), sticky="w")
         ttk.Button(
             translation_box,
             text="내용…",
-            command=self.show_city_label_details,
+            command=lambda: self.show_patch_details(
+                "모든 도시 여관에서 저장", ALL_CITY_INN_SAVE_DETAILS,
+            ),
         ).grid(row=3, column=1, padx=(10, 0), pady=(6, 0), sticky="e")
+        ttk.Checkbutton(
+            translation_box,
+            text="월드 지도 도시 이름 표시",
+            variable=self.city_discovery_notice_enabled,
+        ).grid(row=4, column=0, pady=(6, 0), sticky="w")
+        ttk.Button(
+            translation_box,
+            text="내용…",
+            command=self.show_city_label_details,
+        ).grid(row=4, column=1, padx=(10, 0), pady=(6, 0), sticky="e")
         ttk.Checkbutton(
             translation_box,
             text="월드 지도 선박 중앙 추적",
             variable=self.world_map_follow_enabled,
-        ).grid(row=4, column=0, pady=(6, 0), sticky="w")
+        ).grid(row=5, column=0, pady=(6, 0), sticky="w")
         ttk.Button(
             translation_box,
             text="내용…",
             command=lambda: self.show_patch_details(
                 "월드 지도 선박 중앙 추적", WORLD_MAP_FOLLOW_DETAILS,
             ),
-        ).grid(row=4, column=1, padx=(10, 0), pady=(6, 0), sticky="e")
+        ).grid(row=5, column=1, padx=(10, 0), pady=(6, 0), sticky="e")
         discovery_box = ttk.LabelFrame(additional_left_column, text="발견물", padding=10)
         discovery_box.grid(row=0, column=0, sticky="ew")
 
@@ -7108,6 +7150,11 @@ class CDSExecutablePatcher(tk.Tk):
                 HIGH_SPEED_MAP_FIX_DETAILS,
             ),
             (
+                "상륙 후 선박 이미지 오류 수정",
+                self.landing_ship_image_fix_enabled,
+                LANDING_SHIP_IMAGE_FIX_DETAILS,
+            ),
+            (
                 "튀니스 주점 아이템 이벤트 장소 수정",
                 self.tunis_book_event_location_fix_enabled,
                 TUNIS_BOOK_EVENT_LOCATION_FIX_DETAILS,
@@ -7684,6 +7731,8 @@ class CDSExecutablePatcher(tk.Tk):
                     target.read_bytes(),
                 )
                 city_label_data = target.read_bytes()
+                landing_ship_image_fix_enabled = read_landing_ship_image_fix_state(city_label_data)
+                all_city_inn_save_enabled = read_all_city_inn_save_state(city_label_data)
                 city_discovery_notice_enabled = read_city_discovery_notice_patch_state(city_label_data)
                 city_label_colors = read_city_label_colors(city_label_data)
                 city_label_outline = read_city_label_outline(city_label_data)
@@ -7787,6 +7836,8 @@ class CDSExecutablePatcher(tk.Tk):
             self.city_label_show_nation = city_label_show_nation
             self.city_label_palette = city_label_palette
             self.high_speed_map_fix_enabled.set(high_speed_map_fix_enabled)
+            self.landing_ship_image_fix_enabled.set(landing_ship_image_fix_enabled)
+            self.all_city_inn_save_enabled.set(all_city_inn_save_enabled)
             self.save_slot_selector_enabled.set(
                 save_slot_selector_enabled or load_slot_selector_enabled,
             )
@@ -7803,6 +7854,7 @@ class CDSExecutablePatcher(tk.Tk):
                 bribe_item_duplicate_fix_enabled,
                 erasmus_location_bug_fix_enabled,
                 high_speed_map_fix_enabled,
+                landing_ship_image_fix_enabled,
             )))
             self._update_bug_fix_control_states()
             discovery_errors: list[str] = []
@@ -8331,11 +8383,15 @@ class CDSExecutablePatcher(tk.Tk):
                 ),
                 city_discovery_notice_enabled=self.city_discovery_notice_enabled.get(),
                 world_map_follow_enabled=self.world_map_follow_enabled.get(),
+                all_city_inn_save_enabled=self.all_city_inn_save_enabled.get(),
                 city_label_colors=self.city_label_colors,
                 city_label_outline=self.city_label_outline,
                 city_label_show_nation=self.city_label_show_nation,
                 high_speed_map_fix_enabled=(
                     self.bug_fixes_enabled.get() and self.high_speed_map_fix_enabled.get()
+                ),
+                landing_ship_image_fix_enabled=(
+                    self.bug_fixes_enabled.get() and self.landing_ship_image_fix_enabled.get()
                 ),
             )
             if backup is not None:
@@ -8439,6 +8495,26 @@ class CDSExecutablePatcher(tk.Tk):
         selected_hint = self.hint_list.selection()
         selected_discovery = self.discovery_list.selection()
         selected_discovery_hint = self.discovery_hint_list.selection()
+        # Localization can redirect names after each direct editor has run.
+        # Refresh affected lists and dependent name choices from the saved EXE.
+        localized_selections = [
+            (self.city_list, self.city_list.selection(), self._on_city_selected),
+            (self.item_list, self.item_list.selection(), self._on_item_selected),
+            (self.person_list, self.person_list.selection(), self._on_person_selected),
+            (self.sponsor_list, self.sponsor_list.selection(), self._on_sponsor_selected),
+        ]
+        self._load_city_records(
+            read_city_records(target), read_trade_good_names(target),
+            read_trade_region_goods(target),
+        )
+        self._load_item_records(read_item_records(target), read_item_discovery_media_links(target))
+        self._load_person_records(read_person_records(target))
+        self._load_sponsor_records(read_sponsor_records(target))
+        for widget, selection, callback in localized_selections:
+            if selection and widget.exists(selection[0]):
+                widget.selection_set(selection[0])
+                widget.focus(selection[0])
+                callback()
         self._load_fake_item_records(read_fake_item_records(target))
         self._load_hint_records(read_hint_records(target))
         self._item_discovery_media_links = read_item_discovery_media_links(target)
