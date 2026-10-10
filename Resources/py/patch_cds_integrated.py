@@ -18,6 +18,7 @@ import pefile
 from localization_patch import apply_extended_localization, read_extended_localization_state
 from landing_ship_image_patch import apply_landing_ship_image_fix, read_landing_ship_image_fix_state
 from all_city_inn_save_patch import apply_all_city_inn_save_patch, read_all_city_inn_save_state
+from combat_item_chance import CombatItemChances, apply_combat_item_chances, read_combat_item_chances
 
 from city_discovery_notice_patch import (
     apply_city_discovery_notice_patch,
@@ -8454,10 +8455,13 @@ def apply_all(
     world_map_follow_enabled: bool = False,
     landing_ship_image_fix_enabled: bool | None = None,
     all_city_inn_save_enabled: bool | None = None,
+    combat_item_chances: CombatItemChances | None = None,
 ) -> Path | None:
     """Apply all selected settings atomically and create one original backup."""
     target = target.resolve(strict=True)
     original = target.read_bytes()
+    if combat_item_chances is None:
+        combat_item_chances = read_combat_item_chances(original)
     if landing_ship_image_fix_enabled is None:
         landing_ship_image_fix_enabled = read_landing_ship_image_fix_state(original)
     if all_city_inn_save_enabled is None:
@@ -8620,6 +8624,7 @@ def apply_all(
     apply_extended_localization(updated, mistranslation_fixes_enabled)
     apply_landing_ship_image_fix(updated, landing_ship_image_fix_enabled)
     apply_all_city_inn_save_patch(updated, all_city_inn_save_enabled)
+    apply_combat_item_chances(updated, combat_item_chances)
     # Coordinated bug fixes intentionally win over direct edits to their rows
     # so a checked feature can never be saved half-applied.
     if failed_pottery_enabled or failed_pottery_was_enabled:

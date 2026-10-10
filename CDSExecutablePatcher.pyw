@@ -63,6 +63,7 @@ from discovery_hint_links import (
 )
 from discovery_reader import DiscoveryImageReadError, discovery_still_count, read_discovery_still
 from item_reader import ItemImageReadError, read_item_image
+from combat_item_chance import CombatItemChances, read_combat_item_chances
 from portrait_reader import PortraitReadError, portrait_count, read_portrait
 from localization_catalog import localization_details
 from city_discovery_notice_patch import (
@@ -1212,6 +1213,7 @@ class CDSExecutablePatcher(tk.Tk):
         self.item_sell_price = tk.StringVar()
         self.item_effect_value = tk.StringVar()
         self.item_hint_selection = tk.StringVar(value="연결 없음")
+        self._combat_item_chances = CombatItemChances()
         self.fake_item_category = tk.StringVar()
         self.fake_item_target_code = tk.StringVar()
         self.fake_item_value = tk.StringVar()
@@ -2781,6 +2783,11 @@ class CDSExecutablePatcher(tk.Tk):
         )
         self.item_effect_entry.grid(row=5, column=1, padx=(6, 0), pady=(8, 0), sticky="w")
         self._limit_integer_input(self.item_effect_entry, 0, 255)
+        self.item_chance_button = ttk.Button(
+            item_box, text="발동 확률…", command=self._show_combat_item_chance_editor,
+            state="disabled",
+        )
+        self.item_chance_button.grid(row=6, column=1, padx=(6, 0), pady=(8, 0), sticky="w")
         # ITEM.CDS pictures remain at their original 120x120 size.  Items
         # Items without ITEM.CDS art can use 240x176 DISCOVER media or a
         # 320x240 discovery AVI, so keep a large enough canvas and center the
@@ -5050,6 +5057,10 @@ class CDSExecutablePatcher(tk.Tk):
             else:
                 control.state(["!disabled"] if enabled else ["disabled"])
         self._update_item_hint_control_state()
+        record = self._selected_item_record() if enabled else None
+        self.item_chance_button.configure(
+            state="normal" if record and record.identifier in (0, 1, 2) else "disabled",
+        )
 
     def _on_item_category_changed(self, *_args: str) -> None:
         self._update_item_hint_control_state()
@@ -5359,6 +5370,9 @@ class CDSExecutablePatcher(tk.Tk):
         record = self._selected_item_record()
         if record is None:
             return
+        self.item_chance_button.configure(
+            state="normal" if record.identifier in (0, 1, 2) else "disabled",
+        )
         self.item_name.set(record.name)
         self.item_name_entry.set(record.name)
         self.item_category.set(item_category_name(record.category_id))
@@ -5370,6 +5384,67 @@ class CDSExecutablePatcher(tk.Tk):
         self.item_hint_selection.set(
             "연결 없음" if record.hint_id < 0 else link.hint_name if link else "연결 없음"
         )
+
+    def _show_combat_item_chance_editor(self) -> None:
+        record = self._selected_item_record()
+        if record is None or record.identifier not in (0, 1, 2):
+            return
+        fields = ("submarine_bomb", "rapid_cannon", "explosive_shell")
+        field = fields[record.identifier]
+        current = getattr(self._combat_item_chances, field)
+        window = tk.Toplevel(self)
+        window.withdraw()
+        window.title(f"{record.name} 발동 확률")
+        window.transient(self)
+        window.resizable(False, False)
+        frame = ttk.Frame(window, padding=16)
+        frame.pack(fill="both", expand=True)
+        original = tk.BooleanVar(value=current is None)
+        percent = tk.StringVar(value=str(current if current is not None else 40))
+        ttk.Checkbutton(frame, text="원본 공식 사용", variable=original,
+                        command=lambda: entry.configure(
+                            state="disabled" if original.get() else "normal",
+                        )).grid(row=0, column=0, columnspan=3, sticky="w")
+        ttk.Label(frame, text="발동 확률:").grid(row=1, column=0, pady=(10, 0), sticky="w")
+        entry = ttk.Spinbox(frame, from_=0, to=100, width=6, textvariable=percent,
+                            state="disabled" if original.get() else "normal")
+        entry.grid(row=1, column=1, padx=8, pady=(10, 0))
+        self._limit_integer_input(entry, 0, 100)
+        ttk.Label(frame, text="%").grid(row=1, column=2, pady=(10, 0), sticky="w")
+        formula = (
+            "원본: 난수(운)으로 기준값을 정한 뒤 발동 판정",
+            "원본: 포술 × 5 + 운 ÷ 15 (정수 나눗셈)",
+            "원본: 고정 40%",
+        )[record.identifier]
+        ttk.Label(frame, text=formula + "\n사용 조건과 아이템 소비 방식은 유지됩니다."
+                  "\n확인은 설정만 반영하며, ‘패치 적용’ 시 EXE에 저장됩니다.",
+                  justify="left").grid(row=2, column=0, columnspan=3, pady=12, sticky="w")
+
+        def accept() -> None:
+            try:
+                value = None if original.get() else int(percent.get())
+                if value is not None and not 0 <= value <= 100:
+                    raise ValueError
+            except ValueError:
+                self._show_centered_popup("입력 오류", "발동 확률은 0~100 사이의 정수여야 합니다.",
+                                          kind="error", parent=window)
+                return
+            values = {name: getattr(self._combat_item_chances, name) for name in fields}
+            values[field] = value
+            self._combat_item_chances = CombatItemChances(**values)
+            window.destroy()
+
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=3, column=0, columnspan=3)
+        ttk.Button(buttons, text="확인", command=accept).pack(side="left", padx=4)
+        ttk.Button(buttons, text="취소", command=window.destroy).pack(side="left", padx=4)
+        window.bind("<Escape>", lambda _event: window.destroy())
+        # Withdrawn windows report 1px actual size: set requested geometry first.
+        window.update_idletasks()
+        window.geometry(f"{window.winfo_reqwidth()}x{window.winfo_reqheight()}")
+        self._center_dialog(window)
+        window.deiconify()
+        window.grab_set()
 
     def _show_item_image(self, record: ItemRecord) -> None:
         """Display ITEM.CDS art or the item's linked discovery media."""
@@ -7731,6 +7806,7 @@ class CDSExecutablePatcher(tk.Tk):
                     target.read_bytes(),
                 )
                 city_label_data = target.read_bytes()
+                combat_item_chances = read_combat_item_chances(city_label_data)
                 landing_ship_image_fix_enabled = read_landing_ship_image_fix_state(city_label_data)
                 all_city_inn_save_enabled = read_all_city_inn_save_state(city_label_data)
                 city_discovery_notice_enabled = read_city_discovery_notice_patch_state(city_label_data)
@@ -7790,6 +7866,7 @@ class CDSExecutablePatcher(tk.Tk):
                 discovery_hint_links, discovery_hint_targets,
             )
             self._load_item_records(item_records, item_discovery_media_links)
+            self._combat_item_chances = combat_item_chances
             self._load_figurehead_effect_settings(figurehead_effect_settings)
             self._load_city_records(city_records, trade_good_names, trade_region_goods)
             self._load_facility_area_records(facility_area_records)
@@ -8384,6 +8461,7 @@ class CDSExecutablePatcher(tk.Tk):
                 city_discovery_notice_enabled=self.city_discovery_notice_enabled.get(),
                 world_map_follow_enabled=self.world_map_follow_enabled.get(),
                 all_city_inn_save_enabled=self.all_city_inn_save_enabled.get(),
+                combat_item_chances=self._combat_item_chances,
                 city_label_colors=self.city_label_colors,
                 city_label_outline=self.city_label_outline,
                 city_label_show_nation=self.city_label_show_nation,
@@ -8508,6 +8586,7 @@ class CDSExecutablePatcher(tk.Tk):
             read_trade_region_goods(target),
         )
         self._load_item_records(read_item_records(target), read_item_discovery_media_links(target))
+        self._combat_item_chances = read_combat_item_chances(target.read_bytes())
         self._load_person_records(read_person_records(target))
         self._load_sponsor_records(read_sponsor_records(target))
         for widget, selection, callback in localized_selections:
